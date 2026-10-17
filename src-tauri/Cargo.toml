@@ -1,0 +1,50 @@
+[package]
+name = "diskwizard"
+version = "0.1.0"
+description = "DiskWizard — data recovery. Rust core + Tauri 2 (WebView2) + React/TS Canvas UI."
+authors = ["DiskWizard"]
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+# The `_lib` suffix is necessary so the lib name stays unique and does
+# not conflict with the bin name (Windows name clash, rust issue 8519).
+name = "diskwizard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+
+[features]
+# CI simulation for the UI-screenshots workflow: seeds/flips a
+# simulated activated license so the full tour (incl. the Pro status
+# card and the Activation Gate) can be captured in production-real
+# builds. NEVER enabled in NSIS/MSIX/production builds.
+ci-license-sim = []
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = "allow"
+# The product name "DiskWizard" and platform terms are CamelCase by
+# design; backticking every occurrence hurts doc readability.
+doc_markdown = "allow"
+
+# Spec §16: strip symbols, fat LTO, single unit (the DiskGenie release
+# recipe — same setting and setup).
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = true

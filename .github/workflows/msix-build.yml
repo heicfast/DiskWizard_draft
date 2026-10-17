@@ -1,0 +1,187 @@
+name: MSIX Build (Microsoft Store)
+
+# The Microsoft Store distribution pipeline (DiskGenie architecture):
+# release exe + generated logo assets + the templated AppxManifest →
+# MakeAppx pack → unsigned MSIX artifact. Partner Center validates +
+# SIGNS on submission — that is why we do not sign in CI (the Store's
+# signature is the tamper-evident distribution layer).
+#
+# Identity inputs (workflow_dispatch): set Name = the RESERVED APP
+# NAME in Partner Center and Publisher = the package identity
+# Publisher shown under App management → Product identity (default
+# placeholders build a locally-installable package for dev/testing
+# only — the Store rejects mismatched identity).
+
+on:
+  workflow_dispatch:
+    inputs:
+      store_identity_name:
+        description: "Partner Center package identity Name (reserved app name)"
+        required: false
+        default: "DiskWizard"
+      store_publisher:
+        description: "Partner Center package identity Publisher (CN=…)"
+        required: false
+        default: "CN=DiskWizard"
+  push:
+    branches: [main]
+
+concurrency:
+  group: msix-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msix:
+    name: Windows MSIX package (Store-ready)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the app (release exe, no installer)
+        run: npx tauri build --no-bundle
+        env:
+          CARGO_INCREMENTAL: "0"
+
+      - name: Read the app version
+        id: ver
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          # MSIX versions are 4-part and must increase per submission:
+          # app version + the run number as revision.
+          "version=$version.${{ github.run_number }}" | Set-Content $env:GITHUB_OUTPUT
+
+      - name: Generate the MSIX layout (exe + assets + manifest)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identityName = "${{ github.event.inputs.store_identity_name || 'DiskWizard' }}"
+          $publisher = "${{ github.event.inputs.store_publisher || 'CN=DiskWizard' }}"
+          $version = "${{ steps.ver.outputs.version }}"
+
+          # -- Layout: app files -----------------------------------------
+          $root = "msix-layout"
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$root" | Out-Null
+          $exe = "src-tauri\target\release\diskwizard.exe"
+          if (-not (Test-Path $exe)) { throw "exe not found: $exe" }
+          Copy-Item $exe "$root\DiskWizard.exe"
+          # Tauri 2 embeds the frontend; the release build emits no
+          # side-by-side DLLs (anything new would be copied here).
+
+          # -- Logo assets from the committed icon source ---------------
+          Add-Type -AssemblyName System.Drawing
+          $assets = "$root\Assets"
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          $srcImg = [System.Drawing.Image]::FromFile("$PWD\src-tauri\icons\256x256.png")
+
+          function Save-Square([int]$s, [string]$file) {
+            $bmp = New-Object System.Drawing.Bitmap $s, $s
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($srcImg, 0, 0, $s, $s)
+            $g.Dispose()
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+          }
+          function Save-Wide([int]$w, [int]$h, [string]$file) {
+            # Wide tiles: brand navy backdrop with the centered mark.
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(8, 13, 44))
+            $m = [int]([Math]::Min($w, $h) * 0.8)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($srcImg, [int](($w - $m) / 2), [int](($h - $m) / 2), $m, $m)
+            $g.Dispose()
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+          }
+
+          Save-Square 44 "$assets\44x44-targetsize.png"
+          Save-Square 50 "$assets\StoreLogo.png"
+          Save-Square 150 "$assets\Square150x150Logo.png"
+          Save-Square 310 "$assets\Square310x310Logo.png"
+          Save-Square 480 "$assets\Square44x44Logo.targetsize-480.png"
+          Save-Wide 620 300 "$assets\Wide310x150Logo.scale-400.png"
+          Save-Wide 310 150 "$assets\Wide310x150Logo.scale-200.png"
+          Save-Wide 44 44 "$assets\SmallTile.png"
+          $srcImg.Dispose()
+
+          # -- The AppxManifest -------------------------------------------
+          $manifest = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10">
+  <Identity Name="$identityName" ProcessorArchitecture="x64"
+            Publisher="$publisher" Version="$version" />
+  <Properties>
+    <DisplayName>DiskWizard</DisplayName>
+    <PublisherDisplayName>DiskWizard</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+  </Capabilities>
+  <Applications>
+    <Application Id="DiskWizard" Executable="DiskWizard.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements BackgroundColor="#080D2C"
+          DisplayName="DiskWizard"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\44x44-targetsize.png"
+          Description="DiskWizard — data recovery. Bring your files back." />
+      <Extensions>
+        <desktop:Extension Category="windows.fullTrustProcess" />
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
+"@
+          New-Item -ItemType Directory -Force -Path "$root" | Out-Null
+          $manifest | Set-Content "$root\AppxManifest.xml" -Encoding UTF8
+
+      - name: Locate MakeAppx and pack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $sdk) { throw "makeappx.exe not found" }
+          New-Item -ItemType Directory -Force -Path msix-out | Out-Null
+          & $sdk.FullName pack /d msix-layout /p msix-out\DiskWizard.msix /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed" }
+
+      - name: Upload the MSIX package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiskWizard-unsigned-msix
+          path: msix-out\DiskWizard.msix
+          if-no-files-found: error

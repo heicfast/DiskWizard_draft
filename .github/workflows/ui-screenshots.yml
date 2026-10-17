@@ -1,0 +1,125 @@
+name: UI Screenshots
+
+# The Windows screenshot workflow ("one for one page/mode/action" —
+# the DiskGenie harness adapted). Builds the REAL app (release,
+# embedded frontend), launches with DISKWIZARD_TOUR=1, and captures
+# EXACTLY ONE NAMED FRAME PER TOUR STEP via the title-sync channel
+# (the TourDriver stamps `tNN-name` into the window title; the harness
+# polls it, lets the step settle, and shoots).
+#
+# The tour seeds a simulated activated license through license_sim_set
+# (the mock command surface) so both the working app AND the
+# unlicensed gate states are captured.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ui-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Node cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the app (release exe, no installer)
+        run: npx tauri build --no-bundle
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Capture the tour (title-synced, one frame per step)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+
+          # Launch elevated-less for capture (the exe requires admin:
+          # launch through Start-Process -Verb RunData is unavailable to
+          # non-interactive runners, so the harness runs the exe with the
+          # elevation prompt auto-accepted by the runner session).
+          $proc = Start-Process -FilePath "src-tauri\target\release\diskwizard.exe" `
+            -ArgumentList "" -PassThru
+          Start-Sleep -Seconds 6
+
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public class Win32 {
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+            public struct RECT { public int Left, Top, Right, Bottom; }
+          }
+"@
+          Add-Type -AssemblyName System.Drawing
+
+          function Shoot([string]$name) {
+            $sb = New-Object System.Text.StringBuilder 512
+            [Win32]::GetWindowText($proc.MainWindowHandle, $sb, 512) | Out-Null
+            $title = $sb.ToString()
+            $r = New-Object Win32+RECT
+            [Win32]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
+            $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $hdc = $g.GetHdc()
+            [Win32]::PrintWindow($proc.MainWindowHandle, $hdc, 2) | Out-Null
+            $g.ReleaseHdc($hdc)
+            $bmp.Save("shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "shot: $name (title: $title)"
+          }
+
+          # Poll the title-sync channel; shoot one named frame per step.
+          $last = ""
+          $idle = 0
+          while ($idle -lt 14) {
+            Start-Sleep -Milliseconds 700
+            [Win32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+            $sb = New-Object System.Text.StringBuilder 512
+            [Win32]::GetWindowText($proc.MainWindowHandle, $sb, 512) | Out-Null
+            $title = $sb.ToString()
+            if ($title -ne $last -and $title -like "*DiskWizard · t*") {
+              Shoot ($title -replace '^DiskWizard · ', '')
+              $last = $title
+              $idle = 0
+            } else { $idle++ }
+            if ($title -like "*tour-complete*") { break }
+          }
+          if (-not $last) { Shoot "fallback-frame" }
+
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: shots
+          if-no-files-found: error
