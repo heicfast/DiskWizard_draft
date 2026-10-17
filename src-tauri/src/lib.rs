@@ -74,6 +74,7 @@ pub fn run() {
             commands::mock::connect_demo_device,
             commands::mock::smart_report,
             commands::mock::sdr_diagnose,
+            commands::mock::unlock_bitlocker,
             // Scan lifecycle
             commands::mock::start_scan,
             commands::mock::start_folder_scan,

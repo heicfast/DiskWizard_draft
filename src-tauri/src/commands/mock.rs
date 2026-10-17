@@ -57,13 +57,32 @@ fn license_gate(s: &State<'_, SharedState>) -> Result<(), String> {
 
 /* ── Devices & health (SMART = free tier) ────────────────────────────── */
 
+/// Apply the session's unlock state over a stored device row.
+fn apply_unlock(st: &state::MockState, mut d: Value) -> Value {
+    if let Some(id) = d["id"].as_str() {
+        if st.bitlocker_unlocked.contains(id) {
+            d["health"] = json!("ok");
+            d["bitLocker"] = json!("unlocked");
+        }
+    }
+    d
+}
+
 #[tauri::command]
 pub fn list_devices(s: State<'_, SharedState>) -> Value {
-    let (sd, lost) = {
-        let st = s.lock();
-        (st.sd_connected, st.lost_partition_discovered)
+    let st = s.lock();
+    let inv = data::device_inventory(st.sd_connected, st.lost_partition_discovered);
+    let map = |key: &str| -> Vec<Value> {
+        inv[key]
+            .as_array()
+            .map(|a| a.iter().map(|d| apply_unlock(&st, d.clone())).collect())
+            .unwrap_or_default()
     };
-    data::device_inventory(sd, lost)
+    json!({
+        "localDisks": map("localDisks"),
+        "externalDevices": map("externalDevices"),
+        "diskImages": inv["diskImages"].clone(),
+    })
 }
 
 #[tauri::command]
@@ -98,9 +117,25 @@ pub async fn sdr_diagnose(s: State<'_, SharedState>) -> Result<Value, String> {
 /* ── Scan lifecycle (licensed) ───────────────────────────────────────── */
 
 #[tauri::command]
+pub async fn unlock_bitlocker(s: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
+    // The FVE-service unlock round-trip (password / recovery key
+    // verified through the pipe; the volume mounts decrypted).
+    delay(1_700).await;
+    let device = data::device_by_id(&device_id).ok_or(format!("UNKNOWN_DEVICE. {device_id}"))?;
+    if device["health"].as_str() != Some("bitlocker") {
+        return Err("NOT_LOCKED. This drive is not BitLocker-locked.".into());
+    }
+    s.lock().bitlocker_unlocked.insert(device_id);
+    Ok(json!({ "ok": true, "unlocked": true }))
+}
+
+#[tauri::command]
 pub fn start_scan(s: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
     license_gate(&s)?;
-    let device = data::device_by_id(&device_id).ok_or(format!("UNKNOWN_DEVICE. {device_id}"))?;
+    let device = {
+        let st = s.lock();
+        apply_unlock(&st, data::device_by_id(&device_id).ok_or(format!("UNKNOWN_DEVICE. {device_id}"))?)
+    };
     if device["health"].as_str() == Some("bitlocker") {
         return Err("DEVICE_LOCKED. Unlock BitLocker before scanning this drive.".into());
     }

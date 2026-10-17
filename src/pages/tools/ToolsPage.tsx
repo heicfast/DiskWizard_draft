@@ -185,7 +185,21 @@ export function ToolsPage() {
             body="Cards that are inaccessible, not recognized or prompt to format — restore access first, then recover the files."
             cta="Start Rescue"
             area="tools"
-            onClick={() => useViewStore.getState().showToast("Connect the SD card from Recover Data to start the rescue", "info")}
+            onClick={async () => {
+              // Connect the rescue scenario card, then start its scan —
+              // the SDR access-restore pre-phase runs inside the flow
+              // ("first attempts to restore access to the card and
+              // continues with file recovery").
+              const view = useViewStore.getState();
+              view.showToast("Connecting the SD card…", "info");
+              const id = await useDevicesStore.getState().connectDevice();
+              if (id) {
+                view.setPage("results");
+                void useScanStore.getState().start(id);
+              } else {
+                view.showToast("Could not read the card — reseat it and retry", "info");
+              }
+            }}
           />
           <ToolCard
             icon={WrenchIcon}

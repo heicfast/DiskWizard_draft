@@ -1,6 +1,7 @@
 //! Mock-core state: the scan phase machine, license posture, sessions,
 //! settings and the recovery run — the Rust twin of the TS browser
 //! mock's module-level state.
+use std::collections::HashSet;
 use std::time::Instant;
 
 use serde_json::json;
@@ -108,6 +109,8 @@ pub struct MockState {
     /* devices */
     pub sd_connected: bool,
     pub lost_partition_discovered: bool,
+    /// BitLocker volumes the user unlocked this session (FVE analog).
+    pub bitlocker_unlocked: HashSet<String>,
     /* sessions */
     pub sessions: Vec<serde_json::Value>,
     /* recovery */
@@ -154,6 +157,7 @@ impl MockState {
             results: None,
             sd_connected: false,
             lost_partition_discovered: false,
+            bitlocker_unlocked: HashSet::new(),
             sessions: data::initial_sessions(),
             recover: None,
             license_posture: LicensePosture::Unlicensed,

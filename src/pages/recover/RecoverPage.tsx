@@ -4,7 +4,7 @@
  * Desktop / Select Folder / Disk Image) and recent recovery sessions
  * — the cherry-blossom reference layout, item for item.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowRightIcon,
@@ -29,6 +29,8 @@ import { useScanStore } from "../../state/scan";
 import { useViewStore } from "../../state/view";
 import { useLicenseStore } from "../../state/license";
 import type { StorageDevice } from "../../types";
+import { BitLockerDialog } from "./BitLockerDialog";
+import { LostPartitionDialog } from "./LostPartitionDialog";
 
 /* ── Device icons ────────────────────────────────────────────────────── */
 
@@ -67,7 +69,17 @@ function DeviceGlyph({ device, size = 40 }: { device: StorageDevice; size?: numb
 
 /* ── Drive card ──────────────────────────────────────────────────────── */
 
-function DriveCard({ device, index }: { device: StorageDevice; index: number }) {
+function DriveCard({
+  device,
+  index,
+  onBitLocker,
+  onLostPartition,
+}: {
+  device: StorageDevice;
+  index: number;
+  onBitLocker: (d: StorageDevice) => void;
+  onLostPartition: (d: StorageDevice) => void;
+}) {
   const start = useScanStore((s) => s.start);
   const starting = useScanStore((s) => s.starting);
   const showToast = useViewStore((s) => s.showToast);
@@ -78,11 +90,18 @@ function DriveCard({ device, index }: { device: StorageDevice; index: number }) 
 
   const onScan = () => {
     if (locked) {
-      showToast("Unlock BitLocker to scan this drive", "info");
+      onBitLocker(device);
+      return;
+    }
+    if (lost) {
+      // Direct-repair guidance for eligible lost partitions (the
+      // IMPROVED restoration path from the product notes).
+      onLostPartition(device);
       return;
     }
     if (raw) {
-      // SD Card Rescue path — restore access first, then recover.
+      // SD Card Rescue: restore access first, then continue with
+      // recovery — the rescue pre-phase runs inside the scan flow.
       showToast("SD Card Rescue will restore access, then continue with recovery", "shield");
     }
     void start(device.id);
@@ -214,6 +233,8 @@ export function RecoverPage() {
   const startDiskImage = useScanStore((s) => s.startDiskImage);
   const showToast = useViewStore((s) => s.showToast);
   const licensePosture = useLicenseStore((s) => s.status?.posture ?? null);
+  const [bitLockerDevice, setBitLockerDevice] = useState<StorageDevice | null>(null);
+  const [lostPartitionDevice, setLostPartitionDevice] = useState<StorageDevice | null>(null);
 
   const localDisks = useMemo(() => inventory?.localDisks ?? [], [inventory]);
   const externalDevices = useMemo(() => inventory?.externalDevices ?? [], [inventory]);
@@ -251,7 +272,13 @@ export function RecoverPage() {
         </div>
         <div className="dw-drive-grid">
           {localDisks.map((d, i) => (
-            <DriveCard key={d.id} device={d} index={i} />
+            <DriveCard
+              key={d.id}
+              device={d}
+              index={i}
+              onBitLocker={setBitLockerDevice}
+              onLostPartition={setLostPartitionDevice}
+            />
           ))}
         </div>
       </section>
@@ -262,7 +289,13 @@ export function RecoverPage() {
         </div>
         <div className="dw-drive-grid">
           {externalDevices.map((d, i) => (
-            <DriveCard key={d.id} device={d} index={i} />
+            <DriveCard
+              key={d.id}
+              device={d}
+              index={i}
+              onBitLocker={setBitLockerDevice}
+              onLostPartition={setLostPartitionDevice}
+            />
           ))}
           <motion.button
             type="button"
@@ -340,6 +373,9 @@ export function RecoverPage() {
           <span className="dw-link-inline">Disk health monitoring stays free in Disk Tools.</span>
         </p>
       )}
+
+      <BitLockerDialog device={bitLockerDevice} onClose={() => setBitLockerDevice(null)} />
+      <LostPartitionDialog device={lostPartitionDevice} onClose={() => setLostPartitionDevice(null)} />
     </div>
   );
 }

@@ -90,6 +90,8 @@ let inventory: DeviceInventory = {
 /** Once a deep scan has completed anywhere, lost partitions surface in
  * the inventory ("Also lost partitions are displayed here"). */
 let lostPartitionDiscovered = false;
+/** BitLocker volumes the user unlocked this session (FVE pipe analog). */
+const bitlockerUnlocked = new Set<string>();
 /** The demo SD card joins after "Connect a device". */
 let sdCardConnected = false;
 
@@ -127,7 +129,11 @@ const TICK_MS = 220;
 
 function deviceById(id: string): StorageDevice | undefined {
   const all = [...inventory.localDisks, ...inventory.externalDevices, ...(sdCardConnected ? [SDR_DEVICE] : []), ...(lostPartitionDiscovered ? [LOST_PARTITION] : [])];
-  return all.find((d) => d.id === id);
+  const found = all.find((d) => d.id === id);
+  // Apply the session's unlock state over the stored row.
+  return found && bitlockerUnlocked.has(found.id)
+    ? { ...found, health: "ok" as const, bitLocker: "unlocked" as const }
+    : found;
 }
 
 function nowSec(): number {
@@ -452,9 +458,13 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
   switch (cmd) {
     /* ── Devices & health (SMART = free tier) ───────────────────── */
     case "list_devices": {
+      const applyUnlock = (d: StorageDevice): StorageDevice =>
+        bitlockerUnlocked.has(d.id)
+          ? { ...d, health: "ok" as const, bitLocker: "unlocked" as const }
+          : d;
       const out: DeviceInventory = {
-        localDisks: [...inventory.localDisks, ...(lostPartitionDiscovered ? [LOST_PARTITION] : [])],
-        externalDevices: [...inventory.externalDevices, ...(sdCardConnected ? [SDR_DEVICE] : [])],
+        localDisks: [...inventory.localDisks, ...(lostPartitionDiscovered ? [LOST_PARTITION] : [])].map(applyUnlock),
+        externalDevices: [...inventory.externalDevices, ...(sdCardConnected ? [SDR_DEVICE] : [])].map(applyUnlock),
         diskImages: [...inventory.diskImages],
       };
       return out;
@@ -475,6 +485,18 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       if (!dev) throw `UNKNOWN_DEVICE. ${id}`;
       const report: SmartReport = smartReportFor(dev);
       return report;
+    }
+    case "unlock_bitlocker": {
+      // The FVE-service unlock round-trip (password / recovery key
+      // verified through the pipe; the volume mounts decrypted).
+      await delay(1_700);
+      const id = String(args?.deviceId ?? "");
+      const dev = deviceById(id);
+      if (!dev) throw `UNKNOWN_DEVICE. ${id}`;
+      if (dev.health !== "bitlocker") throw "NOT_LOCKED. This drive is not BitLocker-locked.";
+      bitlockerUnlocked.add(id);
+      emitMockEvent(EV_DEVICES_CHANGED, null);
+      return { ok: true, unlocked: true };
     }
     case "sdr_diagnose": {
       // SD Card Rescue: restore access first, then recovery continues.

@@ -4,7 +4,7 @@
  * license dialog + gate coordination, and the CI tour driver
  * (DISKWIZARD_TOUR=1 / ?tour=1 — the agent screenshot channel).
  */
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { TitleBar } from "./shell/TitleBar";
 import { Sidebar } from "./shell/Sidebar";
@@ -75,10 +75,17 @@ function AppShell() {
     }
   }, [licenseGate, openLicenseDialog, dismissGate]);
 
-  // While a scan is live, keep the user on the results page (the scan
-  // runs inside the results view — the CDetailPage architecture).
+  // A NEWLY STARTED scan lands the user on the results page once (the
+  // scan runs inside the results view — the CDetailPage architecture);
+  // afterwards the sidebar stays free to browse (health, settings…)
+  // while the scan widget keeps reporting live.
+  const lastAutoSwitch = useRef(0);
   useEffect(() => {
-    if (progress && page !== "results") setPage("results");
+    if (!progress) return;
+    if (progress.generation !== lastAutoSwitch.current) {
+      lastAutoSwitch.current = progress.generation;
+      if (page !== "results") setPage("results");
+    }
   }, [progress, page, setPage]);
 
   const booted = bootStage === "ready";
