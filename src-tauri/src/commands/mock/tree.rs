@@ -3,7 +3,7 @@
 //! with the category mix, recoverability grading, the RAW-carve
 //! branches (File Path Lost / Tags Extracted) and per-category count
 //! roll-ups reported at the simulated find scale.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Mulberry32 (exact 32-bit translation of the TS mock's PRNG —
 /// same algorithm, same [0,1) output range) so results are
@@ -16,7 +16,7 @@ impl Rng {
         let mut t = self.0;
         t = (t ^ (t >> 15)).wrapping_mul(1 | t);
         t = t.wrapping_add((t ^ (t >> 7)).wrapping_mul(61 | t)) ^ t;
-        u32::from(t ^ (t >> 14)) as f64 / 4_294_967_296.0
+        (t ^ (t >> 14)) as f64 / 4_294_967_296.0
     }
     fn pick<'a, T>(&mut self, arr: &'a [T]) -> &'a T {
         &arr[(self.next() * arr.len() as f64) as usize % arr.len()]
@@ -24,34 +24,83 @@ impl Rng {
 }
 
 const PHOTO_NAMES: [&str; 20] = [
-    "Vacation Photo", "Family", "Sunset Over Lake", "Birthday Party", "IMG_2023",
-    "DSC_0481", "wedding-ceremony", "Tokyo Street at Night", "Cherry Blossoms",
-    "Mountain Hike", "Screenshot", "Dinner with Friends", "Graduation",
-    "PXL_20231024", "New Year Fireworks", "Beach Day", "team-offsite",
-    "Product Prototype", "Whiteboard Session", "Pet Portrait",
+    "Vacation Photo",
+    "Family",
+    "Sunset Over Lake",
+    "Birthday Party",
+    "IMG_2023",
+    "DSC_0481",
+    "wedding-ceremony",
+    "Tokyo Street at Night",
+    "Cherry Blossoms",
+    "Mountain Hike",
+    "Screenshot",
+    "Dinner with Friends",
+    "Graduation",
+    "PXL_20231024",
+    "New Year Fireworks",
+    "Beach Day",
+    "team-offsite",
+    "Product Prototype",
+    "Whiteboard Session",
+    "Pet Portrait",
 ];
 const PHOTO_EXT: [&str; 7] = ["jpg", "jpeg", "png", "heic", "webp", "gif", "tiff"];
 const DOC_NAMES: [&str; 17] = [
-    "Project Proposal", "Invoice", "Resume", "Budget 2026", "Meeting Notes",
-    "Contract Draft", "Thesis Chapter", "Tax Return", "Lease Agreement",
-    "Quarterly Report", "Presentation Deck", "Recipe Collection", "Budget",
-    "Insurance Policy", "Cover Letter", "Business Plan", "Whiteboard Sketch",
+    "Project Proposal",
+    "Invoice",
+    "Resume",
+    "Budget 2026",
+    "Meeting Notes",
+    "Contract Draft",
+    "Thesis Chapter",
+    "Tax Return",
+    "Lease Agreement",
+    "Quarterly Report",
+    "Presentation Deck",
+    "Recipe Collection",
+    "Budget",
+    "Insurance Policy",
+    "Cover Letter",
+    "Business Plan",
+    "Whiteboard Sketch",
 ];
 const DOC_EXT: [&str; 8] = ["docx", "pdf", "xlsx", "pptx", "doc", "txt", "md", "csv"];
 const VIDEO_NAMES: [&str; 12] = [
-    "holiday-4k", "birthday-recap", "Screen Recording", "Gameplay", "Drone Flight",
-    "DJI_0214", "wedding-highlights", "concert-clip", "timelapse-sunset",
-    "MVI_1304", "interview-take3", "screen-capture-bug",
+    "holiday-4k",
+    "birthday-recap",
+    "Screen Recording",
+    "Gameplay",
+    "Drone Flight",
+    "DJI_0214",
+    "wedding-highlights",
+    "concert-clip",
+    "timelapse-sunset",
+    "MVI_1304",
+    "interview-take3",
+    "screen-capture-bug",
 ];
 const VIDEO_EXT: [&str; 5] = ["mp4", "mov", "avi", "mkv", "m4v"];
 const AUDIO_NAMES: [&str; 8] = [
-    "Podcast Episode", "Voice Memo", "Demo Track", "Lecture Recording",
-    "mixtape-final", "Interview", "VoiceNotes", "field-recording",
+    "Podcast Episode",
+    "Voice Memo",
+    "Demo Track",
+    "Lecture Recording",
+    "mixtape-final",
+    "Interview",
+    "VoiceNotes",
+    "field-recording",
 ];
 const AUDIO_EXT: [&str; 5] = ["mp3", "wav", "m4a", "flac", "aac"];
 const ARCHIVE_NAMES: [&str; 8] = [
-    "backup-2026", "Photos Archive", "project-export", "old-website",
-    "tax-documents", "disk-image", "downloads-bundle", "design-assets",
+    "backup-2026",
+    "Photos Archive",
+    "project-export",
+    "old-website",
+    "tax-documents",
+    "disk-image",
+    "downloads-bundle",
+    "design-assets",
 ];
 const ARCHIVE_EXT: [&str; 5] = ["zip", "rar", "7z", "tar.gz", "iso"];
 
@@ -64,12 +113,42 @@ struct Profile {
 
 fn profile(device_id: &str) -> Profile {
     match device_id {
-        "usb-F" => Profile { rows: 2_560, mix: [34.0, 16.0, 9.0, 22.0, 5.0, 1.0, 13.0], root: "USB Drive (F:)", duration: 756 },
-        "disk0-part2" => Profile { rows: 3_200, mix: [18.0, 12.0, 8.0, 26.0, 7.0, 2.0, 27.0], root: "Windows (C:)", duration: 2_340 },
-        "disk1-part1" => Profile { rows: 2_880, mix: [22.0, 24.0, 10.0, 20.0, 8.0, 1.0, 15.0], root: "Data (D:)", duration: 1_580 },
-        "disk1-part2" => Profile { rows: 2_200, mix: [10.0, 6.0, 4.0, 44.0, 12.0, 1.0, 23.0], root: "Projects (E:)", duration: 720 },
-        "ssd-G" => Profile { rows: 2_400, mix: [24.0, 28.0, 8.0, 18.0, 10.0, 1.0, 11.0], root: "Portable SSD (G:)", duration: 1_920 },
-        _ => Profile { rows: 1_800, mix: [26.0, 14.0, 8.0, 24.0, 8.0, 1.0, 19.0], root: "Scan", duration: 640 },
+        "usb-F" => Profile {
+            rows: 2_560,
+            mix: [34.0, 16.0, 9.0, 22.0, 5.0, 1.0, 13.0],
+            root: "USB Drive (F:)",
+            duration: 756,
+        },
+        "disk0-part2" => Profile {
+            rows: 3_200,
+            mix: [18.0, 12.0, 8.0, 26.0, 7.0, 2.0, 27.0],
+            root: "Windows (C:)",
+            duration: 2_340,
+        },
+        "disk1-part1" => Profile {
+            rows: 2_880,
+            mix: [22.0, 24.0, 10.0, 20.0, 8.0, 1.0, 15.0],
+            root: "Data (D:)",
+            duration: 1_580,
+        },
+        "disk1-part2" => Profile {
+            rows: 2_200,
+            mix: [10.0, 6.0, 4.0, 44.0, 12.0, 1.0, 23.0],
+            root: "Projects (E:)",
+            duration: 720,
+        },
+        "ssd-G" => Profile {
+            rows: 2_400,
+            mix: [24.0, 28.0, 8.0, 18.0, 10.0, 1.0, 11.0],
+            root: "Portable SSD (G:)",
+            duration: 1_920,
+        },
+        _ => Profile {
+            rows: 1_800,
+            mix: [26.0, 14.0, 8.0, 24.0, 8.0, 1.0, 19.0],
+            root: "Scan",
+            duration: 640,
+        },
     }
 }
 
@@ -119,7 +198,15 @@ fn hash_str(s: &str) -> u64 {
     h
 }
 
-const CATS: [&str; 7] = ["images", "videos", "audio", "documents", "archives", "email", "other"];
+const CATS: [&str; 7] = [
+    "images",
+    "videos",
+    "audio",
+    "documents",
+    "archives",
+    "email",
+    "other",
+];
 
 fn size_for(cat: usize, rng: &mut Rng) -> u64 {
     let r = rng.next();
@@ -195,36 +282,53 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
 
         // Name + ext.
         let (base, ext): (String, String) = match cat {
-            0 => ((*rng.pick(&PHOTO_NAMES)).to_string(), (*rng.pick(&PHOTO_EXT)).to_string()),
-            1 => ((*rng.pick(&VIDEO_NAMES)).to_string(), (*rng.pick(&VIDEO_EXT)).to_string()),
-            2 => ((*rng.pick(&AUDIO_NAMES)).to_string(), (*rng.pick(&AUDIO_EXT)).to_string()),
+            0 => (
+                (*rng.pick(&PHOTO_NAMES)).to_string(),
+                (*rng.pick(&PHOTO_EXT)).to_string(),
+            ),
+            1 => (
+                (*rng.pick(&VIDEO_NAMES)).to_string(),
+                (*rng.pick(&VIDEO_EXT)).to_string(),
+            ),
+            2 => (
+                (*rng.pick(&AUDIO_NAMES)).to_string(),
+                (*rng.pick(&AUDIO_EXT)).to_string(),
+            ),
             3 => (
                 if rng.next() < 0.4 {
-                    format!("{} {}", rng.pick(&DOC_NAMES), 2024 + (rng.next() * 3.0) as u64)
+                    format!(
+                        "{} {}",
+                        rng.pick(&DOC_NAMES),
+                        2024 + (rng.next() * 3.0) as u64
+                    )
                 } else {
                     rng.pick(&DOC_NAMES).to_string()
                 },
                 (*rng.pick(&DOC_EXT)).to_string(),
             ),
-            4 => ((*rng.pick(&ARCHIVE_NAMES)).to_string(), (*rng.pick(&ARCHIVE_EXT)).to_string()),
+            4 => (
+                (*rng.pick(&ARCHIVE_NAMES)).to_string(),
+                (*rng.pick(&ARCHIVE_EXT)).to_string(),
+            ),
             _ => (
-                rng.pick(&["settings", "config", "index", "cache", "db"]).to_string(),
+                rng.pick(&["settings", "config", "index", "cache", "db"])
+                    .to_string(),
                 rng.pick(&["dat", "db", "html", "exe"]).to_string(),
             ),
         };
-        let mut name = if origin == "lost-name" {
-            format!(
-                "{}{:05}",
-                if cat == 0 { "IMG" } else { "FILE" },
-                10_000 + i
-            )
+        let name = if origin == "lost-name" {
+            format!("{}{:05}", if cat == 0 { "IMG" } else { "FILE" }, 10_000 + i)
         } else if origin == "version" {
             format!("{base} (v2)")
         } else {
             base.clone()
         };
         let ext = if origin == "lost-name" {
-            if cat == 0 { "jpg".into() } else { "bin".into() }
+            if cat == 0 {
+                "jpg".into()
+            } else {
+                "bin".into()
+            }
         } else {
             ext
         };
@@ -237,10 +341,38 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
         // Grade.
         let g = rng.next();
         let grade = match origin {
-            "existing" => if g < 0.82 { "excellent" } else if g < 0.97 { "good" } else { "poor" },
-            "deleted" => if g < 0.55 { "excellent" } else if g < 0.88 { "good" } else { "poor" },
-            "tags" => if g < 0.6 { "excellent" } else { "good" },
-            _ => if g < 0.85 { "good" } else { "poor" },
+            "existing" => {
+                if g < 0.82 {
+                    "excellent"
+                } else if g < 0.97 {
+                    "good"
+                } else {
+                    "poor"
+                }
+            }
+            "deleted" => {
+                if g < 0.55 {
+                    "excellent"
+                } else if g < 0.88 {
+                    "good"
+                } else {
+                    "poor"
+                }
+            }
+            "tags" => {
+                if g < 0.6 {
+                    "excellent"
+                } else {
+                    "good"
+                }
+            }
+            _ => {
+                if g < 0.85 {
+                    "good"
+                } else {
+                    "poor"
+                }
+            }
         };
 
         // Folder (carve branches override).
@@ -263,7 +395,14 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
         let path = format!("{folder}\\{name}.{ext}");
 
         let dims = if cat == 0 && rng.next() > 0.72 {
-            let sets = [(4032, 3024), (3024, 4032), (6000, 4000), (1920, 1080), (3456, 4608), (5472, 3648)];
+            let sets = [
+                (4032, 3024),
+                (3024, 4032),
+                (6000, 4000),
+                (1920, 1080),
+                (3456, 4608),
+                (5472, 3648),
+            ];
             let d = *rng.pick(&sets);
             Some(d)
         } else {
@@ -291,7 +430,10 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
 
     // Roll up dir sizes (children after parents by construction; walk
     // in reverse so leaves settle first).
-    let mut sizes: Vec<i128> = nodes.iter().map(|n| n["size"].as_u64().unwrap_or(0) as i128).collect();
+    let mut sizes: Vec<i128> = nodes
+        .iter()
+        .map(|n| n["size"].as_u64().unwrap_or(0) as i128)
+        .collect();
     for i in (0..nodes.len()).rev() {
         if let Some(p) = nodes[i]["parentId"].as_i64() {
             if p >= 0 {

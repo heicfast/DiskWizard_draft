@@ -44,6 +44,19 @@ CI builds the real artifacts (same pipelines as DiskGenie):
 
 `?tour=1` (browser) or `DISKWIZARD_TOUR=1` (packaged) runs the TourDriver: it cycles every page, phase and dialog state, stamping `DiskWizard · tNN-name` into the title — the screenshot harness polls the title and captures exactly one frame per step. `window.__DW_TOUR_STATE__` exposes the current step; `window.__DW_MOCK__.seedPro()` (browser-dev) seeds a Pro license.
 
+## Demo license keys (mock-core)
+
+Keys are `DW` + 20 Crockford base32 chars (no I/L/O/U), grouped `DW-XXXXX-XXXXX-XXXXX-XXXXX`. The mock activation accepts any shape-valid key; these carry marker words (Crockford-safe 5-char leet) that select the typed server responses:
+
+| Key | Result |
+| --- | --- |
+| `DW-TESTS-DEM00-PR000-C0DE0` | Activates — **Lifetime** tier |
+| `DW-Y0RKE-DEM00-PR000-C0DE0` | Activates — **Yearly** tier (expires in 365 days) |
+| `DW-WR0NG-00000-00000-00000` | `KEY_NOT_FOUND` — invalid key copy |
+| `DW-EXP1R-00000-00000-00000` | `LICENSE_EXPIRED` — renew copy |
+| `DW-REV0K-00000-00000-00000` | `KEY_REVOKED` — contact-support copy |
+| `DW-TAKEN-00000-00000-00000` | `DEVICE_SLOT_TAKEN` — move-license copy |
+
 ## Layout
 
 ```

@@ -32,13 +32,17 @@
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; frame-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msix"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -46,7 +50,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "copyright": "© 2026 DiskWizard",
+    "copyright": "\u00a9 2026 DiskWizard",
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"

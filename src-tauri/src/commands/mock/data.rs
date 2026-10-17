@@ -1,13 +1,15 @@
 //! Mock-core seed data: the device inventory (the cherry-blossom
 //! reference page, byte-exact), SMART reports, cloud drives, recovery
 //! destinations, and the per-target scan scale tables.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 pub const SDR_DEVICE_ID: &str = "sd-H";
 
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-fn gb(v: f64) -> u64 { (v * GB) as u64 }
+fn gb(v: f64) -> u64 {
+    (v * GB) as u64
+}
 
 /// The folder names the searching label cycles through (mirrors the
 /// TS mock's FOLDER_TOUR).
@@ -24,37 +26,119 @@ pub const FOLDER_TOUR: [&str; 10] = [
     "Users\\Alex\\Desktop",
 ];
 
-fn device(
-    id: &str,
-    name: &str,
-    letter: Option<&str>,
-    kind: &str,
-    fs: &str,
+/// Named-field device builder input (12 positional args were a
+/// readability liability at call sites — and past clippy's arg budget).
+struct DeviceSpec {
+    id: &'static str,
+    name: &'static str,
+    letter: Option<&'static str>,
+    kind: &'static str,
+    fs: &'static str,
     used: f64,
     total: f64,
-    health: &str,
-    bitlocker: &str,
-    trim: Option<&str>,
+    health: &'static str,
+    bitlocker: &'static str,
+    trim: Option<&'static str>,
     is_system: bool,
     disk_index: u64,
-) -> Value {
+}
+
+fn device(s: DeviceSpec) -> Value {
     json!({
-        "id": id, "name": name, "letter": letter, "kind": kind,
-        "fileSystem": fs, "used": gb(used), "total": gb(total),
-        "health": health, "bitLocker": bitlocker, "trim": trim,
-        "isSystem": is_system, "diskIndex": disk_index,
+        "id": s.id, "name": s.name, "letter": s.letter, "kind": s.kind,
+        "fileSystem": s.fs, "used": gb(s.used), "total": gb(s.total),
+        "health": s.health, "bitLocker": s.bitlocker, "trim": s.trim,
+        "isSystem": s.is_system, "diskIndex": s.disk_index,
     })
 }
 
 /// The full inventory (local + external), mirroring the reference.
 fn all_devices() -> Vec<Value> {
     vec![
-        device("disk0-part2", "Windows (C:)", Some("C:"), "ssd", "NTFS", 120.5, 232.3, "ok", "none", Some("on"), true, 0),
-        device("disk1-part1", "Data (D:)", Some("D:"), "hdd", "NTFS", 312.6, 931.5, "ok", "none", None, false, 1),
-        device("disk1-part2", "Projects (E:)", Some("E:"), "hdd", "NTFS", 78.4, 500.0, "ok", "none", None, false, 1),
-        device("disk2-part1", "Backup (H:)", Some("H:"), "hdd", "NTFS", 1_402.0, 2_000.0, "bitlocker", "locked", None, false, 2),
-        device("usb-F", "USB Drive (F:)", Some("F:"), "usb", "exFAT", 14.8, 32.0, "ok", "none", None, false, 3),
-        device("ssd-G", "Portable SSD (G:)", Some("G:"), "portable-ssd", "NTFS", 256.1, 500.0, "ok", "none", Some("on"), false, 4),
+        device(DeviceSpec {
+            id: "disk0-part2",
+            name: "Windows (C:)",
+            letter: Some("C:"),
+            kind: "ssd",
+            fs: "NTFS",
+            used: 120.5,
+            total: 232.3,
+            health: "ok",
+            bitlocker: "none",
+            trim: Some("on"),
+            is_system: true,
+            disk_index: 0,
+        }),
+        device(DeviceSpec {
+            id: "disk1-part1",
+            name: "Data (D:)",
+            letter: Some("D:"),
+            kind: "hdd",
+            fs: "NTFS",
+            used: 312.6,
+            total: 931.5,
+            health: "ok",
+            bitlocker: "none",
+            trim: None,
+            is_system: false,
+            disk_index: 1,
+        }),
+        device(DeviceSpec {
+            id: "disk1-part2",
+            name: "Projects (E:)",
+            letter: Some("E:"),
+            kind: "hdd",
+            fs: "NTFS",
+            used: 78.4,
+            total: 500.0,
+            health: "ok",
+            bitlocker: "none",
+            trim: None,
+            is_system: false,
+            disk_index: 1,
+        }),
+        device(DeviceSpec {
+            id: "disk2-part1",
+            name: "Backup (H:)",
+            letter: Some("H:"),
+            kind: "hdd",
+            fs: "NTFS",
+            used: 1_402.0,
+            total: 2_000.0,
+            health: "bitlocker",
+            bitlocker: "locked",
+            trim: None,
+            is_system: false,
+            disk_index: 2,
+        }),
+        device(DeviceSpec {
+            id: "usb-F",
+            name: "USB Drive (F:)",
+            letter: Some("F:"),
+            kind: "usb",
+            fs: "exFAT",
+            used: 14.8,
+            total: 32.0,
+            health: "ok",
+            bitlocker: "none",
+            trim: None,
+            is_system: false,
+            disk_index: 3,
+        }),
+        device(DeviceSpec {
+            id: "ssd-G",
+            name: "Portable SSD (G:)",
+            letter: Some("G:"),
+            kind: "portable-ssd",
+            fs: "NTFS",
+            used: 256.1,
+            total: 500.0,
+            health: "ok",
+            bitlocker: "none",
+            trim: Some("on"),
+            is_system: false,
+            disk_index: 4,
+        }),
     ]
 }
 
@@ -70,37 +154,37 @@ pub fn device_inventory(sd_connected: bool, lost_partition_discovered: bool) -> 
     let all = all_devices();
     let mut local: Vec<Value> = all.iter().filter(|d| is_local(d)).cloned().collect();
     if lost_partition_discovered {
-        local.push(device(
-            "disk1-lost0",
-            "Lost Partition (912.4 GB)",
-            None,
-            "hdd",
-            "NTFS",
-            0.0,
-            912.4,
-            "lost",
-            "none",
-            None,
-            false,
-            1,
-        ));
+        local.push(device(DeviceSpec {
+            id: "disk1-lost0",
+            name: "Lost Partition (912.4 GB)",
+            letter: None,
+            kind: "hdd",
+            fs: "NTFS",
+            used: 0.0,
+            total: 912.4,
+            health: "lost",
+            bitlocker: "none",
+            trim: None,
+            is_system: false,
+            disk_index: 1,
+        }));
     }
     let mut external: Vec<Value> = all.iter().filter(|d| !is_local(d)).cloned().collect();
     if sd_connected {
-        external.push(device(
-            SDR_DEVICE_ID,
-            "SD Card (H:)",
-            Some("H:"),
-            "sdcard",
-            "RAW",
-            59.4,
-            64.0,
-            "raw",
-            "none",
-            None,
-            false,
-            5,
-        ));
+        external.push(device(DeviceSpec {
+            id: SDR_DEVICE_ID,
+            name: "SD Card (H:)",
+            letter: Some("H:"),
+            kind: "sdcard",
+            fs: "RAW",
+            used: 59.4,
+            total: 64.0,
+            health: "raw",
+            bitlocker: "none",
+            trim: None,
+            is_system: false,
+            disk_index: 5,
+        }));
     }
     json!({ "localDisks": local, "externalDevices": external, "diskImages": [] })
 }
@@ -132,14 +216,41 @@ pub fn sectors_total(device_id: &str) -> u64 {
 
 /* ── SMART reports (CrystalDiskInfo-lineage) ─────────────────────────── */
 
-fn attr(id: u64, name: &str, current: u64, worst: u64, threshold: u64, raw: &str, status: &str) -> Value {
+fn attr(
+    id: u64,
+    name: &str,
+    current: u64,
+    worst: u64,
+    threshold: u64,
+    raw: &str,
+    status: &str,
+) -> Value {
     json!({ "id": id, "name": name, "current": current, "worst": worst, "threshold": threshold, "rawValue": raw, "status": status })
 }
 
 pub fn smart_report(device_id: &str) -> Value {
-    let (model, firmware, serial, health, temp, hours, cycles, writes, iface, attrs): (&str, &str, &str, &str, u64, u64, u64, f64, &str, Vec<Value>) = match device_id {
+    let (model, firmware, serial, health, temp, hours, cycles, writes, iface, attrs): (
+        &str,
+        &str,
+        &str,
+        &str,
+        u64,
+        u64,
+        u64,
+        f64,
+        &str,
+        Vec<Value>,
+    ) = match device_id {
         "disk0-part2" => (
-            "Samsung SSD 990 PRO 2TB", "3B2QJXA7", "S6Z1NJ0T812345K", "good", 38, 4_812, 1_204, 96.4, "PCIe 4.0 x4 NVMe",
+            "Samsung SSD 990 PRO 2TB",
+            "3B2QJXA7",
+            "S6Z1NJ0T812345K",
+            "good",
+            38,
+            4_812,
+            1_204,
+            96.4,
+            "PCIe 4.0 x4 NVMe",
             vec![
                 attr(5, "Reallocated Sectors Count", 100, 100, 10, "0", "ok"),
                 attr(9, "Power-On Hours", 96, 96, 0, "4,812", "ok"),
@@ -150,7 +261,15 @@ pub fn smart_report(device_id: &str) -> Value {
             ],
         ),
         "usb-F" => (
-            "SanDisk Ultra Fit 3.2", "1.03", "060A1F2B3C4D5E6F", "good", 41, 1_095, 620, 11.8, "USB 3.2 Gen1",
+            "SanDisk Ultra Fit 3.2",
+            "1.03",
+            "060A1F2B3C4D5E6F",
+            "good",
+            41,
+            1_095,
+            620,
+            11.8,
+            "USB 3.2 Gen1",
             vec![
                 attr(5, "Reallocated Sectors Count", 100, 100, 10, "0", "ok"),
                 attr(9, "Power-On Hours", 98, 98, 0, "1,095", "ok"),
@@ -159,7 +278,15 @@ pub fn smart_report(device_id: &str) -> Value {
             ],
         ),
         "ssd-G" => (
-            "SanDisk Extreme V2 2TB", "1.00.04", "AA2303F987654W", "caution", 46, 3_211, 415, 842.9, "USB 3.2 Gen2 NVMe",
+            "SanDisk Extreme V2 2TB",
+            "1.00.04",
+            "AA2303F987654W",
+            "caution",
+            46,
+            3_211,
+            415,
+            842.9,
+            "USB 3.2 Gen2 NVMe",
             vec![
                 attr(5, "Reallocated Sectors Count", 100, 100, 10, "0", "ok"),
                 attr(9, "Power-On Hours", 91, 91, 0, "3,211", "ok"),
@@ -170,7 +297,15 @@ pub fn smart_report(device_id: &str) -> Value {
             ],
         ),
         _ => (
-            "WDC WD40EZFX-68BKR10", "81.00A81", "WD-WX32A7R61294KL", "good", 33, 18_446, 987, 148.2, "SATA III",
+            "WDC WD40EZFX-68BKR10",
+            "81.00A81",
+            "WD-WX32A7R61294KL",
+            "good",
+            33,
+            18_446,
+            987,
+            148.2,
+            "SATA III",
             vec![
                 attr(5, "Reallocated Sectors Count", 100, 100, 36, "0", "ok"),
                 attr(9, "Power-On Hours", 89, 89, 0, "18,446", "ok"),
@@ -210,9 +345,7 @@ pub fn cloud_drive(id: &str) -> Value {
     cloud_drives()
         .as_array()
         .and_then(|a| a.iter().find(|d| d["id"] == json!(id)).cloned())
-        .unwrap_or_else(|| {
-            json!({ "id": "cloud-icloud", "label": "iCloud Drive" })
-        })
+        .unwrap_or_else(|| json!({ "id": "cloud-icloud", "label": "iCloud Drive" }))
 }
 
 /* ── Recovery destinations ───────────────────────────────────────────── */
@@ -272,9 +405,18 @@ pub fn initial_sessions() -> Vec<Value> {
 /// The recovery progress's current-file pool.
 pub fn current_file(i: u64) -> String {
     const POOL: [&str; 12] = [
-        "Vacation Photo.jpg", "Project Proposal.docx", "holiday-4k.mp4", "Family.png",
-        "Invoice 2026-03.pdf", "Podcast Episode 12.mp3", "backup-2026.zip", "IMG_4812.jpg",
-        "Thesis Chapter 3.docx", "Drone Flight 04.mov", "Demo Track.wav", "Resume.pdf",
+        "Vacation Photo.jpg",
+        "Project Proposal.docx",
+        "holiday-4k.mp4",
+        "Family.png",
+        "Invoice 2026-03.pdf",
+        "Podcast Episode 12.mp3",
+        "backup-2026.zip",
+        "IMG_4812.jpg",
+        "Thesis Chapter 3.docx",
+        "Drone Flight 04.mov",
+        "Demo Track.wav",
+        "Resume.pdf",
     ];
     POOL[(i * 7) as usize % POOL.len()].to_string()
 }

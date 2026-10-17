@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DiskWizard MSIX manifest TEMPLATE (packaged by .github/workflows/msix-build.yml).
+
+  Placeholders (substituted in CI):
+    __IDENTITY_NAME__  Partner Center package identity Name (the reserved
+                       app name) — workflow input store_identity_name.
+    __PUBLISHER__      Partner Center package identity Publisher (CN=…) —
+                       workflow input store_publisher.
+    __VERSION__        App version + CI run number (4-part, monotonic).
+
+  Capabilities:
+    runFullTrust  the standard restricted capability for packaged desktop
+                  (Win32) apps — auto-granted for the desktop bridge. The
+                  embedded requireAdministrator manifest still raises the
+                  real UAC prompt at launch (raw-disk access).
+    internetClient  license validation + update services.
+
+  Assets: the committed DiskWizard brand-kit MSIX set (packaging/msix/
+  Assets — scale + targetsize families); the workflow materialises the
+  three BASE names (StoreLogo.png, Square44x44Logo.png, Square150x150
+  Logo.png) from the scale-100 variants so the manifest can use canonical
+  base-name references with automatic scale selection.
+
+  MinVersion 10.0.19041.0: the WebView2 Runtime is inbox/preinstalled
+  there (MSIX cannot embed the NSIS bootstrapper).
+-->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="mp uap rescap">
+  <Identity Name="__IDENTITY_NAME__"
+            Publisher="__PUBLISHER__"
+            Version="__VERSION__"
+            ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>DiskWizard</DisplayName>
+    <PublisherDisplayName>DiskWizard</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>DiskWizard — data recovery. Bring your files back.</Description>
+  </Properties>
+  <Resources>
+    <Resource Language="en-US" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+  </Capabilities>
+  <Applications>
+    <Application Id="DiskWizard"
+                 Executable="DiskWizard.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="DiskWizard"
+                          Description="DiskWizard — data recovery. Bring your files back."
+                          BackgroundColor="#080D2C"
+                          Square44x44Logo="Assets\Square44x44Logo.png"
+                          Square150x150Logo="Assets\Square150x150Logo.png" />
+    </Application>
+  </Applications>
+</Package>

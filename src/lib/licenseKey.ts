@@ -16,30 +16,44 @@ export const KEY_NORMALIZED_LEN = KEY_PREFIX.length + KEY_GROUPS * KEY_GROUP_LEN
 /** Display length including separators: DW-XXXXX-XXXXX-XXXXX-XXXXX. */
 export const KEY_DISPLAY_LEN = KEY_NORMALIZED_LEN + KEY_GROUPS; // 3 dashes + 1 prefix dash
 
-const CROCKFORD = /^[0-9A-Z]+$/;
+/** Crockford base32 alphabet (excludes I, L, O, U — no confusables).
+ * The DW prefix is exempt (checked separately); the 20-char body
+ * must draw only from this alphabet — same contract as the donor
+ * licensing architecture and the server's normalized-hash form. */
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /** Uppercase + strip everything that is not alphanumeric. */
 export function normalizeKey(raw: string): string {
   return raw.toUpperCase().replace(/[^0-9A-Z]/g, "");
 }
 
-/** True when the normalized form is exactly 22 Crockford-safe chars. */
+/** True when the normalized form is exactly DW + 20 Crockford chars. */
 export function isValidKeyShape(raw: string): boolean {
   const n = normalizeKey(raw);
-  return n.length === KEY_NORMALIZED_LEN && n.startsWith(KEY_PREFIX) && CROCKFORD.test(n);
+  return (
+    n.length === KEY_NORMALIZED_LEN &&
+    n.startsWith(KEY_PREFIX) &&
+    n
+      .slice(KEY_PREFIX.length)
+      .split("")
+      .every((c) => CROCKFORD.includes(c))
+  );
 }
 
 /** Pretty-print a (possibly partial) normalized key into the grouped
- * display form, so typing naturally lands on DW-XXXXX-XXXXX-…. */
+ * display form, so typing naturally lands on DW-XXXXX-XXXXX-….
+ * Raw input is echoed as-typed until the DW prefix lands (never paint
+ * a phantom "DW-" over what the user is still typing). */
 export function formatKeyInput(raw: string): string {
   const n = normalizeKey(raw).slice(0, KEY_NORMALIZED_LEN);
-  const body = n.startsWith(KEY_PREFIX) ? n.slice(KEY_PREFIX.length) : n;
+  if (!n.startsWith(KEY_PREFIX)) return n;
+  const body = n.slice(KEY_PREFIX.length);
   const groups: string[] = [];
   for (let i = 0; i < body.length && groups.length < KEY_GROUPS; i += KEY_GROUP_LEN) {
     groups.push(body.slice(i, i + KEY_GROUP_LEN));
   }
   const joined = groups.join("-");
-  return groups.length ? `${KEY_PREFIX}-${joined}` : n ? `${KEY_PREFIX}` : "";
+  return groups.length ? `${KEY_PREFIX}-${joined}` : KEY_PREFIX;
 }
 
 /** The activation CTA is only armed when the key is shape-complete. */

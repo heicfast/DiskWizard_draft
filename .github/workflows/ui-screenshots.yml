@@ -7,9 +7,10 @@ name: UI Screenshots
 # (the TourDriver stamps `tNN-name` into the window title; the harness
 # polls it, lets the step settle, and shoots).
 #
-# The tour seeds a simulated activated license through license_sim_set
-# (the mock command surface) so both the working app AND the
-# unlicensed gate states are captured.
+# The tour itself drives the full state matrix through the mock-core
+# command surface — including the license lifecycle (the gate dialog,
+# then license_sim_set seeding Pro) — so both the working app AND the
+# unlicensed gate states are captured with the release build.
 
 on:
   workflow_dispatch:
@@ -49,77 +50,128 @@ jobs:
       - name: Build the app (release exe, no installer)
         run: npx tauri build --no-bundle
         env:
-          CARGO_INCREMENTAL: 0
+          CARGO_INCREMENTAL: "0"
 
-      - name: Capture the tour (title-synced, one frame per step)
+      - name: Run the app + capture the tour (title-synced, one frame per step)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path shots | Out-Null
-
-          # Launch elevated-less for capture (the exe requires admin:
-          # launch through Start-Process -Verb RunData is unavailable to
-          # non-interactive runners, so the harness runs the exe with the
-          # elevation prompt auto-accepted by the runner session).
-          $proc = Start-Process -FilePath "src-tauri\target\release\diskwizard.exe" `
-            -ArgumentList "" -PassThru
-          Start-Sleep -Seconds 6
-
-          Add-Type @"
-          using System;
-          using System.Runtime.InteropServices;
-          using System.Text;
-          public class Win32 {
-            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
-            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-            [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
-            public struct RECT { public int Left, Top, Right, Bottom; }
-          }
-"@
           Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          # Bump the runner display to 1920x1080 so the capture shows the
+          # COMPLETE app window (the default 1024x768 runner display used
+          # to crop the right side of the window). Non-fatal: fall back to
+          # the default resolution if the cmdlet is unavailable.
+          try {
+            Set-DisplayResolution -Width 1920 -Height 1080 -Force | Out-Null
+            "display set to 1920x1080"
+          } catch {
+            "display resolution change unavailable ($($_.Exception.Message)) - capturing at default"
+          }
+          $exe = Join-Path $PWD "src-tauri\target\release\diskwizard.exe"
+          if (-not (Test-Path $exe)) { throw "exe not found: $exe" }
+          $env:DISKWIZARD_TOUR = '1'
+          $out = Join-Path $env:RUNNER_TEMP 'shots'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $app = Start-Process -FilePath $exe -WorkingDirectory $PWD -RedirectStandardOutput "$env:RUNNER_TEMP\app-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\app-stderr.log" -PassThru
+          # bring to front
+          $ws = New-Object -ComObject WScript.Shell
+          $null = $ws.AppActivate($app.Id)
+          # Boot settle: splash (~2.2 s) + the elevation gate auto-pass
+          # (the packaged process is already elevated) + WebView2 first
+          # paint; the first title marker appears with tour step 1.
+          Start-Sleep -Milliseconds 6000
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 
           function Shoot([string]$name) {
-            $sb = New-Object System.Text.StringBuilder 512
-            [Win32]::GetWindowText($proc.MainWindowHandle, $sb, 512) | Out-Null
-            $title = $sb.ToString()
-            $r = New-Object Win32+RECT
-            [Win32]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
-            $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
-            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
             $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $hdc = $g.GetHdc()
-            [Win32]::PrintWindow($proc.MainWindowHandle, $hdc, 2) | Out-Null
-            $g.ReleaseHdc($hdc)
-            $bmp.Save("shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save((Join-Path $out $name), [System.Drawing.Imaging.ImageFormat]::Png)
             $g.Dispose(); $bmp.Dispose()
-            Write-Host "shot: $name (title: $title)"
+          }
+          function WindowTitle() {
+            # MainWindowTitle caches; Refresh() re-reads from Win32.
+            $app.Refresh()
+            return $app.MainWindowTitle
           }
 
-          # Poll the title-sync channel; shoot one named frame per step.
-          $last = ""
-          $idle = 0
-          while ($idle -lt 14) {
-            Start-Sleep -Milliseconds 700
-            [Win32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-            $sb = New-Object System.Text.StringBuilder 512
-            [Win32]::GetWindowText($proc.MainWindowHandle, $sb, 512) | Out-Null
-            $title = $sb.ToString()
-            if ($title -ne $last -and $title -like "*DiskWizard · t*") {
-              Shoot ($title -replace '^DiskWizard · ', '')
-              $last = $title
-              $idle = 0
-            } else { $idle++ }
-            if ($title -like "*tour-complete*") { break }
+          # TITLE-SYNCED capture: the TourDriver stamps each step into
+          # the window title (`DiskWizard · tNN-name`); poll it and shoot
+          # exactly ONE named frame per step - no duplicates, no misses,
+          # "one for one page/mode/action". DEDUP HARDENING: a strict
+          # slug charset stops at any Windows title decoration, and the
+          # captured-marker set guarantees a step is only ever shot once
+          # no matter how the title flickers.
+          $deadline = (Get-Date).AddMinutes(12)
+          $lastTitle = ''
+          $frames = 0
+          $sawMarker = $false
+          $shot = New-Object 'System.Collections.Generic.HashSet[string]'
+          while ((Get-Date) -lt $deadline -and -not $app.HasExited) {
+            $t = WindowTitle
+            if ($t -and $t -ne $lastTitle) {
+              if ($t -like '*tour-complete') { "tour finished after $frames frames"; break }
+              if ($t -match '· (t\d{2}-[a-z0-9-]+)') {
+                $marker = $Matches[1]
+                if (-not $shot.Contains($marker)) {
+                  # Settle: let the view-transition settle-in + any
+                  # crossfade land before the frame.
+                  Start-Sleep -Milliseconds 1400
+                  if ($app.HasExited) { break }
+                  Shoot(($marker + '.png'))
+                  $null = $shot.Add($marker)
+                  $frames++
+                  $sawMarker = $true
+                  "captured $marker"
+                }
+              } elseif (-not $sawMarker) {
+                # Pre-tour boot frame (splash / elevation gate).
+                Shoot('t00-boot.png'); $frames++
+                "captured t00-boot (pre-tour)"
+              }
+              $lastTitle = $t
+            }
+            Start-Sleep -Milliseconds 250
           }
-          if (-not $last) { Shoot "fallback-frame" }
 
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          # FALLBACK: no title markers (tour env missing / title sync
+          # broken) - the old cadence capture so the run never yields
+          # zero artifacts.
+          if (-not $sawMarker) {
+            "no tour title markers - falling back to cadence capture"
+            $step = 0
+            while ($step -lt 48 -and -not $app.HasExited) {
+              Start-Sleep -Milliseconds 2600
+              Shoot(('step-{0:d2}.png' -f $step))
+              $step++
+            }
+          }
+          if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+          Start-Sleep -Milliseconds 500
+          # Rust panics + tracing land in stderr; the webview console is
+          # not reachable from the harness - these logs make the next
+          # hang/blank diagnosis a download instead of a guess.
+          if (Test-Path "$env:RUNNER_TEMP\app-stderr.log") {
+            "--- app-stderr tail ---"
+            Get-Content "$env:RUNNER_TEMP\app-stderr.log" -Tail 40
+          }
+          Get-ChildItem $out | ForEach-Object { "captured $($_.Name)" }
 
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: ui-screenshots
-          path: shots
+          name: diskwizard-ui-screenshots
+          path: ${{ runner.temp }}/shots
+          retention-days: 14
           if-no-files-found: error
+
+      - name: Upload app logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: diskwizard-app-logs
+          path: |
+            ${{ runner.temp }}/app-stdout.log
+            ${{ runner.temp }}/app-stderr.log
+          retention-days: 14
+          if-no-files-found: warn

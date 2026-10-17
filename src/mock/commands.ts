@@ -712,11 +712,13 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       if (!isKeyComplete(key)) throw "BAD_REQUEST. The license key format is invalid.";
       const n = normalizeKey(key);
       await delay(1_600); // server round-trip
-      if (n.includes("BADKEY")) throw "KEY_NOT_FOUND. Invalid license key.";
-      if (n.includes("EXPIRE")) throw "LICENSE_EXPIRED. Your yearly license has expired. Renew to continue recovering.";
-      if (n.includes("REVOK")) throw "KEY_REVOKED. This license has been revoked. Contact support.";
-      if (n.includes("SLOTFU")) throw "DEVICE_SLOT_TAKEN. This license is already active on another device. Contact support to move it.";
-      const lifetime = n.includes("LIFE") || n.includes("TEST");
+      if (n.includes("WR0NG")) throw "KEY_NOT_FOUND. Invalid license key.";
+      if (n.includes("EXP1R")) throw "LICENSE_EXPIRED. Your yearly license has expired. Renew to continue recovering.";
+      if (n.includes("REV0K")) throw "KEY_REVOKED. This license has been revoked. Contact support.";
+      if (n.includes("TAKEN")) throw "DEVICE_SLOT_TAKEN. This license is already active on another device. Contact support to move it.";
+      // Marker words are Crockford-safe 5-char leet so they ride inside
+      // a shape-valid key (WR0NG / EXP1R / REV0K / TAKEN / TESTS).
+      const lifetime = n.includes("TEST");
       license = {
         ...PRO_SIM,
         simulated: false,

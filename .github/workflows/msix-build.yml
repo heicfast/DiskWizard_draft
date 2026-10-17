@@ -1,16 +1,20 @@
 name: MSIX Build (Microsoft Store)
 
-# The Microsoft Store distribution pipeline (DiskGenie architecture):
-# release exe + generated logo assets + the templated AppxManifest →
-# MakeAppx pack → unsigned MSIX artifact. Partner Center validates +
-# SIGNS on submission — that is why we do not sign in CI (the Store's
-# signature is the tamper-evident distribution layer).
+# The Microsoft Store distribution pipeline (the DiskGenie architecture):
+#   release exe + the committed brand-kit MSIX assets + the templated
+#   AppxManifest (packaging/msix/AppxManifest.xml) → MakeAppx pack →
+#   unsigned MSIX artifact. Partner Center validates + SIGNS on
+#   submission — that is why we do not sign in CI (the Store's
+#   signature is the tamper-evident distribution layer).
 #
-# Identity inputs (workflow_dispatch): set Name = the RESERVED APP
-# NAME in Partner Center and Publisher = the package identity
-# Publisher shown under App management → Product identity (default
-# placeholders build a locally-installable package for dev/testing
-# only — the Store rejects mismatched identity).
+# Identity inputs (workflow_dispatch): set Name = the RESERVED APP NAME
+# in Partner Center and Publisher = the package identity Publisher shown
+# under App management → Product identity (default placeholders build a
+# locally-installable package for dev/testing only — the Store rejects
+# mismatched identity).
+#
+# WebView2: MSIX cannot embed the NSIS bootstrapper; the package targets
+# Win10 19041+ where the WebView2 Runtime is inbox/preinstalled.
 
 on:
   workflow_dispatch:
@@ -71,7 +75,7 @@ jobs:
           # app version + the run number as revision.
           "version=$version.${{ github.run_number }}" | Set-Content $env:GITHUB_OUTPUT
 
-      - name: Generate the MSIX layout (exe + assets + manifest)
+      - name: Assemble the MSIX layout (exe + assets + manifest)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -89,99 +93,75 @@ jobs:
           # Tauri 2 embeds the frontend; the release build emits no
           # side-by-side DLLs (anything new would be copied here).
 
-          # -- Logo assets from the committed icon source ---------------
-          Add-Type -AssemblyName System.Drawing
+          # -- Assets: the committed brand-kit MSIX set -------------------
+          # (manifest references the BASE names; scale variants ride
+          # along so Windows auto-picks DPI-perfect tiles).
           $assets = "$root\Assets"
           New-Item -ItemType Directory -Force -Path $assets | Out-Null
-          $srcImg = [System.Drawing.Image]::FromFile("$PWD\src-tauri\icons\256x256.png")
+          Copy-Item "packaging\msix\Assets\*.png" $assets
+          # Materialise the three base names from the scale-100 variants
+          # (canonical MSIX convention: base name + .scale-XXX files).
+          Copy-Item "$assets\StoreLogo.scale-100.png" "$assets\StoreLogo.png"
+          Copy-Item "$assets\Square44x44Logo.scale-100.png" "$assets\Square44x44Logo.png"
+          Copy-Item "$assets\Square150x150Logo.scale-100.png" "$assets\Square150x150Logo.png"
 
-          function Save-Square([int]$s, [string]$file) {
-            $bmp = New-Object System.Drawing.Bitmap $s, $s
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g.DrawImage($srcImg, 0, 0, $s, $s)
-            $g.Dispose()
-            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-            $bmp.Dispose()
-          }
-          function Save-Wide([int]$w, [int]$h, [string]$file) {
-            # Wide tiles: brand navy backdrop with the centered mark.
-            $bmp = New-Object System.Drawing.Bitmap $w, $h
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.Clear([System.Drawing.Color]::FromArgb(8, 13, 44))
-            $m = [int]([Math]::Min($w, $h) * 0.8)
-            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g.DrawImage($srcImg, [int](($w - $m) / 2), [int](($h - $m) / 2), $m, $m)
-            $g.Dispose()
-            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-            $bmp.Dispose()
-          }
+          # -- Manifest: template + placeholder substitution --------------
+          $manifest = (Get-Content -Raw "packaging\msix\AppxManifest.xml") `
+            -replace '__IDENTITY_NAME__', $identityName `
+            -replace '__PUBLISHER__', $publisher `
+            -replace '__VERSION__', $version
+          $manifest | Set-Content -Encoding UTF8 "$root\AppxManifest.xml"
+          "identity: $identityName / $publisher / $version"
+          Get-ChildItem $root -Recurse -File | ForEach-Object { "layout: $($_.FullName)" }
 
-          Save-Square 44 "$assets\44x44-targetsize.png"
-          Save-Square 50 "$assets\StoreLogo.png"
-          Save-Square 150 "$assets\Square150x150Logo.png"
-          Save-Square 310 "$assets\Square310x310Logo.png"
-          Save-Square 480 "$assets\Square44x44Logo.targetsize-480.png"
-          Save-Wide 620 300 "$assets\Wide310x150Logo.scale-400.png"
-          Save-Wide 310 150 "$assets\Wide310x150Logo.scale-200.png"
-          Save-Wide 44 44 "$assets\SmallTile.png"
-          $srcImg.Dispose()
-
-          # -- The AppxManifest -------------------------------------------
-          $manifest = @"
-<?xml version="1.0" encoding="utf-8"?>
-<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10">
-  <Identity Name="$identityName" ProcessorArchitecture="x64"
-            Publisher="$publisher" Version="$version" />
-  <Properties>
-    <DisplayName>DiskWizard</DisplayName>
-    <PublisherDisplayName>DiskWizard</PublisherDisplayName>
-    <Logo>Assets\StoreLogo.png</Logo>
-  </Properties>
-  <Resources>
-    <Resource Language="en-us" />
-  </Resources>
-  <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
-  </Dependencies>
-  <Capabilities>
-    <rescap:Capability Name="runFullTrust" />
-    <Capability Name="internetClient" />
-  </Capabilities>
-  <Applications>
-    <Application Id="DiskWizard" Executable="DiskWizard.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements BackgroundColor="#080D2C"
-          DisplayName="DiskWizard"
-          Square150x150Logo="Assets\Square150x150Logo.png"
-          Square44x44Logo="Assets\44x44-targetsize.png"
-          Description="DiskWizard — data recovery. Bring your files back." />
-      <Extensions>
-        <desktop:Extension Category="windows.fullTrustProcess" />
-      </Extensions>
-    </Application>
-  </Applications>
-</Package>
-"@
-          New-Item -ItemType Directory -Force -Path "$root" | Out-Null
-          $manifest | Set-Content "$root\AppxManifest.xml" -Encoding UTF8
-
-      - name: Locate MakeAppx and pack
+      - name: Pack the MSIX (MakeAppx)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" |
+          $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\MakeAppx.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $sdk) { throw "makeappx.exe not found" }
-          New-Item -ItemType Directory -Force -Path msix-out | Out-Null
-          & $sdk.FullName pack /d msix-layout /p msix-out\DiskWizard.msix /o
-          if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed" }
+          if (-not $makeappx) { throw "MakeAppx.exe not found (Windows SDK)" }
+          "MakeAppx: $($makeappx.FullName)"
+          $version = "${{ steps.ver.outputs.version }}"
+          $out = "dist-msix"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          & $makeappx.FullName pack /o /v /d msix-layout /p "$out\DiskWizard-$version-x64.msix"
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed ($LASTEXITCODE)" }
+          $hash = (Get-FileHash "$out\DiskWizard-$version-x64.msix" -Algorithm SHA256).Hash.ToLower()
+          "$hash  DiskWizard-$version-x64.msix" | Set-Content "$out\SHA256SUMS.txt"
+          Get-Content "$out\SHA256SUMS.txt"
+          Get-Item "$out\*.msix" | ForEach-Object { "msix: $($_.Name) - $([Math]::Round($_.Length / 1MB, 2)) MB" }
 
-      - name: Upload the MSIX package
+      - name: "Optional: Windows App Cert Kit (best-effort pre-validation)"
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # Partner Center runs its own validation on submission; WACK
+          # here is an early warning only (unsigned Store packages may
+          # not be WACK-able locally - failures never block this job).
+          $wack = "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\appcert.exe"
+          if (Test-Path $wack) {
+            "WACK present - running reset + package test (non-fatal)"
+            & $wack reset | Out-Null
+            & $wack test -appx (Resolve-Path "dist-msix\*.msix") | Out-Null
+            if (Test-Path "$env:LOCALAPPDATA\Microsoft\appcertkit") {
+              Copy-Item "$env:LOCALAPPDATA\Microsoft\appcertkit" -Destination "wack-report" -Recurse -ErrorAction SilentlyContinue
+            }
+          } else {
+            "WACK not installed on this runner - skipping (Partner Center validates on submission)."
+          }
+
+      - name: Upload the MSIX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiskWizard-unsigned-msix
-          path: msix-out\DiskWizard.msix
+          name: diskwizard-msix-store
+          path: |
+            dist-msix/*
           if-no-files-found: error
+
+      - name: Upload the WACK report (if produced)
+        uses: actions/upload-artifact@v4
+        with:
+          name: diskwizard-wack-report
+          path: wack-report/
+          if-no-files-found: ignore

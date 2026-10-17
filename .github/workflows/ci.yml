@@ -39,7 +39,6 @@ jobs:
 
       - name: Unit tests
         run: npm test -- --run
-        continue-on-error: true # No tests yet in v0.1 — the runner stays green while the suite lands.
 
   windows-nsis:
     name: Windows NSIS bundle (real build)
@@ -70,22 +69,40 @@ jobs:
       - name: Build the NSIS installer (release)
         # The app manifest embeds requireAdministrator — the installer
         # and the installed app request elevation (raw-disk access).
-        run: npx tauri build --bundles nsis
+        # --target pins the triple so the bundle lands at
+        # target/x86_64-pc-windows-msvc/release/bundle/nsis (the
+        # DiskGenie release path).
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis
+        timeout-minutes: 40
         env:
           CARGO_INCREMENTAL: "0"
 
-      - name: Locate the installer
-        id: nsis
+      - name: Release packaging (versioned setup + portable + SHA256SUMS)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $out = "dist-release"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
           $installer = Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter "*.exe" | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer not found" }
-          "path=$($installer.FullName)" | Set-Content $env:GITHUB_OUTPUT
-          "name=$($installer.Name)" | Set-Content $env:GITHUB_OUTPUT
+          Copy-Item $installer.FullName "$out/DiskWizard-$version-x64-setup.exe"
+          $portable = "$out/portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/diskwizard.exe "$portable/DiskWizard.exe"
+          @("DiskWizard portable. Runs without installing; WebView2 required.", "The portable exe requests administrator (raw-disk access).") | Set-Content "$portable/README.txt"
+          Compress-Archive -Path $portable -DestinationPath "$out/DiskWizard-$version-x64-portable.zip" -Force
+          Remove-Item $portable -Recurse -Force
+          Get-ChildItem $out -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$out/SHA256SUMS.txt"
+          Get-Content "$out/SHA256SUMS.txt"
 
-      - name: Upload the NSIS installer
+      - name: Upload the Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.nsis.outputs.name }}
-          path: ${{ steps.nsis.outputs.path }}
+          name: diskwizard-windows-release
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            dist-release/*
           if-no-files-found: error

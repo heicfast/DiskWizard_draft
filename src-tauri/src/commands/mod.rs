@@ -8,7 +8,7 @@
 //! contract (`src/lib/ipc.ts` + `src/types.ts`) is frozen.
 pub mod mock;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// Manage the mock-core state on the app + spawn the background
 /// ticker (scan-progress / scan-done / recover-* events).

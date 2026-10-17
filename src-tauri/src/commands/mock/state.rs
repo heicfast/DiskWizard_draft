@@ -93,7 +93,6 @@ pub struct MockState {
     pub phase: ScanPhase,
     pub saved_phase: ScanPhase,
     pub paused: bool,
-    pub ticker_alive: bool,
     pub phase_started: Instant,
     pub elapsed_base: f64,
     pub percent: f64,
@@ -142,7 +141,6 @@ impl MockState {
             phase: ScanPhase::Idle,
             saved_phase: ScanPhase::Idle,
             paused: false,
-            ticker_alive: true,
             phase_started: Instant::now(),
             elapsed_base: 0.0,
             percent: 0.0,
@@ -199,11 +197,9 @@ impl MockState {
             if !r.finished {
                 let step = (r.total_files / 90).max(1);
                 r.done_files = (r.done_files + step).min(r.total_files);
-                r.done_bytes = if r.total_files > 0 {
-                    r.total_bytes * r.done_files / r.total_files
-                } else {
-                    0
-                };
+                r.done_bytes = (r.total_bytes * r.done_files)
+                    .checked_div(r.total_files)
+                    .unwrap_or(0);
                 r.current_file = if r.done_files >= r.total_files {
                     "Finalizing…".to_string()
                 } else {
@@ -214,7 +210,11 @@ impl MockState {
                 }
                 r.finished = r.done_files >= r.total_files;
                 if r.finished {
-                    r.failed_files = if r.total_files > 900 { r.total_files * 3 / 1000 } else { 0 };
+                    r.failed_files = if r.total_files > 900 {
+                        r.total_files * 3 / 1000
+                    } else {
+                        0
+                    };
                     let payload = r.payload();
                     self.recover = None;
                     return Some(("recover-done", payload));
@@ -224,7 +224,10 @@ impl MockState {
             }
         }
 
-        if matches!(self.phase, ScanPhase::Idle | ScanPhase::Done | ScanPhase::Stopped) {
+        if matches!(
+            self.phase,
+            ScanPhase::Idle | ScanPhase::Done | ScanPhase::Stopped
+        ) {
             return None;
         }
         if self.paused {
@@ -241,7 +244,11 @@ impl MockState {
                 }
             }
             ScanPhase::Quick => {
-                let phase_ms = if self.device_raw { SDR_MS + QUICK_MS } else { QUICK_MS };
+                let phase_ms = if self.device_raw {
+                    SDR_MS + QUICK_MS
+                } else {
+                    QUICK_MS
+                };
                 let frac = (in_phase / phase_ms).min(1.0);
                 self.percent = (frac * 38.0).min(38.0);
                 self.sdr_done = self.device_raw && in_phase >= SDR_MS;
@@ -250,8 +257,11 @@ impl MockState {
                     self.phase = ScanPhase::Deep;
                     self.phase_started = Instant::now();
                     self.elapsed_base = phase_ms / 1000.0;
-                    self.results =
-                        Some(super::tree::generate(&self.device_id, self.generation, 0.38));
+                    self.results = Some(super::tree::generate(
+                        &self.device_id,
+                        self.generation,
+                        0.38,
+                    ));
                 }
             }
             ScanPhase::Deep => {
@@ -263,8 +273,11 @@ impl MockState {
                 let target = ((0.38 + frac * 0.62) * 40.0).round() / 40.0;
                 let current = self.current_fraction();
                 if target > current + f64::EPSILON {
-                    self.results =
-                        Some(super::tree::generate(&self.device_id, self.generation, target));
+                    self.results = Some(super::tree::generate(
+                        &self.device_id,
+                        self.generation,
+                        target,
+                    ));
                 }
                 if !self.lost_partition_discovered && frac > 0.45 {
                     self.lost_partition_discovered = true;
@@ -275,20 +288,17 @@ impl MockState {
                     self.percent = 100.0;
                 }
             }
-            ScanPhase::Organizing => {
-                if in_phase >= ORGANIZE_MS {
-                    self.phase = ScanPhase::Done;
-                    self.results =
-                        Some(super::tree::generate(&self.device_id, self.generation, 1.0));
-                    self.save_session();
-                    let payload = json!({
-                        "generation": self.generation,
-                        "targetName": self.device_name,
-                        "stats": { "filesFound": self.files_found, "bytesFound": self.bytes_found },
-                        "durationSec": (self.elapsed_base + in_phase / 1000.0).round() as u64,
-                    });
-                    return Some(("scan-done", payload));
-                }
+            ScanPhase::Organizing if in_phase >= ORGANIZE_MS => {
+                self.phase = ScanPhase::Done;
+                self.results = Some(super::tree::generate(&self.device_id, self.generation, 1.0));
+                self.save_session();
+                let payload = json!({
+                    "generation": self.generation,
+                    "targetName": self.device_name,
+                    "stats": { "filesFound": self.files_found, "bytesFound": self.bytes_found },
+                    "durationSec": (self.elapsed_base + in_phase / 1000.0).round() as u64,
+                });
+                return Some(("scan-done", payload));
             }
             _ => {}
         }
@@ -339,7 +349,8 @@ impl MockState {
             "startedAt": now.saturating_sub(40),
             "sessionFile": file,
         });
-        self.sessions.retain(|s| s["targetName"] != json!(self.device_name));
+        self.sessions
+            .retain(|s| s["targetName"] != json!(self.device_name));
         self.sessions.insert(0, session);
         self.sessions.truncate(6);
     }
@@ -367,7 +378,10 @@ impl MockState {
     fn searching_label(&self) -> String {
         match self.phase {
             ScanPhase::Organizing => "Organizing found files…".into(),
-            ScanPhase::Preparing => format!("Reading {} — boot sector, partition table…", self.device_name),
+            ScanPhase::Preparing => format!(
+                "Reading {} — boot sector, partition table…",
+                self.device_name
+            ),
             _ if self.device_raw && !self.sdr_done => {
                 "SD Card Rescue — restoring access to the card…".into()
             }
@@ -375,7 +389,10 @@ impl MockState {
                 let read = (self.sectors_total as f64 * self.percent / 100.0) as u64;
                 let folder = data::FOLDER_TOUR
                     [((self.files_found / 900) as usize) % data::FOLDER_TOUR.len()];
-                format!("Searching: {folder} · sector {read} / {}", self.sectors_total)
+                format!(
+                    "Searching: {folder} · sector {read} / {}",
+                    self.sectors_total
+                )
             }
         }
     }
@@ -399,7 +416,11 @@ impl MockState {
 
 fn apply_quick_stats(s: &mut MockState) {
     let (files, bytes) = data::totals(&s.device_id);
-    let frac = if s.percent >= 38.0 { 1.0 } else { s.percent / 38.0 };
+    let frac = if s.percent >= 38.0 {
+        1.0
+    } else {
+        s.percent / 38.0
+    };
     s.files_found = (files as f64 * 0.41 * frac).round() as u64;
     s.bytes_found = (bytes as f64 * 0.36 * frac).round() as u64;
 }
@@ -429,7 +450,7 @@ fn civil_from_days(z: i64) -> (i64, u64, u64) {
     let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u64;
+    let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m, d)
 }

@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter, State};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use state::{LicensePosture, MockState};
 
@@ -117,7 +117,10 @@ pub async fn sdr_diagnose(s: State<'_, SharedState>) -> Result<Value, String> {
 /* ── Scan lifecycle (licensed) ───────────────────────────────────────── */
 
 #[tauri::command]
-pub async fn unlock_bitlocker(s: State<'_, SharedState>, device_id: String) -> Result<Value, String> {
+pub async fn unlock_bitlocker(
+    s: State<'_, SharedState>,
+    device_id: String,
+) -> Result<Value, String> {
     // The FVE-service unlock round-trip (password / recovery key
     // verified through the pipe; the volume mounts decrypted).
     delay(1_700).await;
@@ -134,7 +137,10 @@ pub fn start_scan(s: State<'_, SharedState>, device_id: String) -> Result<Value,
     license_gate(&s)?;
     let device = {
         let st = s.lock();
-        apply_unlock(&st, data::device_by_id(&device_id).ok_or(format!("UNKNOWN_DEVICE. {device_id}"))?)
+        apply_unlock(
+            &st,
+            data::device_by_id(&device_id).ok_or(format!("UNKNOWN_DEVICE. {device_id}"))?,
+        )
     };
     if device["health"].as_str() == Some("bitlocker") {
         return Err("DEVICE_LOCKED. Unlock BitLocker before scanning this drive.".into());
@@ -160,7 +166,10 @@ pub fn start_folder_scan(s: State<'_, SharedState>, label: String) -> Result<Val
 }
 
 #[tauri::command]
-pub fn start_disk_image_scan(s: State<'_, SharedState>, image_path: String) -> Result<Value, String> {
+pub fn start_disk_image_scan(
+    s: State<'_, SharedState>,
+    image_path: String,
+) -> Result<Value, String> {
     license_gate(&s)?;
     let device = json!({ "id": format!("image-{image_path}"), "name": image_path });
     let generation = {
@@ -188,7 +197,10 @@ pub fn start_cloud_scan(s: State<'_, SharedState>, drive_id: String) -> Result<V
 pub fn pause_scan(s: State<'_, SharedState>) -> Value {
     let mut st = s.lock();
     if !st.paused
-        && !matches!(st.phase, state::ScanPhase::Idle | state::ScanPhase::Done | state::ScanPhase::Stopped)
+        && !matches!(
+            st.phase,
+            state::ScanPhase::Idle | state::ScanPhase::Done | state::ScanPhase::Stopped
+        )
     {
         st.paused = true;
         st.saved_phase = st.phase;
@@ -248,7 +260,10 @@ pub fn resume_session(s: State<'_, SharedState>, session_id: String) -> Result<V
             .cloned()
             .ok_or(format!("UNKNOWN_SESSION. {session_id}"))?;
         (
-            session["targetName"].as_str().unwrap_or("USB Drive (F:)").to_string(),
+            session["targetName"]
+                .as_str()
+                .unwrap_or("USB Drive (F:)")
+                .to_string(),
             session["filesFound"].as_u64().unwrap_or(0),
         )
     };
@@ -328,23 +343,36 @@ pub async fn activate_license(s: State<'_, SharedState>, key: String) -> Result<
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    if normalized.len() != 22 || !normalized.starts_with("DW") {
+    // Shape: DW prefix + 20 Crockford base32 chars (no I/L/O/U) — the
+    // same contract as the frontend normalize (lib/licenseKey.ts) and
+    // the future server's normalized-hash form.
+    const CROCKFORD: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let body: String = normalized[2..].to_string();
+    if normalized.len() != 22
+        || !normalized.starts_with("DW")
+        || !body.chars().all(|c| CROCKFORD.contains(c))
+    {
         return Err("BAD_REQUEST. The license key format is invalid.".into());
     }
     delay(1_600).await;
-    if normalized.contains("BADKEY") {
+    // Marker words are Crockford-safe 5-char leet so they ride inside
+    // a shape-valid key (WR0NG / EXP1R / REV0K / TAKEN / TESTS).
+    if normalized.contains("WR0NG") {
         return Err("KEY_NOT_FOUND. Invalid license key.".into());
     }
-    if normalized.contains("EXPIRE") {
-        return Err("LICENSE_EXPIRED. Your yearly license has expired. Renew to continue recovering.".into());
+    if normalized.contains("EXP1R") {
+        return Err(
+            "LICENSE_EXPIRED. Your yearly license has expired. Renew to continue recovering."
+                .into(),
+        );
     }
-    if normalized.contains("REVOK") {
+    if normalized.contains("REV0K") {
         return Err("KEY_REVOKED. This license has been revoked. Contact support.".into());
     }
-    if normalized.contains("SLOTFU") {
+    if normalized.contains("TAKEN") {
         return Err("DEVICE_SLOT_TAKEN. This license is already active on another device. Contact support to move it.".into());
     }
-    let lifetime = normalized.contains("LIFE") || normalized.contains("TEST");
+    let lifetime = normalized.contains("TEST");
     let mut st = s.lock();
     st.license_posture = LicensePosture::Pro;
     st.license = Some(state::pro_status(lifetime, false));
@@ -438,7 +466,9 @@ pub fn set_settings(
 
 #[tauri::command]
 pub fn get_dev_hooks() -> Value {
-    let tour = std::env::var("DISKWIZARD_TOUR").map(|v| v == "1").unwrap_or(false);
+    let tour = std::env::var("DISKWIZARD_TOUR")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     json!({
         "tour": tour,
         "tourMode": std::env::var("DISKWIZARD_TOUR_MODE").ok(),
