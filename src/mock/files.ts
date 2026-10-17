@@ -227,7 +227,15 @@ function nameFor(category: FileCategory, rng: () => number): { name: string; ext
     case "archives":
       return { name: pick(rng, ARCHIVE_NAMES), ext: pick(rng, ARCHIVE_EXT) };
     case "email":
-      return { name: pick(rng, ["Inbox", "Sent Mail", "Archive folder", "Local Folders"]), ext: "pst" };
+      return {
+        name: pick(rng, [
+          "Inbox", "Sent Mail", "Archive folder", "Local Folders",
+          "Outlook Data File", "Personal Folders", "Mailbox - Alex",
+          "Old Mail 2019", "backup-mail", "Deleted Items",
+          "work-mailbox", "family-mailbox",
+        ]),
+        ext: pick(rng, ["pst", "pst", "pst", "ost", "dbx", "eml"]),
+      };
     default: {
       const r = rng();
       if (r < 0.3) return { name: pick(rng, APP_NAMES), ext: "exe" };

@@ -104,6 +104,24 @@ const ARCHIVE_NAMES: [&str; 8] = [
 ];
 const ARCHIVE_EXT: [&str; 5] = ["zip", "rar", "7z", "tar.gz", "iso"];
 
+/// Email store names (Outlook PST/OST, Outlook Express DBX, raw EML)
+/// — enough variety that the browsable list reads like real mail data.
+const EMAIL_NAMES: [&str; 12] = [
+    "Inbox",
+    "Sent Mail",
+    "Archive folder",
+    "Local Folders",
+    "Outlook Data File",
+    "Personal Folders",
+    "Mailbox - Alex",
+    "Old Mail 2019",
+    "backup-mail",
+    "Deleted Items",
+    "work-mailbox",
+    "family-mailbox",
+];
+const EMAIL_EXT: [&str; 6] = ["pst", "pst", "pst", "ost", "dbx", "eml"];
+
 struct Profile {
     rows: usize,
     mix: [f64; 7], // images, videos, audio, documents, archives, email, other
@@ -309,6 +327,10 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
             4 => (
                 (*rng.pick(&ARCHIVE_NAMES)).to_string(),
                 (*rng.pick(&ARCHIVE_EXT)).to_string(),
+            ),
+            5 => (
+                (*rng.pick(&EMAIL_NAMES)).to_string(),
+                (*rng.pick(&EMAIL_EXT)).to_string(),
             ),
             _ => (
                 rng.pick(&["settings", "config", "index", "cache", "db"])

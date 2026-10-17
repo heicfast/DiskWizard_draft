@@ -26,7 +26,14 @@ fn main() {
                 .expect("build script cwd")
                 .join("windows-app-manifest.xml");
             println!("cargo:rerun-if-changed={}", manifest.display());
+            // Our manifest carries requireAdministrator; the linker's
+            // auto-generated manifest also embeds a default UAC
+            // fragment (asInvoker) — two trustInfo snippets with
+            // different levels make mt.exe fail with c1010001 /
+            // LNK1327. /MANIFESTUAC:NO suppresses the linker's default
+            // so ours is the only requestedExecutionLevel.
             println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+            println!("cargo:rustc-link-arg=/MANIFESTUAC:NO");
             println!(
                 "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
                 manifest.to_str().expect("utf-8 manifest path")
