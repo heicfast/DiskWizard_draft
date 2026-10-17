@@ -1002,6 +1002,22 @@
   font-weight: 660;
 }
 
+/* Narrow ladder (≤1280px, the enforced window floor is 1180): the
+ * Date Modified column drops (Date lives in the preview panel), the
+ * tree and preview panes slim a step — the Name column keeps its
+ * breathing room instead of collapsing into a corridor. */
+@media (max-width: 1280px) {
+  .dw-ft-modified {
+    display: none;
+  }
+  .dw-tree-panel {
+    width: 204px;
+  }
+  .dw-preview-panel {
+    width: 300px;
+  }
+}
+
 /* ── Empty state (no results yet) ────────────────────────────────────── */
 
 .dw-results-empty {

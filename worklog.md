@@ -26,3 +26,42 @@ Stage Summary:
 - Repo: github.com/heicfast/DiskWizard_draft (main).
 - The complete premium cherry-blossom UI runs end-to-end in browser mode with realistic simulated data matching the reference captures byte-for-byte where visible.
 - Next: Rust-side CI compile pass, deeper VLM polish rounds, screenshot tour verification, docs polish.
+
+---
+Task ID: 2
+Agent: main (Z.ai)
+Task: QA rounds 2-3 — missing product flows, licensing lifecycle, tour verification, responsive ladder, code quality.
+
+Work Log:
+- Added the three flows the product notes call out that were missing:
+  BitLocker unlock dialog (password/recovery-key, FVE round-trip,
+  unlock → auto-scan, session unlock state in both mocks), the
+  lost-partition guidance dialog (direct repair RECOMMENDED vs deep
+  scan — the IMPROVED restoration path), and SD Card Rescue wired
+  from Disk Tools (connect → scan with the live SDR strip).
+- Verified the unlicensed funnel end-to-end: gate dialog → bad-key
+  typed error copy → valid-key activation → success state → Pro chip
+  + buy button swap.
+- Tour mode verified: all 27 states walked to `tour-complete`
+  (title-sync channel working for the screenshot harness).
+- Fixed the table's flex-shrink column compression (Size/Type/Date/
+  Condition now honor exact widths); safety-copy contrast fixes;
+  BitLocker segmented control alignment; narrow-viewport ladder
+  (≤1280px drops Date Modified, slims tree/preview panes — no
+  horizontal overflow at the 1200px floor test).
+- Scan auto-switch now once-per-generation (browsing stays free
+  while scanning; the sidebar widget keeps reporting).
+- Code quality: userFacingError extracted to lib (Fast Refresh
+  clean), no TODO/FIXME, no console noise, mock verified absent
+  from the production bundle, logo optimized 2.5MB → 110KB
+  (256px master for in-app sizes), production build 130KB gzipped.
+
+Stage Summary:
+- All master-prompt requirements for the UI session implemented and
+  verified (BitLocker recovery, SDR, lost-partition guidance,
+  recoverability indicators, disk health free tier, essential/
+  complete results, licensing architecture, theme-reactive logo,
+  maximized+elevated launch, agent tour channel).
+- Remaining for next sessions: Rust CI compile pass (Linux box lacks
+  the GTK toolchain — the workflows carry it), the repair phase
+  (docs/TODO.md), real core integration.
