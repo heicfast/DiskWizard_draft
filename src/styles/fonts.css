@@ -1,0 +1,48 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * DiskWizard type — self-hosted Inter (brand-kit recommendation: "Inter
+ * Display Bold for headings and Inter Regular for body"; fonts are not
+ * distributed with the kit, so the four UI weights ship in-repo). Local
+ * @font-face avoids runtime network fetches — the app must render
+ * identically offline (a data-recovery tool is often used precisely when
+ * networking is unreliable).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/Inter-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/Inter-500.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/Inter-600.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/Inter-700.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("./fonts/Inter-800.woff2") format("woff2");
+}

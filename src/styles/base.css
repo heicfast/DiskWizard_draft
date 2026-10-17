@@ -1,0 +1,189 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Base — reset, typography, focus, scrollbars, press states.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input {
+  letter-spacing: 0;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+}
+
+/* Focus-visible rings on every interactive element. */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: var(--focus-w) solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::selection {
+  background: var(--ink-soft);
+}
+
+/* Scrollbars — native OVERLAY style (no reserved gutters). */
+.dw-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.25s ease;
+}
+.dw-scroll:hover,
+.dw-scroll:focus-within {
+  scrollbar-color: var(--border) transparent;
+}
+.dw-scroll:focus-within:hover {
+  scrollbar-color: var(--text-tertiary) transparent;
+}
+
+/* Pressable — shared active feedback (scale 0.985 / opacity 0.75). */
+.dw-ink-button:active,
+.dw-outline-button:active,
+.dw-ghost-button:active,
+.dw-icon-button:active,
+.dw-card:active,
+.dw-folder-row:active,
+.dw-file-row:active,
+.dw-chip:active,
+.dw-nav-item:active,
+.dw-segmented button:active,
+.dw-quick-card:active,
+.dw-tool-card:active {
+  transform: scale(var(--press-scale));
+  opacity: var(--press-opacity);
+}
+
+kbd {
+  font: 9px/1 var(--font-mono);
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 2px 5px;
+  color: var(--text-secondary);
+  background: var(--card);
+}
+
+/* Numeric columns everywhere — tabular so sizes/counts align. */
+.dw-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Truncation helper for one-line labels in flex rows. */
+.dw-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Wordmark / display headings use the display stack. */
+.dw-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.022em;
+}
+
+/* Eyebrow labels (section kickers). */
+.dw-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+/* Skeleton shimmer (loading states speak the surface language). */
+.dw-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--skeleton);
+}
+.dw-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--shimmer), transparent);
+  animation: dw-shimmer 1.38s infinite;
+}
+@keyframes dw-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Page settle-in (DiskGenie CSS-driven swap: entering view fades
+ * 0→1 over the solid page background; the old view unmounts
+ * instantly — two content layers are never on screen at once). */
+@keyframes dw-settle-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.dw-settle-in {
+  animation: dw-settle-in var(--dur-base) var(--ease-out);
+}
+
+/* The indeterminate strip (scan searching ticker). */
+@keyframes dw-strip {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 28px 0;
+  }
+}
+
+/* Reduced motion: honor the OS setting everywhere at once. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

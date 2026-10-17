@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DiskWizard</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>
+      /* Pre-CSS paint: the WebView's first frame matches the app canvas
+         of the ACTIVE theme instead of flashing white before the
+         stylesheet arrives. Pairs with the window backgroundColor. */
+      html {
+        background: #ffffff;
+      }
+      html[data-theme="blossom"] {
+        background: #fbf1ee;
+      }
+      html[data-theme="dark"] {
+        background: #1e1e20;
+      }
+      html[data-theme="ember"] {
+        background: #201a15;
+      }
+      html[data-theme="tide"] {
+        background: #101722;
+      }
+    </style>
+    <script>
+      // Pre-mount theme application: the saved theme (localStorage) is
+      // applied BEFORE React mounts so there is no flash. Runs
+      // synchronously in <head>. Default on first launch is BLOSSOM
+      // (DiskWizard product decision — the app ships the cherry-blossom
+      // look; the picker persists a saved choice forever). The theme
+      // registry lives in src/theme/themes.ts — this inline copy
+      // mirrors its ids/families (kept in sync by themes tests).
+      (function () {
+        try {
+          var saved = localStorage.getItem("diskwizard.theme");
+          var theme = ["blossom", "light", "dark", "ember", "tide"].indexOf(saved) >= 0
+            ? saved
+            : "blossom";
+          var scheme =
+            theme === "dark" || theme === "ember" || theme === "tide" ? "dark" : "light";
+          document.documentElement.setAttribute("data-theme", theme);
+          document.documentElement.setAttribute("data-scheme", scheme);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "blossom");
+          document.documentElement.setAttribute("data-scheme", "light");
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

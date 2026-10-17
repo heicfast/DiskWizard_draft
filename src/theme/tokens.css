@@ -1,0 +1,403 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * DiskWizard design tokens — the single source of truth for every
+ * color / shape / metric in the app.
+ *
+ * The theming is a TWO-layer attribute system on the document root
+ * (borrowed as-is from DiskGenie — same gradients, colours, palettes):
+ *
+ *   data-theme="<id>"        the concrete palette (a block below).
+ *   data-scheme="light|dark" the FAMILY the palette belongs to.
+ *
+ * Palette registry (src/theme/themes.ts):
+ *   :root                    the LIGHT default palette.
+ *   [data-theme="blossom"]   blush cream + rose — THE DISKWIZARD DEFAULT
+ *                            (cherry-blossom reference design).
+ *   [data-scheme="dark"]     the DARK-FAMILY layer (dark family themes).
+ *   [data-theme="dark"]      neutral graphite + coral.
+ *   [data-theme="ember"]     warm espresso + honey gold.
+ *   [data-theme="tide"]      deep marine + lagoon cyan.
+ *
+ * DiskWizard extensions beyond the DiskGenie base live in clearly
+ * marked sections: file-category colors, recoverability grading
+ * (the "file recoverability indicators" feature), scan-phase states,
+ * and storage-health status (SMART) colors.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surfaces (light) ─────────────────────────────────────────────── */
+  --background: #ffffff;
+  --panel: #f5f5f7;
+  --card: #ffffff;
+  --border: #d8d8dd;
+  --divider: #e5e5ea;
+  --chip: #f2f2f7;
+  --track: #e5e5ea;
+  --overlay: rgba(29, 29, 31, 0.16);
+
+  /* ── Text ─────────────────────────────────────────────────────────── */
+  --text: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #8e8e93;
+  --on-pastel: #0f172a;
+  --on-pastel-secondary: #334155;
+
+  /* Control affordance (outline buttons, chips, pickers). */
+  --on-control: #6e6e73;
+  --control-border: #d8d8dd;
+  --control-hover: #f2f2f7;
+  --control-active: #eaeaef;
+
+  /* ── Brand & status ───────────────────────────────────────────────── */
+  --ink: #ff6b4a;
+  --ink-strong: #f5522b;
+  --on-ink: #ffffff;
+  --ink-soft: rgba(255, 107, 74, 0.12);
+  /* Primary CTA treatment: subtle top-light gradient + a warm glow
+   * shadow instead of a flat gray shadow (the DiskGenie CTA language). */
+  --ink-grad: linear-gradient(180deg, #ff7e5f 0%, #ff6b4a 55%, #f96036 100%);
+  --ink-glow: 0 2px 8px rgba(255, 107, 74, 0.32), 0 1px 2px rgba(245, 82, 43, 0.18);
+  --ink-glow-strong: 0 4px 14px rgba(255, 107, 74, 0.42), 0 1px 3px rgba(245, 82, 43, 0.2);
+  --used: #ff3b30;
+  --used-soft: rgba(255, 59, 48, 0.1);
+  --used-tint: rgba(255, 59, 48, 0.055);
+  --free: #34c759;
+  --free-soft: rgba(52, 199, 89, 0.12);
+  --focus-ring: rgba(255, 107, 74, 0.8);
+  --close-hover: #e81123;
+
+  /* ── DiskWizard: scan / health status ─────────────────────────────── */
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.12);
+  --danger: #ff3b30;
+  --danger-soft: rgba(255, 59, 48, 0.1);
+  --info: #3b82f6;
+  --info-soft: rgba(59, 130, 246, 0.1);
+
+  /* ── DiskWizard: file categories (results tabs / trees / icons) ──── */
+  --cat-images: #f472b6;
+  --cat-videos: #818cf8;
+  --cat-audio: #34d399;
+  --cat-documents: #60a5fa;
+  --cat-archives: #fbbf24;
+  --cat-email: #22d3ee;
+  --cat-other: #94a3b8;
+
+  /* ── DiskWizard: recoverability grading (file status indicators) ───
+   * The check-node pass (research: CCheckNodeThread) grades each found
+   * file before recovery — surfaced as chips on rows + the preview
+   * panel's "Recovery chances" gauge. */
+  --grade-excellent: #34c759;
+  --grade-excellent-soft: rgba(52, 199, 89, 0.12);
+  --grade-good: #3b82f6;
+  --grade-good-soft: rgba(59, 130, 246, 0.1);
+  --grade-poor: #f59e0b;
+  --grade-poor-soft: rgba(245, 158, 11, 0.12);
+
+  /* ── By-folder tone families (8 pastels; shades vary by depth+index) */
+  --pastel-blue: #cfe0f7;
+  --pastel-mint: #cdf0e6;
+  --pastel-violet: #e3d8f5;
+  --pastel-amber: #f9ecc3;
+  --pastel-rose: #f9dde1;
+  --pastel-green: #d4efc9;
+  --pastel-sky: #d9ecf9;
+  --pastel-slate: #e6e8ea;
+
+  /* ── Age buckets ──────────────────────────────────────────────────── */
+  --age-0: #34d399;
+  --age-1: #60a5fa;
+  --age-2: #818cf8;
+  --age-3: #a78bfa;
+  --age-4: #f472b6;
+  --age-5: #f87171;
+
+  /* ── Shape & motion ───────────────────────────────────────────────── */
+  --radius-xs: 6px;
+  --radius-s: 8px;
+  --radius-m: 10px;
+  --radius-l: 12px;
+  --radius-xl: 14px;
+  --press-scale: 0.985;
+  --press-opacity: 0.75;
+  --spring: 250ms;
+  --fade: 160ms;
+
+  /* Motion system: one family, harmonized tempo (DiskGenie ladder). */
+  --dur-micro: 120ms; /* menus, chips, hover swaps */
+  --dur-fast: 160ms; /* entrances, scrim */
+  --dur-base: 240ms; /* layout settles, scan bar */
+  --dur-slow: 360ms; /* large surfaces, panel slide */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.5, 0.05, 0.4, 1);
+  --ease-overshoot: cubic-bezier(0.2, 0.9, 0.3, 1.15);
+
+  /* ── Spacing scale (4px base) ─────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 56px;
+
+  /* ── Focus geometry ───────────────────────────────────────────────── */
+  --focus-w: 2px;
+  --focus-offset: 2px;
+
+  /* ── Status on-colors ─────────────────────────────────────────────── */
+  --on-used: #ffffff;
+  --on-free: #ffffff;
+  --on-close: #ffffff;
+
+  /* ── Loading system: skeleton + shimmer speak the surface language ── */
+  --skeleton: #e9e9ee;
+  --shimmer: rgba(255, 255, 255, 0.65);
+
+  /* ── State opacity ────────────────────────────────────────────────── */
+  --disabled-opacity: 0.5;
+
+  /* ── Elevation ────────────────────────────────────────────────────── */
+  --shadow-1: 0 1px 2px rgba(29, 29, 31, 0.06), 0 1px 3px rgba(29, 29, 31, 0.05);
+  --shadow-2: 0 4px 10px rgba(29, 29, 31, 0.08), 0 2px 4px rgba(29, 29, 31, 0.05);
+  --shadow-3: 0 12px 28px rgba(29, 29, 31, 0.14), 0 4px 8px rgba(29, 29, 31, 0.06);
+  --shadow-pop: 0 1px 2px rgba(29, 29, 31, 0.12), 0 8px 20px rgba(29, 29, 31, 0.13), 0 16px 44px rgba(29, 29, 31, 0.17);
+  --card-sheen: linear-gradient(125deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0) 55%);
+
+  /* ── Typography ───────────────────────────────────────────────────── */
+  --font-ui: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-display: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+
+  /* ── Layout metrics ───────────────────────────────────────────────── */
+  --title-bar-h: 48px;
+  --sidebar-w: 264px;
+  --preview-w: 360px;
+  --caption-btn-w: 46px;
+  --caption-btn-h: 32px;
+  --content-pad: 40px;
+  --sidebar-w-compact: 240px;
+  --preview-w-compact: 320px;
+
+  /* ── Density ladder breakpoints (documentation-only; queries inline) */
+  --bp-compact: 1420px;
+  --bp-narrow: 1180px;
+
+  color-scheme: light;
+}
+
+/* ── The DARK-FAMILY layer (dark | ember | tide) ────────────────────── */
+[data-scheme="dark"] {
+  --on-control: #e8e8ed;
+  --control-border: #7a7a85;
+  --control-hover: rgba(255, 255, 255, 0.07);
+  --control-active: rgba(255, 255, 255, 0.11);
+
+  --skeleton: #323234;
+  --shimmer: rgba(255, 255, 255, 0.07);
+
+  /* Vivid tone family — the pastels are light-mode material; dark gets
+   * the same eight hues at real chroma so category chips stay distinct. */
+  --vivid-blue: #5d8fe0;
+  --vivid-mint: #3ec39a;
+  --vivid-violet: #9678e6;
+  --vivid-amber: #dca43e;
+  --vivid-rose: #e66a80;
+  --vivid-green: #61b857;
+  --vivid-sky: #45aede;
+  --vivid-slate: #8b95a3;
+
+  /* Dark-family category + grading colors (lifted for dark surfaces). */
+  --cat-images: #f9a8d4;
+  --cat-videos: #a5b4fc;
+  --cat-audio: #6ee7b7;
+  --cat-documents: #93c5fd;
+  --cat-archives: #fcd34d;
+  --cat-email: #67e8f9;
+  --cat-other: #cbd5e1;
+  --grade-excellent: #30d158;
+  --grade-good: #60a5fa;
+  --grade-poor: #f5a623;
+
+  /* ── Elevation (deeper in the dark family) ──────────────────── */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 10px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 12px 28px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.55), 0 8px 20px rgba(0, 0, 0, 0.55), 0 16px 44px rgba(0, 0, 0, 0.7);
+  --card-sheen: linear-gradient(125deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 55%);
+
+  color-scheme: dark;
+}
+
+/* ── Blossom (blush cream + rose) — THE DISKWIZARD DEFAULT ────────────
+ * The cherry-blossom-morning palette: warm blush surfaces, white cards
+ * that pop off them, and a rich rose ink. Rose is a mid-luminance
+ * accent — white on-ink keeps ≈3.6:1. Light family: the pastel tone
+ * family, the neutral skeletons and the soft elevation all apply. */
+[data-theme="blossom"] {
+  /* ── Surfaces ────────────────────────────────────────────────────── */
+  --background: #fbf1ee;
+  --panel: #f6e9e5;
+  --card: #ffffff;
+  --border: #e5d0ca;
+  --divider: #eedcd7;
+  --chip: #f4e5e1;
+  --track: #eedcd8;
+  --overlay: rgba(90, 40, 35, 0.16);
+
+  /* ── Text (rosewood ladder) ───────────────────────────────────────── */
+  --text: #3b2428;
+  --text-secondary: #8a6568;
+  --text-tertiary: #a38083;
+
+  /* Control affordance — the light family's muted values, warmed. */
+  --on-control: #8a6568;
+  --control-border: #e0c6c0;
+  --control-hover: #f5e8e5;
+  --control-active: #efdcd7;
+
+  /* ── Brand & status ───────────────────────────────────────────────── */
+  --ink: #d8506b;
+  --ink-strong: #c7405d;
+  --on-ink: #ffffff;
+  --ink-soft: rgba(216, 80, 107, 0.12);
+  --ink-grad: linear-gradient(180deg, #ec6d84 0%, #d8506b 55%, #c43b58 100%);
+  --ink-glow: 0 2px 8px rgba(216, 80, 107, 0.3), 0 1px 2px rgba(196, 59, 88, 0.18);
+  --ink-glow-strong: 0 4px 14px rgba(216, 80, 107, 0.4), 0 1px 3px rgba(196, 59, 88, 0.2);
+  --used: #ff3b30;
+  --used-soft: rgba(255, 59, 48, 0.1);
+  --used-tint: rgba(255, 59, 48, 0.055);
+  --free: #34c759;
+  --free-soft: rgba(52, 199, 89, 0.12);
+  --focus-ring: rgba(216, 80, 107, 0.8);
+
+  /* Blush skeleton (the neutral gray reads cold on cream). */
+  --skeleton: #eee0dc;
+  --shimmer: rgba(255, 255, 255, 0.65);
+
+  /* Cherry-blossom ambient gradients (splash + empty states) — the
+   * sakura morning wash the reference design carries. */
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(236, 109, 132, 0.16) 0%, rgba(236, 109, 132, 0) 55%),
+    radial-gradient(120% 100% at 88% 12%, rgba(244, 114, 182, 0.13) 0%, rgba(244, 114, 182, 0) 60%),
+    linear-gradient(180deg, #fdf6f4 0%, #fbf1ee 100%);
+
+  color-scheme: light;
+}
+
+/* Light-theme ambient wash (subtle; Blossom carries the strong one). */
+[data-theme="light"] {
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(255, 107, 74, 0.07) 0%, rgba(255, 107, 74, 0) 55%),
+    linear-gradient(180deg, #fbfbfc 0%, #ffffff 100%);
+}
+
+[data-theme="dark"] {
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(255, 122, 92, 0.08) 0%, rgba(255, 122, 92, 0) 55%),
+    linear-gradient(180deg, #212124 0%, #1e1e20 100%);
+}
+
+[data-theme="ember"] {
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(242, 176, 78, 0.08) 0%, rgba(242, 176, 78, 0) 55%),
+    linear-gradient(180deg, #231c15 0%, #201a15 100%);
+}
+
+[data-theme="tide"] {
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(63, 197, 242, 0.08) 0%, rgba(63, 197, 242, 0) 55%),
+    linear-gradient(180deg, #121a26 0%, #101722 100%);
+}
+
+/* ── Dark (neutral graphite + coral) ────────────────────────────────── */
+[data-theme="dark"] {
+  --background: #1e1e20;
+  --panel: #28282b;
+  --card: #2c2c2e;
+  --border: #46464c;
+  --divider: #38383a;
+  --chip: #3a3a3c;
+  --track: #3a3a3c;
+  --overlay: rgba(0, 0, 0, 0.5);
+
+  --text: #f5f5f7;
+  --text-secondary: #aeaeb2;
+  --text-tertiary: #9a9aa1;
+
+  --ink: #ff7a5c;
+  --ink-strong: #ff8a6e;
+  --on-ink: #ffffff;
+  --ink-soft: rgba(255, 122, 92, 0.16);
+  --ink-grad: linear-gradient(180deg, #ff9070 0%, #ff7a5c 55%, #f96c48 100%);
+  --ink-glow: 0 2px 8px rgba(255, 122, 92, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --ink-glow-strong: 0 4px 14px rgba(255, 122, 92, 0.38), 0 1px 3px rgba(0, 0, 0, 0.22);
+  --used: #ff453a;
+  --used-soft: rgba(255, 69, 58, 0.14);
+  --used-tint: rgba(255, 69, 58, 0.08);
+  --free: #30d158;
+  --free-soft: rgba(48, 209, 88, 0.14);
+  --focus-ring: rgba(255, 122, 92, 0.6);
+}
+
+/* ── Ember (warm espresso + honey gold) ─────────────────────────────── */
+[data-theme="ember"] {
+  --background: #201a15;
+  --panel: #292119;
+  --card: #2e2620;
+  --border: #4a3d2e;
+  --divider: #382e23;
+  --chip: #362c21;
+  --track: #3a3026;
+  --overlay: rgba(12, 8, 4, 0.55);
+
+  --text: #f7f1e8;
+  --text-secondary: #b9a894;
+  --text-tertiary: #98897a;
+
+  --skeleton: #352a1f;
+  --shimmer: rgba(255, 240, 214, 0.06);
+
+  --ink: #f2b04e;
+  --ink-strong: #ffc464;
+  --on-ink: #33230a;
+  --ink-soft: rgba(242, 176, 78, 0.16);
+  --ink-grad: linear-gradient(180deg, #ffd27a 0%, #f2b04e 55%, #d9902c 100%);
+  --ink-glow: 0 2px 8px rgba(242, 176, 78, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25);
+  --ink-glow-strong: 0 4px 14px rgba(242, 176, 78, 0.4), 0 1px 3px rgba(0, 0, 0, 0.28);
+  --used: #ff453a;
+  --used-soft: rgba(255, 69, 58, 0.14);
+  --used-tint: rgba(255, 69, 58, 0.08);
+  --free: #30d158;
+  --free-soft: rgba(48, 209, 88, 0.14);
+  --focus-ring: rgba(242, 176, 78, 0.65);
+}
+
+/* ── Tide (deep marine + lagoon cyan) ───────────────────────────────── */
+[data-theme="tide"] {
+  --background: #101722;
+  --panel: #18202e;
+  --card: #1c2534;
+  --border: #3c4a61;
+  --divider: #263040;
+  --chip: #223046;
+  --track: #263149;
+  --overlay: rgba(2, 6, 14, 0.55);
+
+  --text: #eef4fb;
+  --text-secondary: #a5b3c8;
+  --text-tertiary: #8393ab;
+
+  --skeleton: #1f2837;
+  --shimmer: rgba(224, 242, 254, 0.06);
+
+  --ink: #3fc5f2;
+  --ink-strong: #63d2f8;
+  --on-ink: #072431;
+  --ink-soft: rgba(63, 197, 242, 0.15);
+  --ink-grad: linear-gradient(180deg, #71d9fb 0%, #3fc5f2 55%, #1fa6d8 100%);
+  --ink-glow: 0 2px 8px rgba(63, 197, 242, 0.28), 0 1px 2px rgba(0, 0, 0, 0.25);
+  --ink-glow-strong: 0 4px 14px rgba(63, 197, 242, 0.38), 0 1px 3px rgba(0, 0, 0, 0.28);
+  --used: #ff453a;
+  --used-soft: rgba(255, 69, 58, 0.14);
+  --used-tint: rgba(255, 69, 58, 0.08);
+  --free: #30d158;
+  --free-soft: rgba(48, 209, 88, 0.14);
+  --focus-ring: rgba(63, 197, 242, 0.6);
+}

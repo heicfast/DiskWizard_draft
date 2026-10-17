@@ -1,0 +1,246 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Sidebar — navigation, brand, the live scan widget, help card.
+ * The reference design: white sidebar on the blush app background,
+ * rose active state with a 3px ink rail, 44px rows.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.dw-sidebar {
+  position: relative;
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px 14px;
+  gap: 18px;
+  background: var(--card);
+  border-right: 1px solid var(--divider);
+  min-height: 0;
+}
+
+@media (max-width: 1420px) {
+  .dw-sidebar {
+    width: var(--sidebar-w-compact);
+  }
+}
+
+.dw-sidebar-head {
+  padding: 2px 6px 0;
+}
+
+/* Nav list */
+.dw-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dw-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  font-weight: 570;
+  letter-spacing: -0.005em;
+  text-align: left;
+  transition: background var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+
+.dw-nav-item:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.dw-nav-item.is-active {
+  background: var(--ink-soft);
+  color: var(--ink-strong);
+  font-weight: 650;
+}
+
+.dw-nav-item.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--ink-grad);
+}
+
+.dw-nav-icon {
+  flex-shrink: 0;
+  opacity: 0.92;
+}
+
+.dw-nav-item.is-active .dw-nav-icon {
+  color: var(--ink);
+}
+
+/* The live dot on Scan Results while a scan runs */
+.dw-nav-live-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--ink) 45%, transparent);
+  animation: dw-pulse 1.8s var(--ease-in-out) infinite;
+}
+
+@keyframes dw-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ink) 45%, transparent);
+  }
+  55% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+/* Scan widget */
+.dw-sidebar-foot {
+  margin-top: auto;
+}
+
+.dw-scan-widget {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 13px 12px;
+  border-radius: var(--radius-l);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--ink) 26%, var(--divider));
+  box-shadow: var(--shadow-2), 0 0 0 4px var(--ink-soft);
+}
+
+.dw-scan-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dw-scan-ring-track {
+  stroke: var(--track);
+}
+
+.dw-scan-ring-fill {
+  stroke: url(#dw-ink-grad) var(--ink);
+  stroke: var(--ink);
+  transition: stroke-dashoffset 0.3s linear;
+}
+
+.dw-scan-ring.is-paused .dw-scan-ring-fill {
+  stroke: var(--warn);
+}
+
+.dw-scan-ring-num {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 680;
+  color: var(--text);
+}
+
+.dw-scan-widget-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dw-scan-widget-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.dw-scan-widget-pct {
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.dw-scan-widget-stats {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-scan-widget-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* Help card */
+.dw-help-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 15px 14px 14px;
+  border-radius: var(--radius-l);
+  background: linear-gradient(150deg, var(--ink-soft), transparent 72%), var(--card);
+  border: 1px solid var(--divider);
+}
+
+.dw-help-card-art {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--ink) 22%, var(--divider));
+  box-shadow: var(--shadow-1);
+}
+
+.dw-help-card-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.dw-help-card-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.dw-help-card-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  border-radius: var(--radius-s);
+  border: 1px solid color-mix(in srgb, var(--ink) 38%, transparent);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 620;
+  transition: background var(--dur-micro) ease;
+}
+
+.dw-help-card-btn:hover {
+  background: var(--ink-soft);
+}
