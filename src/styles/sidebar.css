@@ -63,7 +63,7 @@
 
 .dw-nav-item.is-active {
   background: var(--ink-soft);
-  color: var(--ink-strong);
+  color: var(--ink-deep);
   font-weight: 650;
 }
 

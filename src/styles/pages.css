@@ -746,7 +746,7 @@
 .dw-cloud-card .dw-outline-button {
   background: var(--ink-soft);
   border-color: color-mix(in srgb, var(--ink) 34%, transparent);
-  color: var(--ink-strong);
+  color: var(--ink-deep);
 }
 
 .dw-cloud-card .dw-outline-button:hover {

@@ -297,7 +297,7 @@
 
 .dw-mode-switch button.is-on {
   background: var(--ink-soft);
-  color: var(--ink-strong);
+  color: var(--ink-deep);
 }
 
 /* ── 3-pane body ─────────────────────────────────────────────────────── */
@@ -358,7 +358,7 @@
 
 .dw-type-row.is-active {
   background: var(--ink-soft);
-  color: var(--ink-strong);
+  color: var(--ink-deep);
   font-weight: 640;
 }
 

@@ -339,7 +339,7 @@
 }
 
 .dw-tag.is-accent {
-  color: var(--ink);
+  color: var(--ink-deep);
   background: var(--ink-soft);
   border-color: color-mix(in srgb, var(--ink) 24%, transparent);
 }

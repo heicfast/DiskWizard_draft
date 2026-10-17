@@ -71,6 +71,27 @@ quick→deep phase proportions, progressive result filling in 1/40
 slices, auto-saved `.rsf`-named sessions, recoverability grading
 distributions, and the licensing posture machine.
 
+### Key format (the frozen licensing contract)
+
+`DW` + 20 Crockford base32 chars (no I/L/O/U — no confusables),
+normalized to 22 chars, displayed `DW-XXXXX-XXXXX-XXXXX-XXXXX`
+(`src/lib/licenseKey.ts`; the Rust mock enforces the identical body
+alphabet). Mock marker words are Crockford-safe 5-char leet riding
+inside shape-valid keys: `WR0NG` → KEY_NOT_FOUND, `EXP1R` →
+LICENSE_EXPIRED, `REV0K` → KEY_REVOKED, `TAKEN` → DEVICE_SLOT_TAKEN,
+`TESTS` → lifetime tier (see the demo-key table in README).
+
+### Tests
+
+`npm test` (Vitest): the license-key contract, display formatters,
+the activation error-copy mapping, the results-filter matrix
+(essential/complete + category/date/size/junk/existing), store
+actions, and the mock generator invariants (determinism, progressive
+fill, parent-chain resolution, dir size roll-ups, the carved-file
+grade cap). These invariants ARE the UI-facing realism contract —
+when the production core lands, the generator tests retire with the
+mock; the lib/state tests stay.
+
 ## 4. UI structure
 
 ```
@@ -99,4 +120,24 @@ Key decisions cross-linked from the research:
 
 NSIS (currentUser, embedded WebView2 bootstrapper) + MSIX
 (runFullTrust + internetClient, 10.0.19041+, Store-signed on ingest)
-— the DiskGenie pipelines, unchanged.
+— the DiskGenie pipelines, adapted:
+
+- **Windows elevation**: the `requireAdministrator` manifest is
+  embedded by the LINKER (`/MANIFEST:EMBED` + `/MANIFESTUAC:NO` +
+  `/MANIFESTINPUT` in `build.rs`), so the app AND every test binary
+  receive it. `/MANIFESTUAC:NO` is essential: without it the linker
+  also contributes a default `asInvoker` UAC snippet and mt.exe fails
+  the merge (`c1010001` / `LNK1327` — two trustInfo fragments with
+  different levels).
+- **NSIS** (`ci.yml`): `tauri build --target x86_64-pc-windows-msvc
+  --bundles nsis` → versioned setup + portable zip + SHA256SUMS as
+  the `diskwizard-windows-release` artifact.
+- **MSIX** (`msix-build.yml`): the committed brand-kit Store assets
+  (`packaging/msix/Assets/`) + the templated `AppxManifest.xml`
+  (`__IDENTITY_NAME__ / __PUBLISHER__ / __VERSION__` placeholders) →
+  MakeAppx → unsigned `dist-msix` artifact (Partner Center signs on
+  submission). CI materialises the three base-name logos from the
+  scale-100 variants for canonical base-name + scale-file references.
+- **Screenshot tour** (`ui-screenshots.yml`): release build +
+  `DISKWIZARD_TOUR=1` → title-synced one-frame-per-step capture at
+  1920×1080 (dedup-hardened marker set, cadence fallback, app logs).

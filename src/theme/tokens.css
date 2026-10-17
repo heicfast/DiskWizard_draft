@@ -50,6 +50,10 @@
   /* ── Brand & status ───────────────────────────────────────────────── */
   --ink: #ff6b4a;
   --ink-strong: #f5522b;
+  /* Accessible small-type ink: --ink deepened to clear WCAG AA 4.5:1
+     over --ink-soft fills (tags, active nav rows, mode switches).
+     Light-family oranges need the most correction (2.49 -> 4.70). */
+  --ink-deep: #b24b34;
   --on-ink: #ffffff;
   --ink-soft: rgba(255, 107, 74, 0.12);
   /* Primary CTA treatment: subtle top-light gradient + a warm glow
@@ -260,6 +264,7 @@
   /* ── Brand & status ───────────────────────────────────────────────── */
   --ink: #d8506b;
   --ink-strong: #c7405d;
+  --ink-deep: #b14258; /* 4.76:1 on ink-soft over card */
   --on-ink: #ffffff;
   --ink-soft: rgba(216, 80, 107, 0.12);
   --ink-grad: linear-gradient(180deg, #ec6d84 0%, #d8506b 55%, #c43b58 100%);
@@ -323,6 +328,7 @@
 
   --ink: #ff7a5c;
   --ink-strong: #ff8a6e;
+  --ink-deep: var(--ink); /* already >= 4.5 on dark cards */
   --on-ink: #ffffff;
   --ink-soft: rgba(255, 122, 92, 0.16);
   --ink-grad: linear-gradient(180deg, #ff9070 0%, #ff7a5c 55%, #f96c48 100%);
@@ -356,6 +362,7 @@
 
   --ink: #f2b04e;
   --ink-strong: #ffc464;
+  --ink-deep: var(--ink); /* already >= 4.5 on dark cards */
   --on-ink: #33230a;
   --ink-soft: rgba(242, 176, 78, 0.16);
   --ink-grad: linear-gradient(180deg, #ffd27a 0%, #f2b04e 55%, #d9902c 100%);
@@ -389,6 +396,7 @@
 
   --ink: #3fc5f2;
   --ink-strong: #63d2f8;
+  --ink-deep: var(--ink); /* already >= 4.5 on dark cards */
   --on-ink: #072431;
   --ink-soft: rgba(63, 197, 242, 0.15);
   --ink-grad: linear-gradient(180deg, #71d9fb 0%, #3fc5f2 55%, #1fa6d8 100%);
