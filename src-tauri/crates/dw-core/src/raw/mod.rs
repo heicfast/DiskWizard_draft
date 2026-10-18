@@ -29,7 +29,19 @@ use memchr::memmem;
 use crate::blockdev::{AlignedBuf, BlockDevice, BlockRead};
 use crate::error::CoreResult;
 use crate::fs::{ScanControl, ScanSink, ScanStats};
+use std::collections::HashSet;
+
 use crate::types::{Category, Extent, FoundEntry, FsKind, NodeOrigin};
+
+/// FNV-1a content prefix hash + length (the duplicate key).
+fn content_hash(prefix: &[u8], length: u64) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in prefix {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^ length.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
 
 pub use signatures::{Signature, SignatureId, signature_set};
 
@@ -110,6 +122,11 @@ impl RawCarver {
             .collect();
         let window = CARVE_WINDOW.min(usize::try_from(end - cursor).unwrap_or(usize::MAX).max(1));
         let mut buf = AlignedBuf::zeroed(window, self.dev.preferred_read_alignment());
+        // Positions already emitted this carve (absolute): "first
+        // signature wins a position" — while the SAME signature keeps
+        // scanning for further hits (one file per signature PER
+        // WINDOW was the old break bug).
+        let mut emitted: HashSet<u64> = HashSet::new();
         while cursor < end {
             ctrl.checkpoint()?;
             let want = (end - cursor).min(window as u64);
@@ -150,6 +167,9 @@ impl RawCarver {
                         continue;
                     }
                     let abs = cursor + file_rel as u64;
+                    if emitted.contains(&abs) {
+                        continue; // a earlier signature already won here
+                    }
                     if let Some(mut h) = self.validate_hit(sig, abs, end) {
                         h.category = sig.category;
                         if h.length >= sig.min_size {
@@ -166,11 +186,26 @@ impl RawCarver {
                             entry.confidence = h.confidence;
                             entry.category_hint = Some(h.category);
                             entry.dimensions = h.dimensions;
+                            // Same-content key from the window bytes
+                            // (duplicate copies of one file share
+                            // their prefix; the tree marks repeats as
+                            // Version — the essential-mode dedup).
+                            let hash_len = (h.length as usize)
+                                .min(4096)
+                                .min(hay.len().saturating_sub(file_rel));
+                            if hash_len > 0 {
+                                entry.content_key = Some(content_hash(
+                                    &hay[file_rel..file_rel + hash_len],
+                                    h.length,
+                                ));
+                            }
                             entry.source = FsKind::Raw;
                             stats.entries += 1;
                             stats.bytes += entry.size;
-                            sink.on_entry(entry);
-                            break; // first signature wins this position
+                            emitted.insert(abs);
+                            sink.on_entry(entry); // keep scanning —
+                            // further hits of this signature and every
+                            // other one still surface.
                         }
                     }
                 }
@@ -780,6 +815,51 @@ mod tests {
         assert_eq!(e.origin, NodeOrigin::LostPath);
         assert_eq!(e.category_hint, Some(Category::Images));
         assert!(e.size >= 108 && e.size <= 512 * 32);
+    }
+
+    #[test]
+    fn multiple_hits_of_one_signature_all_carve() {
+        // Regression: the old `break` after emit stopped the signature
+        // scan — at most ONE file per signature per window. Three
+        // JPEGs in one window must yield three carves.
+        let mut img = Vec::new();
+        img.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        img.extend_from_slice(&[0u8; 4]);
+        img.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11]);
+        img.extend_from_slice(&[8, 0, 6, 0x02, 0x80]);
+        img.extend_from_slice(&[0x01, 0xE0]);
+        img.extend_from_slice(&[0u8; 200]);
+        img.extend_from_slice(&[0xFF, 0xD9]);
+        let mut ram = RamDevice::new(512 * 16, 512);
+        for off in [0usize, 2048, 4096] {
+            ram.data[off..off + img.len()].copy_from_slice(&img);
+        }
+        let (stats, entries) = carve_ram(ram, 512 * 16);
+        assert_eq!(entries.len(), 3, "all three copies carved");
+        assert_eq!(stats.entries, 3);
+    }
+
+    #[test]
+    fn identical_copies_share_content_key() {
+        // Two byte-identical JPEGs at different offsets → two carves,
+        // ONE content key (the tree marks the repeat as Version).
+        let mut img = Vec::new();
+        img.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        img.extend_from_slice(&[0u8; 4]);
+        img.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11]);
+        img.extend_from_slice(&[8, 0, 6, 0x02, 0x80]);
+        img.extend_from_slice(&[0x01, 0xE0]);
+        img.extend_from_slice(&[0u8; 200]);
+        img.extend_from_slice(&[0xFF, 0xD9]);
+        let mut ram = RamDevice::new(512 * 8, 512);
+        ram.data[..img.len()].copy_from_slice(&img);
+        ram.data[2048..2048 + img.len()].copy_from_slice(&img);
+        let (_, entries) = carve_ram(ram, 512 * 8);
+        assert_eq!(entries.len(), 2, "both copies carved");
+        let keys: Vec<Option<u64>> = entries.iter().map(|e| e.content_key).collect();
+        assert!(keys[0].is_some(), "content key computed");
+        assert_eq!(keys[0], keys[1], "identical content shares the key");
+        assert_ne!(entries[0].extents[0].offset, entries[1].extents[0].offset);
     }
 
     #[test]

@@ -643,6 +643,7 @@ impl NtfsEngine {
                             confidence: if *compressed { 70 } else { 100 },
                             category_hint: None,
                             dimensions: None,
+                            content_key: None,
                             source: FsKind::Ntfs,
                         };
                         // Resident streams carry inline content.

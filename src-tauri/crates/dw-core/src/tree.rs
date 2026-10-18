@@ -60,6 +60,9 @@ pub struct TreeBuilder {
     dirs: HashMap<String, u64>,
     /// first-extent offset → file node id (carved-vs-structured merge).
     by_first_extent: HashMap<u64, u64>,
+    /// content key → first node id carrying that content (the
+    /// duplicate/nonessential filter: repeats mark as Version).
+    by_content_key: HashMap<u64, u64>,
     /// Per-category live counters.
     counts: HashMap<Category, (u64, u64)>,
     root_name: String,
@@ -84,6 +87,7 @@ impl TreeBuilder {
             nodes: Vec::new(),
             dirs: HashMap::new(),
             by_first_extent: HashMap::new(),
+            by_content_key: HashMap::new(),
             counts: HashMap::new(),
             root_name: root_name.to_string(),
         };
@@ -126,17 +130,31 @@ impl TreeBuilder {
             return;
         }
         // Merge: same first extent + already structured → absorbed.
+        // Same first extent + same size + already carved → absorbed
+        // too (the same on-disk region carved twice is redundant,
+        // not a distinct copy).
         let first_off = e.extents.first().map_or(u64::MAX, |x| x.offset);
         if first_off != u64::MAX
             && let Some(&existing_id) = self.by_first_extent.get(&first_off)
         {
-            let existing = &mut self.nodes[existing_id as usize];
+            let existing = &self.nodes[existing_id as usize];
             if !existing.is_dir
-                && matches!(existing.origin, NodeOrigin::Existing | NodeOrigin::Deleted)
+                && (matches!(existing.origin, NodeOrigin::Existing | NodeOrigin::Deleted)
+                    || (matches!(existing.origin, NodeOrigin::LostPath | NodeOrigin::LostName)
+                        && existing.size == e.size))
             {
-                // Structured wins: the carved copy is noise.
+                // Structured wins / region-identical carve: noise.
                 return;
             }
+        }
+        // Same content elsewhere on disk: keep the node (complete
+        // mode shows every copy) but mark it Version — the essential
+        // mode hides repeats (the ~65% reduction contract).
+        let mut origin = e.origin;
+        if let Some(key) = e.content_key
+            && self.by_content_key.contains_key(&key)
+        {
+            origin = NodeOrigin::Version;
         }
         let category = e.category_hint.unwrap_or_else(|| classify(&e.name));
         let (dir_id, lost_branch) = self.resolve_parent(&e);
@@ -154,7 +172,7 @@ impl TreeBuilder {
             category,
             size: e.size,
             modified: e.timestamps.modified.unwrap_or_default(),
-            origin: e.origin,
+            origin,
             recoverability,
             path,
             timestamps: e.timestamps,
@@ -166,6 +184,9 @@ impl TreeBuilder {
         });
         if first_off != u64::MAX {
             self.by_first_extent.insert(first_off, id);
+        }
+        if let Some(key) = e.content_key {
+            self.by_content_key.entry(key).or_insert(id);
         }
         let entry = &self.nodes[id as usize];
         let c = self.counts.entry(entry.category).or_insert((0, 0));
@@ -415,6 +436,51 @@ mod tests {
         b.add(carved);
         let (_, bytes) = b.totals();
         assert_eq!(bytes, 1000, "carved duplicate absorbed");
+    }
+
+    #[test]
+    fn same_region_carved_duplicate_absorbed() {
+        let mut b = TreeBuilder::new();
+        b.add(file(
+            "JPG_0000C350.jpg",
+            800,
+            NodeOrigin::LostPath,
+            Some(50_000),
+        ));
+        // A second carve of the SAME on-disk region (same first
+        // extent + same size) is redundant, not a distinct copy.
+        b.add(file(
+            "JPG_0000C350 (2).jpg",
+            800,
+            NodeOrigin::LostPath,
+            Some(50_000),
+        ));
+        let (files, bytes) = b.totals();
+        assert_eq!((files, bytes), (1, 800), "region-identical carve absorbed");
+    }
+
+    #[test]
+    fn same_content_elsewhere_marks_version() {
+        let mut b = TreeBuilder::new();
+        let mut first = file("JPG_0000C350.jpg", 800, NodeOrigin::LostPath, Some(50_000));
+        first.content_key = Some(0xABCD);
+        let mut second = file("JPG_0001A000.jpg", 800, NodeOrigin::LostPath, Some(106_496));
+        second.content_key = Some(0xABCD);
+        b.add(first);
+        b.add(second);
+        let nodes = b.nodes();
+        let dup = nodes
+            .iter()
+            .find(|n| n.name == "JPG_0001A000.jpg")
+            .expect("duplicate kept for complete mode");
+        assert_eq!(dup.origin, NodeOrigin::Version, "repeat marked Version");
+        let first = nodes
+            .iter()
+            .find(|n| n.name == "JPG_0000C350.jpg")
+            .expect("original present");
+        assert_eq!(first.origin, NodeOrigin::LostPath, "first copy unchanged");
+        let (files, _) = b.totals();
+        assert_eq!(files, 2, "both nodes exist (essential hides client-side)");
     }
 
     #[test]

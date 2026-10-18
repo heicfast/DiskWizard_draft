@@ -245,6 +245,10 @@ pub struct FoundEntry {
     pub category_hint: Option<Category>,
     /// Image dimensions when cheaply known (carvers parse headers).
     pub dimensions: Option<(u32, u32)>,
+    /// Cheap content identity — FNV-1a over the content prefix —
+    /// set by carvers (the duplicate/nonessential filter's
+    /// same-content key; structured engines leave it None).
+    pub content_key: Option<u64>,
     /// Engine that produced the entry (diagnostics + merge policy).
     pub source: FsKind,
 }
@@ -265,6 +269,7 @@ impl FoundEntry {
             confidence: 100,
             category_hint: None,
             dimensions: None,
+            content_key: None,
             source,
         }
     }
