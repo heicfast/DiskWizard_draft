@@ -168,3 +168,86 @@ behind the frozen IPC contract; keep the mock as a dev-only feature.
 - Next: Windows CI compile pass, VHD end-to-end integration test,
   M2 engines (ext/HFS+/ReFS), SDR deep repair, then the repair
   phase per docs/TODO.md.
+
+---
+
+## Session 4 — Green CI recovery + the ADR-1 I/O redesign
+
+**Task ID**: 4
+**Agent**: main (Z.ai) — recovery + performance session
+**Task**: Recover from the failed Windows CI, enforce version
+discipline, then execute the owner's I/O review: upgrade ADR-1 to
+"high-performance user-mode direct I/O is the product path" and
+rebuild the raw-IO layer accordingly.
+
+**Work Log**:
+- **Root-cause of the red CI**: dw-win was authored against guessed
+  windows-rs 0.62 signatures and never compiled before push
+  (aws-lc-sys blocked Linux→Windows cross-checks; CI only built
+  dw-core/dw-license natively). Fixed every signature (Ioctl under
+  System::, ATA PASS-THROUGH under Storage::IscsiDisc,
+  GetTokenInformation under Security, LocalFree under Foundation,
+  slice-based GetVolumeInformationW, Result-returning DeviceIoControl,
+  plain-bool BOOLEANs). The NVMe health-log query was REWRITTEN: the
+  SDK grew ProtocolDataRequestSubValue2/3/4 (44-byte struct) and the
+  old overlay arithmetic would have underflowed the buffer pointer;
+  the health-log field offsets were wrong (power cycles 96, hours
+  112, percentage used byte 5, media errors 144).
+- **Version discipline (owner directive)**: rust-version 1.80 → 1.99
+  (verified = latest stable, 1.99.1), edition 2021 → 2024 in all four
+  manifests (reserved keyword `gen` renamed; let-chains adopted).
+- **dw-license feature seam**: reqwest client now behind `client`
+  (default on); dw-win pins default-features=false so its dependency
+  closure is pure Rust — enabling `cargo check/clippy --target
+  x86_64-pc-windows-msvc` from Linux. This gate now runs in CI
+  (rust-core job) plus a new fast `windows-check` job (workspace
+  check default+sim on a real Windows toolchain).
+- **App-crate Windows fixes** (caught by the new fast gate): windows
+  crate dep for direct Win32 calls in commands, tauri::Manager
+  imports, thread-name String (std 1.99), posture import shadowing,
+  SectorSizeMode re-export, slot writes through .lock(), credential
+  by-reference, Value::Null typo, AppState constructor wiring.
+- **RawHandleDevice v2 (the review's core demand)**: positioned
+  OVERLAPPED reads (offset rides in OVERLAPPED — no shared file
+  pointer, no seek), FILE_FLAG_NO_BUFFERING with aligned staging for
+  unaligned buffers, STORAGE_ACCESS_ALIGNMENT probe, pooled
+  manual-reset events, IOCTL_DISK_GET_LENGTH_INFO for volume
+  capacity, owned handles with proper Drop.
+- **BlockDevice seam extensions**: `read_sectors_sparse` (best-effort
+  bulk reads; failed reads degrade to ONE attempt per sector — no
+  retry storms — with readable sectors salvaged and dead ranges
+  reported) and `preferred_read_alignment`; AlignedBuf (pure-safe
+  interior-offset alignment); cache chunks allocate aligned so the
+  metadata hot path never stages; SubDevice/CachedDevice delegate
+  sparse + alignment.
+- **Carver v2**: 8 MiB aligned windows with 64 KiB overlap, memchr
+  memmem signature matching (SIMD-friendly), sparse window reads,
+  bad-range hit suppression. Validators rewritten as bounded
+  streaming Prober walks — the old code allocated up to 4 GiB per
+  candidate (PDF 2 GiB, ISO-BMFF 4 GiB, MP3 up to capacity); caps are
+  now LENGTH bounds, never allocations (fixed ~1 MiB scratch). ZIP's
+  bogus OggS fallback replaced with an honest bounded low-confidence
+  carve.
+- **Scan dispatch**: diskN-partM targets now slice the partition
+  (SubDevice over the physical disk; table-index match + MBR slot
+  fallback matching Windows PartitionNumber semantics) so quick
+  filesystem scans actually run; whole-disk targets dispatch across
+  all discovered partitions (progress weighted by size, per-partition
+  tree branches) with one whole-device carve sweep covering
+  unallocated space.
+- **get_scan_progress**: the poll endpoint now serves the worker's
+  live engine snapshot (percent/files/bytes/sectors/searching label
+  + rate-based ETA) instead of stub zeros.
+- ADR-1 upgraded in docs/CORE-PLAN.md; README session status now
+  describes the real core (v0.2).
+
+**Stage Summary**:
+- Local gates: fmt clean; clippy -D warnings clean on native AND
+  windows-msvc (tests included); 114 engine tests green (87 dw-core +
+  27 dw-license).
+- The first Phase-A push still failed the Windows app build (app-crate
+  errors listed above) — all fixed in this push; the fast windows-check
+  job exists precisely to catch that class within minutes.
+- Next: verify CI green incl. the VHD end-to-end on the real Windows
+  runner (the v2 raw-IO layer is what it exercises), then multi-POV
+  review + M2 engines (ext2/3, HFS+, ReFS) per CORE-PLAN.

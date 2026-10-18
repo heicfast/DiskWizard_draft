@@ -65,7 +65,16 @@ fn fit_and_show(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(commands::shared_state())
+        .manage({
+            #[cfg(not(feature = "sim"))]
+            {
+                commands::real_state()
+            }
+            #[cfg(feature = "sim")]
+            {
+                commands::shared_state()
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // Devices & health
             commands::list_devices,

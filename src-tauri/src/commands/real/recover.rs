@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use dw_core::blockdev::BlockDevice;
 use dw_core::recover::{DestWriter, build_queue, run_recovery};
@@ -77,7 +77,7 @@ impl DestWriter for FsDest {
                     Some(&mut free),
                 )
             };
-            ok.as_bool()
+            ok.is_ok()
                 .then_some(free)
                 .ok_or_else(|| "free-space query failed".to_string())
         }
@@ -146,7 +146,7 @@ pub fn start_recovery(
     }
     let nodes = s
         .scan
-        .tree
+        .tree_slot()
         .lock()
         .clone()
         .ok_or("NO_SCAN_RESULTS. The scan has no results yet.")?;
@@ -166,7 +166,7 @@ pub fn start_recovery(
     let enable = enable_repair.unwrap_or(true);
     let app = app.clone();
     std::thread::Builder::new()
-        .name("dw-recover")
+        .name("dw-recover".to_string())
         .spawn(move || {
             let state: State<'_, AppState> = app.state();
             let mut dest = FsDest {

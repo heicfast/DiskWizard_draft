@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{BlockDevice, check_buf};
+use super::{AlignedBuf, BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// Sectors per cache chunk (32 KiB at 512-byte sectors).
@@ -27,7 +27,7 @@ const CHUNK_SECTORS: u64 = 64;
 const DEFAULT_CHUNKS: usize = 256;
 
 struct Chunk {
-    data: Vec<u8>,
+    data: AlignedBuf,
 }
 
 struct Inner {
@@ -113,19 +113,27 @@ impl CachedDevice {
                     .saturating_sub(chunk_lba * CHUNK_SECTORS);
                 let take = CHUNK_SECTORS.min(sectors_left) as usize;
                 if take == 0 {
-                    *guard = Some(Chunk { data: Vec::new() });
+                    *guard = Some(Chunk {
+                        data: AlignedBuf::zeroed(0, self.parent.preferred_read_alignment()),
+                    });
                 } else {
-                    let mut buf = vec![0u8; take * ss];
+                    // Chunks allocate at the parent's preferred
+                    // alignment so unbuffered devices read them in
+                    // place (no per-read staging copies).
+                    let mut buf =
+                        AlignedBuf::zeroed(take * ss, self.parent.preferred_read_alignment());
                     match self
                         .parent
-                        .read_sectors(chunk_lba * CHUNK_SECTORS, &mut buf)
+                        .read_sectors(chunk_lba * CHUNK_SECTORS, &mut buf[..take * ss])
                     {
                         Ok(()) => *guard = Some(Chunk { data: buf }),
                         Err(e) => {
                             // Entire-chunk failure: mark dead and drop the
                             // reservation so later requests can retry once
                             // per generation (dead-map guards the hot path).
-                            *guard = Some(Chunk { data: Vec::new() });
+                            *guard = Some(Chunk {
+                                data: AlignedBuf::zeroed(0, self.parent.preferred_read_alignment()),
+                            });
                             self.dead.lock().insert(chunk_lba);
                             return Err(e);
                         }
@@ -207,6 +215,20 @@ impl BlockDevice for CachedDevice {
 
     fn describe(&self) -> String {
         format!("cached({})/{}", self.max_chunks, self.parent.describe())
+    }
+
+    /// Bulk passes bypass the chunk cache: carving windows are
+    /// single-pass (caching them would evict the metadata working
+    /// set for zero reuse) and may be far larger than a chunk.
+    fn read_sectors_sparse(&self, start_lba: u64, buf: &mut [u8]) -> CoreResult<Vec<(u64, u64)>> {
+        if let Some(e) = check_buf(buf, self.sector_size) {
+            return Err(e);
+        }
+        self.parent.read_sectors_sparse(start_lba, buf)
+    }
+
+    fn preferred_read_alignment(&self) -> u32 {
+        self.parent.preferred_read_alignment()
     }
 }
 

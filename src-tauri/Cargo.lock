@@ -749,6 +749,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "thiserror 2.0.21",
+ "windows",
 ]
 
 [[package]]
@@ -848,6 +849,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "flate2",
+ "memchr",
  "parking_lot",
  "serde",
  "serde_json",
@@ -874,6 +876,7 @@ version = "0.1.0"
 dependencies = [
  "dw-core",
  "dw-license",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

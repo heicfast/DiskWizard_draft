@@ -420,14 +420,35 @@ Wire-identical to `diskgenie-v2`'s documented system (owner directive:
 
 ## 10. ADRs (architecture decision records)
 
-- **ADR-1: user-mode raw IO (no kernel driver in M1/M2).** The research
-  documents the vendor's EPMNtDrv driver (IOCTLs 0x60002400/04/08, MDL
-  async sector IO). Shipping a kernel driver requires EV-code-signing +
-  attestation/WHQL — not viable for this stage. Modern recovery tools
-  (DMDE, R-Studio class) operate user-mode: `\\.\PhysicalDriveN` for
-  whole-disk/lost partitions, `\\.\X:` volume handles with share-flags
-  for mounted volumes. The `BlockDevice` trait preserves the seam: a
-  driver-backed implementation can slot in later without engine changes.
+- **ADR-1 (rev 2): high-performance user-mode direct I/O IS the
+  product path.** The research documents the vendor's EPMNtDrv driver
+  (IOCTLs 0x60002400/04/08, MDL async sector IO), but a kernel
+  driver is NOT required for professional recovery throughput — the
+  gains that matter come from large aligned reads, positioned
+  overlapped requests (no shared file pointer), adaptive scheduling,
+  low allocation overhead, and good carving algorithms, all
+  achievable from user mode through `\\.\PhysicalDriveN`, volume
+  handles, and storage IOCTLs. dw-win implements exactly that
+  discipline:
+  - handles open `FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED`
+    (buffered fallback when a filter stack rejects no-buffering);
+  - every read carries its offset in the `OVERLAPPED` — concurrent
+    calls race nowhere (no `seek`);
+  - buffer addresses align to the media's logical sector
+    (`STORAGE_ACCESS_ALIGNMENT` probe); the engine's cache chunks and
+    the carver's 8 MiB windows allocate aligned, so the metadata hot
+    path and the bulk sweep both read in place;
+  - media errors never storm: a failed bulk read degrades to ONE
+    attempt per sector (`read_sectors_sparse`), salvaging every
+    readable sector and reporting the dead ranges;
+  - the carve sweep reads multi-megabyte sparse windows with
+    SIMD-friendly `memmem` matching, not per-sector calls.
+  A driver becomes justified later only for capabilities user mode
+  cannot safely provide (low-level filter behavior, tightly
+  controlled imaging, very early-boot rescue). Until then the
+  `BlockDevice` trait remains the seam a driver-backed implementation
+  could slot into without engine changes — but it is NOT on the M1/M2
+  path, and user-mode I/O is not a stopgap: it is the design.
 - **ADR-2: engines as pure-Rust over Read+Seek.** Maximum testability
   (Linux CI), no unsafe in engines; all Windows-specific IO in dw-win.
 - **ADR-3: keep both mocks behind features.** Owner requirement (dev

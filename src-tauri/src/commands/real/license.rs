@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use dw_license::http::ReqwestLicense;
-use dw_license::posture::{self, LicensePosture, LicenseState};
+use dw_license::posture::{LicensePosture, LicenseState};
 use dw_license::protocol::{DeviceFacts, LicenseApi};
 use dw_license::store::StateStore;
 use dw_license::token::LicenseError;
@@ -55,7 +55,7 @@ impl LicenseManager {
     /// The frozen `LicenseStatus` payload.
     pub fn status_json(&self) -> Value {
         let st = self.state.read();
-        let p = posture(&st, self.now());
+        let p = dw_license::posture(&st, self.now());
         let (posture_str, is_pro, days) = match p {
             LicensePosture::Unlicensed => ("unlicensed", false, 0),
             LicensePosture::Pro => ("pro", true, 0),
@@ -201,7 +201,7 @@ impl LicenseManager {
 
     /// The L6 gate: privileged commands refuse when unlicensed.
     pub fn require_licensed(&self) -> Result<(), String> {
-        let p = posture(&self.state.read(), self.now());
+        let p = dw_license::posture(&self.state.read(), self.now());
         if p.is_pro() {
             Ok(())
         } else {
@@ -234,15 +234,16 @@ fn marker_for(e: &LicenseError) -> &'static str {
     }
 }
 
-/// The L6 gate for command handlers.
-pub fn require_licensed(s: &State<'_, AppState>) -> Result<(), String> {
+/// The L6 gate for command handlers (accepts `&AppState`; `State`
+/// call-sites coerce through `Deref`).
+pub fn require_licensed(s: &AppState) -> Result<(), String> {
     s.license.require_licensed()
 }
 
 /// The 24 h revalidation scheduler (+ launch check).
 pub fn spawn_scheduler(app: AppHandle) {
     std::thread::Builder::new()
-        .name("dw-license-scheduler")
+        .name("dw-license-scheduler".to_string())
         .spawn(move || {
             // Launch validation after a short settle.
             std::thread::sleep(std::time::Duration::from_secs(20));

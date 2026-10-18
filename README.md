@@ -4,7 +4,18 @@
 
 Rust core + **Tauri 2 (WebView2)** + **React/TypeScript**. No Electron, no browser bloat.
 
-> **Session status (v0.1 — UI/UX build):** the complete premium interface is in place, driven by a **simulated core** that mirrors the reverse-engineered product architecture 1:1 (command surface, event names, phase machines, licensing gates). The production Rust engine lands next and swaps in behind the frozen frontend contract. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`worklog.md`](worklog.md).
+> **Session status (v0.2 — real core wired):** the production Rust
+> engine is IN and default: real device enumeration, partition
+> resolution (partition-slice scanning, whole-disk multi-partition
+> dispatch), NTFS/FAT/exFAT engines, 8 MiB-windowed RAW carving with
+> bounded streaming validators, positioned-overlapped aligned raw
+> I/O with media-error isolation, recovery, .rsf sessions, and the
+> DiskGenie-architecture licensing. The UI/UX is unchanged and drives
+> the same frozen contract. A development simulation core remains
+> behind the `sim` feature for tour/screenshot builds — it is NEVER
+> compiled into release builds. See [`docs/CORE-PLAN.md`](docs/CORE-PLAN.md),
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+> [`worklog.md`](worklog.md).
 
 ## Highlights
 
@@ -21,10 +32,10 @@ Rust core + **Tauri 2 (WebView2)** + **React/TypeScript**. No Electron, no brows
 ```bash
 npm install
 npm run dev            # browser mode — the TS mock backend drives the whole UI
-npm run tauri dev      # desktop mode — the Rust mock-core serves the same commands
+npm run tauri dev      # desktop mode — the REAL Rust core serves the commands
 ```
 
-Browser mode auto-installs the mock backend (`src/mock`) behind a DEV gate — it never ships in a bundle. The same command surface is implemented in Rust (`src-tauri/src/commands/mock`) so packaged dev builds behave identically.
+Browser mode auto-installs the mock backend (`src/mock`) behind a DEV gate — it never ships in a bundle. The desktop app defaults to the **real engine** (`src-tauri/src/commands/real`); `npm run tauri dev -- --features sim` swaps in the Rust simulation core for tour/screenshot work (release builds never enable it).
 
 ## Build & release
 

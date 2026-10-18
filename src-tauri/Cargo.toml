@@ -39,6 +39,12 @@ thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 dw-win = { path = "crates/dw-win" }
+# Direct Win32 calls in the app command layer (volume labels, free
+# space) — same windows-rs family as dw-win.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [features]
 default = []

@@ -84,6 +84,23 @@ impl BlockDevice for SubDevice {
         self.parent.read_sectors(self.start_lba + start_lba, buf)
     }
 
+    fn read_sectors_sparse(&self, start_lba: u64, buf: &mut [u8]) -> CoreResult<Vec<(u64, u64)>> {
+        if let Some(e) = check_buf(buf, self.sector_size()) {
+            return Err(e);
+        }
+        if start_lba + (buf.len() / self.sector_size() as usize) as u64 > self.len_sectors {
+            buf.fill(0);
+            return Ok(vec![(0, buf.len() as u64)]);
+        }
+        // The delegated read covers exactly `buf` — bad ranges map 1:1.
+        self.parent
+            .read_sectors_sparse(self.start_lba + start_lba, buf)
+    }
+
+    fn preferred_read_alignment(&self) -> u32 {
+        self.parent.preferred_read_alignment()
+    }
+
     fn describe(&self) -> String {
         format!(
             "{}@{}+{}x{}",

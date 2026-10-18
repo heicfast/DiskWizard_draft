@@ -27,6 +27,10 @@ pub struct ScanSession {
     report: Mutex<Option<ScanReport>>,
     phase: Mutex<Phase>,
     started_at: Mutex<Option<Instant>>,
+    /// The worker's latest engine snapshot (the poll endpoint's data
+    /// source — the UI polls when events are throttled or missed).
+    progress: Mutex<Option<dw_core::scan::Progress>>,
+    searching: Mutex<String>,
 }
 
 impl Default for ScanSession {
@@ -40,6 +44,8 @@ impl Default for ScanSession {
             report: Mutex::new(None),
             phase: Mutex::new(Phase::Preparing),
             started_at: Mutex::new(None),
+            progress: Mutex::new(None),
+            searching: Mutex::new("Scanning…".into()),
         }
     }
 }
@@ -122,7 +128,17 @@ impl ProgressObserver for EventObserver {
         }
         self.last_emit = Instant::now();
         self.last_percent = p.percent;
-        let remaining = ((100.0 - p.percent) / 100.0 * 60.0).round() as u64;
+        // Refresh the poll slots (single managed state write).
+        if let Some(state) = self.app.try_state::<crate::AppState>() {
+            *state.scan.progress.lock() = Some(p.clone());
+            *state.scan.searching.lock() = searching_label(p, &self.target_name);
+        }
+        let rate = if p.percent > 0.0 {
+            (f64::from(p.elapsed_sec) * (100.0 - p.percent) / p.percent).ceil() as u64
+        } else {
+            60
+        };
+        let remaining = rate.max(1);
         let payload = json!({
             "generation": self.generation,
             "targetId": self.target_id,
@@ -151,7 +167,7 @@ impl ProgressObserver for EventObserver {
 }
 
 /// Resolve a device id → (block device, display name).
-fn resolve_target(device_id: &str) -> Result<(Arc<dyn BlockDevice>, String), String> {
+pub(super) fn resolve_target(device_id: &str) -> Result<(Arc<dyn BlockDevice>, String), String> {
     #[cfg(windows)]
     {
         use dw_win::volume::{DeviceTarget, parse_device_id};
@@ -163,15 +179,22 @@ fn resolve_target(device_id: &str) -> Result<(Arc<dyn BlockDevice>, String), Str
                     .map_err(|e| format!("DEVICE_OPEN_FAILED. {e}"))?;
                 Ok((Arc::new(dev), format!("Disk {n}")))
             }
-            DeviceTarget::Partition {
-                disk: n,
-                part_no: _,
-            } => {
-                // The engine reads the whole disk and resolves the
-                // partition through the table.
+            DeviceTarget::Partition { disk: n, part_no } => {
+                // The engine must scan the VOLUME (LBA 0 = the
+                // partition's boot sector), never the whole-disk MBR.
+                // Slice the selected partition out of the parsed table.
                 let dev = dw_win::blockdev::RawHandleDevice::open_physical(n)
                     .map_err(|e| format!("DEVICE_OPEN_FAILED. {e}"))?;
-                Ok((Arc::new(dev), format!("Disk {n}")))
+                let parent: Arc<dyn BlockDevice> = Arc::new(dev);
+                let (start, len) = partition_extent(&parent, part_no)
+                    .ok_or_else(|| format!("PARTITION_NOT_FOUND. disk {n} partition {part_no}"))?;
+                let sub = Arc::new(dw_core::blockdev::SubDevice::new(
+                    parent,
+                    start,
+                    len,
+                    format!("disk{n}-part{part_no}"),
+                ));
+                Ok((sub, format!("Disk {n} Partition {part_no}")))
             }
             DeviceTarget::LostPartition { disk: n, start_lba } => {
                 let dev = dw_win::blockdev::RawHandleDevice::open_physical(n)
@@ -198,24 +221,57 @@ fn resolve_target(device_id: &str) -> Result<(Arc<dyn BlockDevice>, String), Str
     }
 }
 
+/// Locate partition `part_no` on an open whole-disk device →
+/// `(start_lba, len_sectors)`.
+///
+/// Matching order: the parsed table's index (GPT entry order and
+/// dense MBR tables number exactly like Windows' PartitionNumber),
+/// then an MBR slot fallback — Windows numbers MBR primaries by SLOT
+/// position (slot i → i+1), which sparse tables shift relative to the
+/// count-based parse.
+#[cfg(windows)]
+fn partition_extent(disk: &Arc<dyn BlockDevice>, part_no: u32) -> Option<(u64, u64)> {
+    use dw_core::blockdev::BlockRead;
+    if let Ok(layout) = dw_win::devices::read_layout(disk.as_ref()) {
+        if let Some(p) = layout.partitions.iter().find(|p| p.index == part_no) {
+            return Some((p.start_lba, p.total_sectors));
+        }
+    }
+    // MBR slot fallback: slot i (0-based) ⇒ Windows PartitionNumber
+    // i+1 for primaries.
+    let sector0 = disk.read_struct_at::<512>(0).ok()?;
+    if u16::from_le_bytes([sector0[510], sector0[511]]) != 0xAA55 {
+        return None;
+    }
+    let slot = usize::from(part_no.clamp(1, 4) - 1);
+    let entry = &sector0[0x1BE + slot * 16..0x1BE + slot * 16 + 16];
+    let ptype = entry[4];
+    if ptype == 0x00 || ptype == 0x05 || ptype == 0x0F || ptype == 0xEE {
+        return None;
+    }
+    let start = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as u64;
+    let len = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as u64;
+    (len > 0).then_some((start, len))
+}
+
 #[cfg(windows)]
 fn volume_display_name(letter: char) -> String {
     let root = format!("{letter}:\\");
     let w: Vec<u16> = root.encode_utf16().chain([0]).collect();
     let mut label = [0u16; 64];
+    // SAFETY: w is NUL-terminated; label is a fixed buffer whose
+    // capacity travels with the slice.
     let ok = unsafe {
         windows::Win32::Storage::FileSystem::GetVolumeInformationW(
             windows::core::PCWSTR(w.as_ptr()),
-            Some(label.as_mut_ptr()),
-            Some(label.len() as u32),
-            None,
+            Some(&mut label),
             None,
             None,
             None,
             None,
         )
     };
-    if ok.as_bool() {
+    if ok.is_ok() {
         let l = String::from_utf16_lossy(&label)
             .trim_end_matches('\0')
             .to_string();
@@ -391,32 +447,62 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
         return Value::Null;
     }
     let phase = *s.scan.phase.lock();
+    let progress = s.scan.progress.lock().clone();
     let report = s.scan.report.lock().clone();
-    let (files, bytes) = report
-        .as_ref()
-        .map(|r| (r.files_found, r.bytes_found))
-        .unwrap_or((0, 0));
-    let elapsed = s
-        .scan
-        .started_at
-        .lock()
-        .map(|t| t.elapsed().as_secs())
-        .unwrap_or_default();
+    // Prefer the worker's live snapshot; fall back to the final
+    // report for done/stopped scans whose events already flushed.
+    let (percent, stats, elapsed, searching) = match (&progress, &report) {
+        (Some(p), _) => (
+            p.percent,
+            (
+                p.files_found,
+                p.bytes_found,
+                p.sectors_read,
+                p.sectors_total,
+            ),
+            p.elapsed_sec,
+            s.scan.searching.lock().clone(),
+        ),
+        (None, Some(r)) => (
+            if phase == Phase::Done { 100.0 } else { 0.0 },
+            (r.files_found, r.bytes_found, 0, 0),
+            r.duration_sec,
+            "Scanning…".to_string(),
+        ),
+        (None, None) => (
+            if phase == Phase::Done { 100.0 } else { 0.0 },
+            (0, 0, 0, 0),
+            s.scan
+                .started_at
+                .lock()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or_default(),
+            "Scanning…".to_string(),
+        ),
+    };
+    let remaining = if percent > 0.0 && percent < 100.0 {
+        ((f64::from(elapsed) * (100.0 - percent) / percent).ceil() as u64).max(1)
+    } else if percent >= 100.0 {
+        0
+    } else {
+        1
+    };
+    let (files, bytes, sectors_read, sectors_total) = stats;
     json!({
         "generation": generation,
         "targetId": *s.scan.target_id.lock(),
         "targetName": *s.scan.target_name.lock(),
         "phase": phase.wire(),
-        "percent": if phase == Phase::Done { 100.0 } else { 0.0 },
+        "percent": percent,
         "stats": {
             "filesFound": files,
             "bytesFound": bytes,
-            "sectorsRead": 0,
-            "sectorsTotal": 0,
+            "sectorsRead": sectors_read,
+            "sectorsTotal": sectors_total,
         },
         "elapsedSec": elapsed,
-        "remainingSec": 1,
-        "searchingLabel": "Scanning…",
+        "remainingSec": remaining,
+        "searchingLabel": searching,
     })
 }
 
@@ -427,7 +513,7 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64) -> Value {
     }
     let tree = s.scan.tree.lock().clone();
     let Some(nodes) = tree else {
-        return Value::Null();
+        return Value::Null;
     };
     let mut categories: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();

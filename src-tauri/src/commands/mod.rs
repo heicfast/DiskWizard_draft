@@ -15,6 +15,12 @@ mod real;
 #[cfg(not(feature = "sim"))]
 pub use real::{devices::*, license::*, recover::*, scan::*, session::*, settings::*};
 
+/// The managed-state constructor (mirrors the mock's `shared_state`).
+#[cfg(not(feature = "sim"))]
+pub fn real_state() -> real::AppState {
+    real::AppState::new()
+}
+
 /// Bootstrap: start whatever background machinery the active build
 /// needs (the scan ticker for sim; nothing for the real core — its
 /// threads spawn per scan).

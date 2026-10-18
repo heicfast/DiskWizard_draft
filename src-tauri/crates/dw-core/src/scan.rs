@@ -165,6 +165,13 @@ impl ScanController {
 
     /// Run the full pipeline to completion (or stop).
     ///
+    /// Whole-disk targets dispatch across their discovered partitions
+    /// (each partition scans as its own volume — quick + deep — with
+    /// progress weighted by size); the RAW carve then sweeps the WHOLE
+    /// device so unpartitioned and lost space is covered too. Targets
+    /// that are already volumes (partition slices, volume handles,
+    /// lost partitions) form a single unit.
+    ///
     /// # Errors
     /// [`CoreError::Cancelled`] propagates when stopped (the report
     /// is still assembled first — stopped scans keep their results).
@@ -177,55 +184,67 @@ impl ScanController {
         self.ctrl.checkpoint()?;
         self.emit(obs, 0.0);
 
-        // Probe the filesystem.
-        let fs_kind = fs::probe_filesystem(&*self.dev)?;
-        let engine_result =
-            fs::create_engine(fs_kind, Arc::clone(&self.dev) as Arc<dyn BlockDevice>);
+        // Build the scan units: partition slices for whole-disk
+        // targets, the device itself otherwise. A partition that
+        // can't be opened/probed degrades to a carve-only unit (the
+        // sweep still covers its bytes).
+        let units = self.scan_units();
+        let weight_total: u64 = units.iter().map(|u| u.sectors.max(1)).sum();
 
         // ── QUICK ──────────────────────────────────────────────────
         self.phase = Phase::Quick;
         obs.on_phase(self.phase);
-        let mut quick_ok = false;
-        if let Ok(mut engine) = engine_result {
+        let mut done_weight = 0u64;
+        for unit in &units {
+            let lo = 0.38 * weight_frac(done_weight, weight_total);
+            let hi = 0.38 * weight_frac(done_weight + unit.sectors.max(1), weight_total);
+            done_weight += unit.sectors.max(1);
+            let Ok(mut engine) = fs::create_engine(unit.fs, unit.dev.clone()) else {
+                continue;
+            };
             let ctrl = self.ctrl.clone();
             let mut sink = ControllerSink {
                 ctrl: self,
                 tree: &mut tree,
-                phase_percent_range: (0.0, 0.38),
+                phase_percent_range: (lo, hi),
+                path_prefix: unit.prefix.as_deref(),
                 obs_slot: obs,
             };
             match engine.quick_scan(&mut sink, &ctrl) {
-                Ok(stats) => {
-                    quick_ok = true;
-                    let _ = stats;
-                }
+                Ok(_) => {}
                 Err(CoreError::Cancelled) => {
-                    return Ok(self.finish_stopped(tree, fs_kind, obs));
+                    return Ok(self.finish_stopped(tree, units_fs(&units), obs));
                 }
                 Err(_) => { /* engine failed — carve still runs */ }
             }
         }
-        let _ = quick_ok;
 
         // ── DEEP ───────────────────────────────────────────────────
         self.phase = Phase::Deep;
         obs.on_phase(self.phase);
         self.sectors_read = 0;
-        // Deep structured pass (deleted reanimation) when the engine
-        // supports it distinctly.
-        if let Ok(mut engine) =
-            fs::create_engine(fs_kind, Arc::clone(&self.dev) as Arc<dyn BlockDevice>)
-        {
+        let mut done_weight = 0u64;
+        for unit in &units {
+            let lo = 0.38 + 0.17 * weight_frac(done_weight, weight_total);
+            let hi = 0.38 + 0.17 * weight_frac(done_weight + unit.sectors.max(1), weight_total);
+            done_weight += unit.sectors.max(1);
+            // Deep structured pass (deleted reanimation) when the
+            // engine supports it distinctly.
+            let Ok(mut engine) = fs::create_engine(unit.fs, unit.dev.clone()) else {
+                continue;
+            };
             let ctrl = self.ctrl.clone();
             let mut sink = ControllerSink {
                 ctrl: self,
                 tree: &mut tree,
-                phase_percent_range: (0.38, 0.55),
+                phase_percent_range: (lo, hi),
+                path_prefix: unit.prefix.as_deref(),
                 obs_slot: obs,
             };
             let _ = engine.deep_scan(&mut sink, &ctrl);
         }
-        // RAW carving sweep.
+        // RAW carving sweep over the WHOLE device (partitions +
+        // unallocated space).
         if !self.ctrl.is_cancelled() {
             let capacity = self.dev.capacity_bytes();
             let carver = RawCarver::new(Arc::clone(&self.dev) as Arc<dyn BlockDevice>);
@@ -234,12 +253,13 @@ impl ScanController {
                 ctrl: self,
                 tree: &mut tree,
                 phase_percent_range: (0.55, 1.0),
+                path_prefix: None,
                 obs_slot: obs,
             };
             match carver.carve(&mut sink, &ctrl, 0, capacity) {
                 Ok(_) => {}
                 Err(CoreError::Cancelled) => {
-                    return Ok(self.finish_stopped(tree, fs_kind, obs));
+                    return Ok(self.finish_stopped(tree, units_fs(&units), obs));
                 }
                 Err(_) => {}
             }
@@ -266,7 +286,7 @@ impl ScanController {
                 bytes_found: bytes,
                 duration_sec: self.started.elapsed().as_secs(),
                 stopped: false,
-                fs: fs_kind,
+                fs: units_fs(&units),
             },
         ))
     }
@@ -298,11 +318,20 @@ struct ControllerSink<'a, 'o> {
     ctrl: &'a mut ScanController,
     tree: &'a mut TreeBuilder,
     phase_percent_range: (f64, f64),
+    /// Per-unit tree folder (whole-disk scans nest each partition's
+    /// entries under its own branch; None = target root).
+    path_prefix: Option<&'a str>,
     obs_slot: &'o mut dyn ProgressObserver,
 }
 
 impl ScanSink for ControllerSink<'_, '_> {
-    fn on_entry(&mut self, entry: FoundEntry) {
+    fn on_entry(&mut self, mut entry: FoundEntry) {
+        if let Some(prefix) = self.path_prefix {
+            entry.parent_hint = Some(match entry.parent_hint.take() {
+                Some(h) if !h.is_empty() => format!("{prefix}/{h}"),
+                _ => prefix.to_string(),
+            });
+        }
         let is_file = !entry.is_dir;
         let size = entry.size;
         self.tree.add(entry);
@@ -339,6 +368,87 @@ impl ScanController {
     fn emit_obs(&self, obs: &mut dyn ProgressObserver, percent: f64) {
         obs.on_progress(&self.snapshot(percent));
     }
+
+    /// Build the scan units for the PREPARE phase: one per partition
+    /// when the target is a whole disk with a table, the device
+    /// itself otherwise. Partition units are `SubDevice` slices over
+    /// the SAME cached device (one cache layer, absolute-LBA keyed).
+    fn scan_units(&self) -> Vec<ScanUnit> {
+        let mut units = Vec::new();
+        let layout = read_partition_layout(&*self.dev).unwrap_or_default();
+        if layout.partitions.is_empty() {
+            // Whole-disk without a table (superfloppy/volume target) or
+            // an unreadable table: one unit covering everything.
+            let fs = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
+            units.push(ScanUnit {
+                dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
+                sectors: self.dev.total_sectors(),
+                prefix: None,
+                fs,
+            });
+            return units;
+        }
+        for p in &layout.partitions {
+            if p.total_sectors == 0 {
+                continue;
+            }
+            let sub = Arc::new(crate::blockdev::SubDevice::new(
+                Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
+                p.start_lba,
+                p.total_sectors,
+                format!("part{}", p.index),
+            ));
+            let fs = fs::probe_filesystem(&*sub).unwrap_or(FsKind::Raw);
+            units.push(ScanUnit {
+                dev: sub,
+                sectors: p.total_sectors,
+                prefix: Some(format!("Partition {}", p.index)),
+                fs,
+            });
+        }
+        if units.is_empty() {
+            let fs = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
+            units.push(ScanUnit {
+                dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
+                sectors: self.dev.total_sectors(),
+                prefix: None,
+                fs,
+            });
+        }
+        units
+    }
+}
+
+/// One scan target volume: a partition slice (whole-disk scans) or
+/// the device itself.
+struct ScanUnit {
+    dev: Arc<dyn BlockDevice>,
+    sectors: u64,
+    /// Tree folder prefix (whole-disk partition units).
+    prefix: Option<String>,
+    fs: FsKind,
+}
+
+/// Weight fraction 0..1 for progress math. u64-to-f64 precision loss
+/// is irrelevant for percent display (documented exception, same
+/// rationale as the sink's progress math).
+#[allow(clippy::cast_precision_loss)]
+fn weight_frac(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (done as f64 / total as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// The report's filesystem label: the largest structured unit's kind
+/// (Raw when nothing structured was found).
+fn units_fs(units: &[ScanUnit]) -> FsKind {
+    units
+        .iter()
+        .filter(|u| !matches!(u.fs, FsKind::Raw | FsKind::Unknown))
+        .max_by_key(|u| u.sectors)
+        .map_or(FsKind::Raw, |u| u.fs)
 }
 
 /// Convenience: run a scan and return the assembled tree (the

@@ -37,15 +37,15 @@ pub fn resume_session(s: State<'_, AppState>, session_id: String) -> Result<Valu
         let next = st.generation() + 1;
         st.set_generation(next);
         st.set_target(loaded.device.name.as_str(), loaded.device.name.as_str());
-        *st.tree_slot() = Some(std::sync::Arc::new(loaded.nodes.clone()));
-        *st.report_slot() = Some(dw_core::scan::ScanReport {
+        *st.tree_slot().lock() = Some(std::sync::Arc::new(loaded.nodes.clone()));
+        *st.report_slot().lock() = Some(dw_core::scan::ScanReport {
             files_found: loaded.header.files_found,
             bytes_found: loaded.header.bytes_found,
             duration_sec: loaded.header.duration_sec,
             stopped: loaded.header.stopped,
             fs: dw_core::types::FsKind::Unknown,
         });
-        *st.phase_slot() = dw_core::scan::Phase::Done;
+        *st.phase_slot().lock() = dw_core::scan::Phase::Done;
         next
     };
     Ok(json!({ "generation": generation, "deviceName": loaded.device.name }))

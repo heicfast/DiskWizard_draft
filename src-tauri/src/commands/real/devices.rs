@@ -152,7 +152,7 @@ pub async fn unlock_bitlocker(
         } else {
             return Err("BAD_REQUEST. A password or recovery key is required.".into());
         };
-        dw_win::bitlocker::unlock_volume(letter, credential)?;
+        dw_win::bitlocker::unlock_volume(letter, &credential)?;
         if dw_win::bitlocker::volume_unlocked(letter) {
             Ok(json!({ "ok": true, "unlocked": true }))
         } else {
