@@ -46,54 +46,49 @@ release).
 
 ### P0 — release-truth gaps
 
-- **QA-1. The ui-screenshots tour still validates only the SIM core.**
-  CORE-PLAN §7.5 requires a REAL-core tour step (Windows runner, VHD
-  target, walk recover→scan→results with the production build, VLM
-  decode the frames). Evidence: `ui-screenshots.yml:51` builds
-  exclusively with `--features sim`. The real funnel (device rows from
-  `list_devices` → `start_scan` on the runner's VHD → live progress →
-  results → `preview_file` → `start_recovery` to a folder →
-  byte-compare) is currently exercised only by the dw-win integration
-  test, not through the UI. **Owner**: add a `real-core-tour` job
-  (build WITHOUT sim + a seeded VHD; assert named frames via the
-  existing title channel).
+- **QA-1. The ui-screenshots tour still validates only the SIM core.
+  RESOLVED IN CODE (session 5c); completing run pending.**
+  `real-core-tour.yml` now builds WITHOUT sim (only the narrow
+  `ci-tour` license-seed feature — DiskGenie's refusal-arm pattern),
+  seeds a VHD (kept 1 MiB + deleted 64 KiB deterministic patterns),
+  walks the REAL funnel through the UI (dual-mode TourDriver: live
+  device row → gate → seeded Pro → real scan → results → REAL recovery
+  funnel with new recovery-* frames), asserts key frame names, then
+  byte-compares BOTH seeds against the recovered output. First runs
+  were cancelled mid-flight by the concurrent agent-push churn (the
+  concurrency group cancels in-progress runs — 6 cancellations); the
+  run on the quiet repo completes it. `workflow_dispatch` re-runs on
+  demand. The flag closes when a completing run posts green.
 
-- **QA-2. Preview payload size cap vs the research contract.** The
-  real `preview_file` caps at 16 MiB input / 2 MiB payload
-  (`recover.rs` + the UI's `PREVIEW_MAX_BYTES = 2_000_000`). The
-  research's preview subsystem caps at **100 MB** with a 15-second
-  video-preview window (`artifacts/UIUX/10-preview-subsystem.md`).
-  The 2 MiB cap is fine for images/text but truncates medium PDFs and
-  denies any video/audio preview. **Owner**: decide the v1 contract
-  (the UI's honest "plays after recovery" copy currently covers it)
-  and raise the cap when the video preview surface lands.
+- **QA-2. Preview payload size cap vs the research contract. OPEN
+  (owner call — OQ-5).** The real `preview_file` caps at 16 MiB input
+  / 2 MiB payload; the research's preview subsystem caps at **100 MB**
+  with a 15-second video-preview window
+  (`artifacts/UIUX/10-preview-subsystem.md`). The UI's honest "plays
+  after recovery" copy covers video. Raise the caps when the
+  video-preview surface lands.
 
-- **QA-3. ext2/3, HFS+, ReFS: detected but no engine.** Product spec
-  ("Restore data from all file systems… ext2/ext3/HFS+/ReFS") vs
-  `fs::create_engine` → `CoreError::Unsupported` (M2 scope per
-  CORE-PLAN §8). Release-blocking for the "all file systems" claim —
-  the marketing surface must either gate these or M2 must land.
+- **QA-3. ext2/3, HFS+, ReFS engines. LANDED (session-5 engine
+  batch); fixture coverage in progress.** `fs::create_engine` serves
+  ext/HFS+/HFSX/ReFS (see the consistency register §1 item 9 for the
+  research cross-check). The ext2 real-mkfs fixture gate runs in CI
+  (mkfs.ext2 + debugfs + byte-truth recovery); HFS+ (hfsprogs) and the
+  ReFS runner leg (`Format-Volume -FileSystem ReFS` on Server images)
+  are the remaining fixture legs before the "all file systems" claim
+  is fully evidence-backed.
 
 ### P1 — research-parity gaps
 
-- **QA-4. Deleted-viability bitmap scoring (NTFS) uses cluster-start
-  sectors only.** The research (`SearchDLL/ntfs` digest) tests EVERY
-  data-run cluster against $Bitmap (`sector = cluster × spc`,
-  `bitmap.test(sector)`), destroying candidates only when
-  `intact == total`. Our `dw-core` viability path grades via extent
-  readability + the deep pass, not the $Bitmap cross-check. Impact:
-  overwritten-but-listed files may surface as recoverable. **Owner**:
-  add the $Bitmap build + per-cluster test to the NTFS deep pass
-  (research: `CNTFSBuildVolumeBitmap`).
+- **QA-4. Deleted-viability bitmap scoring (NTFS). LANDED (session
+  5, commit 5911705): the $Bitmap per-cluster scoring + the research
+  destroy rule** (`intact == total → destroy`, files ≥ 0x3FF only) per
+  `ntfs-engine-algorithms-v2--deleted-viability.md`. CI-green gate at
+  push. Regrade if the fixture corpus grows damaged-bitmap cases.
 
-- **QA-5. exFAT deleted-detection relies on the InUse-bit triple.**
-  The research's primary deleted-exFAT path is the **backward triple
-  walk** (stream dentry − 0x40 strides into three list builders) plus
-  FAT-chain re-derivation; carving keys `0xE2FF..0xE7FF` are the
-  fallback. Our engine implements the InUse triple (good) but the
-  chain re-derivation hint path ("when FAT damaged") should be
-  verified against a damaged-FAT image test (none exists in the
-  suite).
+- **QA-5. exFAT deleted-detection. LANDED (session 5, commit b8eb224):
+  the chain-resolution ladder** (NoFatChain / FAT walk / damaged-FAT
+  re-derivation) per the research's backward-triple walk + carving
+  fallback. CI-green gate at push.
 
 - **QA-6. Carve-result merge (`structured wins`) lacks a test
   fixture proving the ~65% essential-mode reduction.** The product
@@ -112,20 +107,24 @@ release).
   context (matters for whole-disk scans with partition prefixes).
   Flag for M2 when multi-partition sessions persist.
 
-- **QA-8. Live-volume consistency (VSS) unimplemented and
-  undisclosed.** The owner's ADR-1 review point 8: "prefer VSS
-  snapshots or clearly disclose live-scan consistency limits" for
-  mounted/system volumes. No VSS code exists; the UI copy does not
-  disclose the live-scan caveat. Minimum viable: a notice in the
-  results header when the source volume is mounted+writable.
+- **QA-8. Live-volume consistency disclosure. FIXED (session 5c,
+  commit 653a1ce — the "or clearly disclose" arm of §5.1 item 8):**
+  the core computes `source_volume_live` (mounted-volume targets)
+  and carries it on `scan-done`; the results header renders the
+  live-scan note ("Live scan: files changed during the scan may not
+  be captured"); both mocks emit the flag for tour coverage. VSS
+  snapshots remain an optional M3 escalation — the disclosure arm
+  satisfies the directive.
 
-- **QA-9. SD Card Rescue is a stub message.** `sdr_diagnose` returns
-  "diagnostics complete… deep repair pass arrives with the next
-  engine update" — the research's SDR contract is access-restore
-  THEN recovery (`CSDCardDeviceListPage` flow). The UI's SDR strip +
-  tools entry exist; the core's RawFixer-lite (DBR/backup-DBR restore
-  per the `PartitionRecovery/rawfixer` artifact) is M2. Users on
-  today's build get recovery, not repair.
+- **QA-9. SD Card Rescue. LANDED (session 5, commit d644c85): the
+  production access-restore flow** — `sdr_diagnose` real diagnosis +
+  confirm-gated `sdr_repair` with verify-or-rollback, the RawFixer
+  model in dw-core (boot diagnosis, FS-specific backups, exFAT
+  checksum gate, FixFromDBR/FixByScanSector plans with CopySectors
+  undo snapshots) and the write-enabled handle in dw-win. Per the
+  research's SDR contract (access-restore THEN recovery). The
+  damaged-DBR CI fixture (corrupt sector 0 → restore → verify)
+  remains the evidence leg.
 
 - **QA-10. SMART threshold table is partial.** `threshold_and_status`
   covers 0x05/0xC5/0xC6/0xBB/0xC7/0x0A/0x0B/0xC2/0xBE/0xE7. The
@@ -135,22 +134,22 @@ release).
   0xC2/0xBE + sensor arrays). Flag: expand the table + unit tests per
   drive family once real-drive telemetry exists from CI.
 
-- **QA-17. Scan `bytes_found` can exceed volume capacity.** The
-  passing VHD run reports `bytes_found: 546,825,304` on a
-  267 MB volume — logical sizes of sparse metafiles ($LogFile, $MFT
-  growth) and possibly overlapping carve extents sum past physical
-  capacity. The recovery itself byte-compares correctly (the test
-  proves it), but the stat feeds the UI's "X found" summary. Fix:
-  report `min(logical, extents-sum)` or clamp per-node sizes to the
-  device capacity at tree-build time, and dedupe carve overlaps at
-  merge. Evidence: VHD run on fc4e23a (`diag: report` line).
+- **QA-17. Scan `bytes_found` can exceed volume capacity. FIXED
+  (session 5c, commit 653a1ce):** the aggregate stat clamps to the
+  scanned device's capacity on BOTH report sites (Done + Stopped) —
+  `clamp_report_bytes`, regression test
+  `qa17_report_bytes_never_exceed_capacity`. Per-file sizes stay
+  honest; the carve-overlap dedup landed earlier with the dedup
+  batch (content-key absorb). Evidence: the original VHD run on
+  fc4e23a (`bytes_found: 546,825,304` on a 267 MB volume).
 
 ### P2 — hardening / next phase (per plan, not defects)
 
-- **QA-11.** Parallel read pipeline (IOCP worker pool) — ADR-1 rev2
-  targets adaptive queueing (HDD 1–4 MiB QD1–2 / NVMe 4–16 MiB
-  QD4–16); current reads are synchronous positioned OVERLAPPED
-  (correct, single-depth). M3 item.
+- **QA-11. Parallel read pipeline (IOCP). LANDED (session 5, commit
+  0f2d98e): the §5.1 item-3+5 completion pipeline** — IOCP batch
+  reads + adaptive media profiles; the benchmark harness +
+  `docs/benchmarks/io-backend.md` record landed with it (a003342,
+  §5.1 item 10). Soak/stress regrade at M3 close.
 - **QA-12.** 24 h soak + crash-resilience scan journal (M3 per
   CORE-PLAN).
 - **QA-13.** BitLocker raw XTS-AES stream recovery for
