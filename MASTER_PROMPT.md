@@ -580,6 +580,8 @@ machines. Test, capture, refine, repeat.
 3. Build the documentation tree + coverage ledger (Phase 0).
 4. Read everything per Phase 0; write `docs/maps/context-synthesis.md`.
 5. Begin Phase 1 audit; load the QA register; start with P0 flags.
+6. Peiodically check git pull latest
+7. Dont stop until full production grad complete implementation of everything is completed with nothing else remaining or in todo.
 
 ---
 
@@ -589,4 +591,4 @@ complacency, no shortcuts, no fallbacks. Documentation is everything —
 cross-link constantly. Do not hallucinate. Do not compromise. When in
 doubt: read the research documentation again, verify in code, then act.
 
-Now begin.
+Now begin. Dont stop until full production grad complete implementation of everything is completed with nothing else remaining or in todo. Parallel agents are working on same repository, work together, read thier findingd and docs too and fix and collaborative together for complete implementation and all phase implementation completing 
