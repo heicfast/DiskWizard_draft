@@ -1,0 +1,259 @@
+name: Real-Core Tour (VHD release-truth)
+
+# QA-1 (docs/QA-REGISTER.md §2, the owner's TOP P0): the UI-screenshots
+# tour validated only the SIM core. This job proves the REAL core end to
+# end through the shipped UI:
+#
+#   1. diskpart creates + attaches a VHD (NTFS, label DWTEST) seeded
+#      with a kept file (present.txt, 1 MiB deterministic pattern) and a
+#      deleted file (gone.txt, 64 KiB of the same pattern).
+#   2. The app builds WITHOUT the sim feature — only the narrow
+#      `ci-tour` license-seeding hook (the DiskGenie donor pattern:
+#      refusal-only in every other build; NSIS/MSIX never enable it).
+#   3. The TourDriver (DISKWIZARD_TOUR=1, DISKWIZARD_TOUR_DEVICE=DWTEST)
+#      walks the REAL funnel: live device row → unlicensed gate →
+#      seeded Pro → real scan (quick + deep) → results states → REAL
+#      recovery funnel (select-all → destination rows → export →
+#      summary). The harness captures exactly one named frame per step
+#      via the title-sync channel.
+#   4. Byte-truth: the recovered present.txt/gone.txt under
+#      <drive>\DiskWizard Recovered <stamp> are compared against the
+#      seeded patterns — the recovery must be byte-perfect, including
+#      the DELETED file.
+#   5. Key frames are asserted present (scan-complete, recovery-*) so a
+#      silent UI failure fails the workflow.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: real-core-tour-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-core-tour-windows:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Node cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: Create + seed the tour VHD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vhd = "$env:TEMP\dwtour.vhd"
+          # No PowerShell here-strings (the session-2 lesson): array-join.
+          $script = @(
+            'create vdisk file="' + $vhd + '" maximum=256 type=fixed'
+            'attach vdisk'
+            'create partition primary'
+            'format fs=ntfs label=DWTEST quick'
+            'assign letter=V'
+          ) -join "`r`n"
+          Set-Content -Path "$env:TEMP\dp.txt" -Value $script -Encoding ascii
+          diskpart /s "$env:TEMP\dp.txt" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
+          Start-Sleep -Seconds 3
+          # Deterministic seeds: present.txt (kept, 1 MiB) + gone.txt
+          # (deleted, 64 KiB prefix of the same pattern).
+          $bytes = New-Object byte[] (1MB)
+          for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = ($i * 37 + 11) % 251 }
+          [IO.File]::WriteAllBytes("V:\present.txt", $bytes)
+          [IO.File]::WriteAllBytes("V:\gone.txt", $bytes[0..65535])
+          Write-VolumeCache -DriveLetter V
+          Start-Sleep -Seconds 1
+          Remove-Item "V:\gone.txt" -Force
+          Write-Host "Tour VHD seeded: present.txt (1 MiB, kept) + gone.txt (64 KiB, deleted)"
+
+      - name: Build the app (release exe, REAL core, ci-tour seed hook, no sim)
+        run: npx tauri build --no-bundle -- --features ci-tour
+        env:
+          CARGO_INCREMENTAL: "0"
+
+      - name: Run the real-core tour + capture (title-synced frames)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          try {
+            Set-DisplayResolution -Width 1920 -Height 1080 -Force | Out-Null
+            "display set to 1920x1080"
+          } catch {
+            "display resolution change unavailable - capturing at default"
+          }
+          $exe = Join-Path $PWD "src-tauri\target\release\diskwizard.exe"
+          if (-not (Test-Path $exe)) { throw "exe not found: $exe" }
+          $env:DISKWIZARD_TOUR = '1'
+          $env:DISKWIZARD_TOUR_DEVICE = 'DWTEST'
+          $out = Join-Path $env:RUNNER_TEMP 'shots'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $app = Start-Process -FilePath $exe -WorkingDirectory $PWD -RedirectStandardOutput "$env:RUNNER_TEMP\app-stdout.log" -RedirectStandardError "$env:RUNNER_TEMP\app-stderr.log" -PassThru
+          $ws = New-Object -ComObject WScript.Shell
+          $null = $ws.AppActivate($app.Id)
+          Start-Sleep -Milliseconds 6000
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+
+          function Shoot([string]$name) {
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save((Join-Path $out $name), [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+          }
+          function WindowTitle() {
+            $app.Refresh()
+            return $app.MainWindowTitle
+          }
+
+          $deadline = (Get-Date).AddMinutes(25)
+          $lastTitle = ''
+          $frames = 0
+          $sawMarker = $false
+          $shot = New-Object 'System.Collections.Generic.HashSet[string]'
+          while ((Get-Date) -lt $deadline -and -not $app.HasExited) {
+            $t = WindowTitle
+            if ($t -and $t -ne $lastTitle) {
+              if ($t -like '*tour-complete') { "tour finished after $frames frames"; break }
+              if ($t -match '· (t\d{2}-[a-z0-9-]+)') {
+                $marker = $Matches[1]
+                if (-not $shot.Contains($marker)) {
+                  Start-Sleep -Milliseconds 1400
+                  if ($app.HasExited) { break }
+                  Shoot(($marker + '.png'))
+                  $null = $shot.Add($marker)
+                  $frames++
+                  $sawMarker = $true
+                  "captured $marker"
+                }
+              } elseif (-not $sawMarker) {
+                Shoot('t00-boot.png'); $frames++
+                "captured t00-boot (pre-tour)"
+              }
+              $lastTitle = $t
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $sawMarker) { throw "NO_TOUR_MARKERS. The tour title channel produced no frames - see app-stderr.log" }
+
+          # Let the final recovery summary settle before stopping the app.
+          Start-Sleep -Seconds 5
+          if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+          Start-Sleep -Seconds 2
+
+          # ── Frame assertions (a silent UI failure fails the job) ──
+          # Marker indices shift when steps are inserted; assert by NAME
+          # substring instead of exact index.
+          $names = @($shot | ForEach-Object { $_ })
+          $mustHave = @('scan-complete','results-all','recovery-select-all','recovery-started','recovery-complete','license-pro-seeded','scan-live')
+          $missing = @($mustHave | Where-Object { -not ($names -match $_) })
+          if ($missing.Count -gt 0) {
+            throw "MISSING_FRAMES: $($missing -join ', ') - the real-core tour did not reach them (see logs)"
+          }
+          "frame assertions passed ($($names.Count) frames)"
+
+          if (Test-Path "$env:RUNNER_TEMP\app-stderr.log") {
+            "--- app-stderr tail ---"
+            Get-Content "$env:RUNNER_TEMP\app-stderr.log" -Tail 40
+          }
+
+      - name: Byte-truth: verify the recovered files against the seeds
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Recompute the deterministic seed patterns.
+          $full = New-Object byte[] (1MB)
+          for ($i = 0; $i -lt $full.Length; $i++) { $full[$i] = ($i * 37 + 11) % 251 }
+          $gone = $full[0..65535]
+
+          # The recovery destination: <drive>\DiskWizard Recovered <stamp>
+          # (resolve_destination stamps it; take the newest across drives).
+          $roots = Get-ChildItem -Path 'C:\','D:\' -Filter 'DiskWizard Recovered *' -Directory -ErrorAction SilentlyContinue
+          if (-not $roots) { throw "RECOVERY_OUTPUT_MISSING. No 'DiskWizard Recovered *' directory found." }
+          $root = $roots | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          "recovery root: $($root.FullName)"
+
+          $recoveredPresent = Get-ChildItem -Path $root.FullName -Recurse -Filter 'present.txt' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          $recoveredGone = Get-ChildItem -Path $root.FullName -Recurse -Filter 'gone.txt' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (-not $recoveredPresent) { throw "TRUTH_FAILED. present.txt was not recovered to $($root.FullName)" }
+          $a = [IO.File]::ReadAllBytes($recoveredPresent.FullName)
+          if ($a.Length -ne $full.Length) { throw "TRUTH_FAILED. present.txt size $($a.Length) != $($full.Length)" }
+          for ($i = 0; $i -lt $a.Length; $i++) {
+            if ($a[$i] -ne $full[$i]) { throw "TRUTH_FAILED. present.txt differs at byte $i" }
+          }
+          "present.txt: 1 MiB byte-identical to the seed"
+
+          if ($recoveredGone) {
+            $b = [IO.File]::ReadAllBytes($recoveredGone.FullName)
+            if ($b.Length -ne $gone.Length) { throw "TRUTH_FAILED. gone.txt size $($b.Length) != $($gone.Length)" }
+            for ($i = 0; $i -lt $b.Length; $i++) {
+              if ($b[$i] -ne $gone[$i]) { throw "TRUTH_FAILED. gone.txt differs at byte $i" }
+            }
+            "gone.txt: 64 KiB byte-identical to the seed (DELETED file recovered)"
+          } else {
+            # The deleted file is the recovery differentiator — its
+            # absence means the scan/recovery never surfaced deleted
+            # content. Fail hard (that is the whole point of the tour).
+            throw "TRUTH_FAILED. gone.txt (the deleted seed) was not recovered."
+          }
+          "REAL-CORE TOUR: release-truth verified (recovered bytes match the seeds)"
+
+      - name: Upload tour screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: diskwizard-real-core-tour
+          path: ${{ runner.temp }}/shots
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload app logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: diskwizard-real-core-tour-logs
+          path: |
+            ${{ runner.temp }}/app-stdout.log
+            ${{ runner.temp }}/app-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Detach + clean the VHD
+        if: always()
+        shell: pwsh
+        run: |
+          $vhd = "$env:TEMP\dwtour.vhd"
+          $script = @(
+            'select vdisk file="' + $vhd + '"'
+            'detach vdisk'
+          ) -join "`r`n"
+          Set-Content -Path "$env:TEMP\dp-clean.txt" -Value $script -Encoding ascii
+          $ok = $false
+          foreach ($i in 1..3) {
+            diskpart /s "$env:TEMP\dp-clean.txt" | Out-Host
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) { Write-Host "detach retried out - removing the file anyway" }
+          Remove-Item $vhd -Force -ErrorAction SilentlyContinue
+          exit 0

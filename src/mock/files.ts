@@ -398,6 +398,9 @@ export function generateResults(
   return {
     generation,
     targetName: profile.root,
+    // Wire-shape parity with the real core (the recovery funnel reads
+    // this to flag same-drive destination rows).
+    deviceId: device.id,
     categories,
     nodes,
     durationSec: Math.round(profile.durationSec * fraction),

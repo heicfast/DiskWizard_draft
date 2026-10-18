@@ -53,6 +53,14 @@ default = []
 # in NSIS/MSIX/production builds — the ui-screenshots workflow passes
 # `--features sim` explicitly.
 sim = []
+# The real-core tour hook (QA-1): lets the CI "real-core tour" job seed
+# a simulated Pro license through the REAL command surface so the tour
+# can walk scan → results → recovery past the L6 license gate. The
+# seeding body compiles ONLY behind this feature; every other build
+# (including NSIS/MSIX release) links the one-line refusal arm. This is
+# the DiskGenie donor pattern (`license_sim_set` compiles to a hard
+# refusal in production builds) — no simulated-license logic ships.
+ci-tour = []
 
 [lints.rust]
 unsafe_code = "warn"

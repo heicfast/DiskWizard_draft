@@ -553,6 +553,10 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64) -> Value {
     json!({
         "generation": generation,
         "targetName": *s.scan.target_name.lock(),
+        // The scan target's device id — the recovery funnel passes this
+        // to `list_recover_destinations` so source rows are flagged, and
+        // `start_recovery` re-derives the same exclusion server-side.
+        "deviceId": s.scan.target_id(),
         "categories": categories.iter().map(|(k, (count, size))| json!({
             "category": k, "count": count, "size": size,
         })).collect::<Vec<_>>(),

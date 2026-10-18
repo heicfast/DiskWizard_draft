@@ -571,6 +571,9 @@ pub fn get_dev_hooks() -> Value {
         .map(|v| v == "1")
         .unwrap_or(false);
     json!({
+        // Which command surface answered (the real core reports "real";
+        // the TourDriver branches to pick a live device row there).
+        "core": "sim",
         "tour": tour,
         "tourMode": std::env::var("DISKWIZARD_TOUR_MODE").ok(),
         "tourLicenseKey": std::env::var("DISKWIZARD_TOUR_LICENSE_KEY").ok(),

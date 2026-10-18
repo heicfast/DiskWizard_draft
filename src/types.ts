@@ -181,6 +181,10 @@ export interface CategoryCount {
 export interface ScanResultsSnapshot {
   generation: number;
   targetName: string;
+  /** The scan target's device id (real core) — feeds the destination
+   * dialog's source flags ("same drive" rows) and the backend's own
+   * source-disk exclusion. */
+  deviceId?: string | null;
   /** All categories, counts, sizes. */
   categories: CategoryCount[];
   /** Complete flat node list (UI filters/folds; essential-results mode
@@ -280,6 +284,13 @@ export interface DevHooks {
   tourMode: string | null;
   tourLicenseKey: string | null;
   scan: string | null;
+  /** Which core answered get_dev_hooks ("real" | "sim"). The tour
+   * driver branches: the real core picks a live device row + walks the
+   * real recovery funnel; the sim core drives the synthetic device. */
+  core?: "real" | "sim" | null;
+  /** QA-1 real-core tour: substring filter selecting the device row to
+   * scan (e.g. the CI VHD's label). null/empty → first eligible row. */
+  deviceFilter?: string | null;
 }
 
 /* ── View state ──────────────────────────────────────────────────────── */

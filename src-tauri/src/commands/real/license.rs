@@ -52,6 +52,44 @@ impl LicenseManager {
             .unwrap_or_default()
     }
 
+    /// Seed or clear a simulated license posture (the ci-tour hook).
+    ///
+    /// Compiled ONLY behind the `ci-tour` feature: the CI real-core tour
+    /// needs a Pro posture to walk scan → results → recovery past the L6
+    /// gate without a deployed license server. The seeded state is marked
+    /// `simulated: true` (surfaced in `license_status`), persisted through
+    /// the normal DPAPI store, and derives a real Grace posture — every
+    /// downstream consumer (gates, UI, scheduler) treats it identically to
+    /// a real license EXCEPT it is visibly flagged. Release builds never
+    /// link this method; `license_sim_set` refuses there.
+    #[cfg(feature = "ci-tour")]
+    pub fn seed_simulated(&self, pro: bool) -> Result<(), String> {
+        let mut st = self.state.write();
+        if pro {
+            let now = self.now();
+            // A far-future token expiry keeps the posture = Pro
+            // (verified inside the interval) for the tour's lifetime.
+            *st = LicenseState {
+                license_key: "CITOURSIMULATED000000".into(),
+                tier: "lifetime".into(),
+                customer_name: "CI Real-Core Tour".into(),
+                activated_at: now,
+                last_validated_at: now,
+                last_known_good: now,
+                token_exp: now + 86_400,
+                simulated: true,
+                ..Default::default()
+            };
+        } else {
+            *st = LicenseState::default();
+        }
+        let snapshot = st.clone();
+        drop(st);
+        self.store
+            .save(&snapshot)
+            .map_err(|e| format!("LICENSE_SEED_PERSIST. {e}"))
+    }
+
     /// The frozen `LicenseStatus` payload.
     pub fn status_json(&self) -> Value {
         let st = self.state.read();
@@ -174,6 +212,13 @@ impl LicenseManager {
         if st.license_key.is_empty() {
             return Ok(self.status_json());
         }
+        // Simulated states (ci-tour seeding only — release builds cannot
+        // create them) never phone home: the CI tour must not hammer the
+        // production license server with a synthetic key, and a hard
+        // KEY_NOT_FOUND must not deactivate the tour mid-run.
+        if st.simulated {
+            return Ok(self.status_json());
+        }
         let Ok(facts) = Self::device_facts() else {
             return Ok(self.status_json());
         };
@@ -294,9 +339,23 @@ pub async fn validate_now(s: State<'_, AppState>) -> Result<Value, String> {
         .map_err(|e| format!("INTERNAL. {e}"))?
 }
 
-/// The CI/tour simulation hook — sim builds only (mirrors the mock's
-/// contract; production builds refuse).
+/// The CI/tour simulation hook — the DiskGenie donor pattern: the command
+/// exists in EVERY build (the invoke surface is feature-independent), but
+/// the seeding body compiles ONLY behind the `ci-tour` feature. Every
+/// other build — including NSIS/MSIX release — links the refusal arm
+/// alone, so no simulated-license logic ships (MASTER_PROMPT §9).
 #[tauri::command]
-pub fn license_sim_set(_s: State<'_, AppState>, _pro: Option<bool>) -> Result<Value, String> {
-    Err("NOT_AVAILABLE. License simulation is a dev-build feature.".into())
+pub fn license_sim_set(s: State<'_, AppState>, pro: Option<bool>) -> Result<Value, String> {
+    #[cfg(feature = "ci-tour")]
+    {
+        s.license
+            .seed_simulated(pro.unwrap_or(true))
+            .map_err(|e| format!("SEED_FAILED. {e}"))?;
+        Ok(s.license.status_json())
+    }
+    #[cfg(not(feature = "ci-tour"))]
+    {
+        let _ = (s, pro);
+        Err("NOT_AVAILABLE. License simulation is a dev-build feature.".into())
+    }
 }

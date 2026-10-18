@@ -487,6 +487,8 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
     json!({
         "generation": generation,
         "targetName": prof.root,
+        // Wire-shape parity with the real core (destination source flags).
+        "deviceId": device_id,
         "categories": categories,
         "nodes": nodes,
         "durationSec": (prof.duration as f64 * fraction).round() as u64,

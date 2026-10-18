@@ -171,7 +171,10 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   openDestination: async () => {
     set({ destinationOpen: true, destinationsLoading: true, chosenDestinationId: null });
     try {
-      const sourceId = get().snapshot ? null : null;
+      // The REAL source device id (the scan target) — the backend flags
+      // same-drive rows so the picker can warn/disable them (and
+      // start_recovery enforces the exclusion regardless).
+      const sourceId = get().snapshot?.deviceId ?? null;
       const list = await invoke<RecoverDestination[]>("list_recover_destinations", { sourceDeviceId: sourceId });
       set({ destinations: list, destinationsLoading: false });
     } catch {

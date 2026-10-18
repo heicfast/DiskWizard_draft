@@ -8,6 +8,17 @@
  * the packaged build (Tauri 2 does not auto-sync document.title, so
  * the driver calls the window API itself) — the harness polls the
  * native title and shoots exactly one named frame per step.
+ *
+ * TWO CORES, ONE DRIVER (QA-1): `get_dev_hooks.core` tells which
+ * command surface answered. The SIM core drives the synthetic device
+ * (fixed id, deterministic fills). The REAL core picks a LIVE device
+ * row (the CI job seeds a VHD labeled e.g. "DWTEST" and passes
+ * DISKWIZARD_TOUR_DEVICE=DWTEST), runs a REAL scan (quick + deep on
+ * actual NTFS), walks the results, and drives the REAL recovery
+ * funnel — select-all → destination rows → export → progress →
+ * summary — so the screenshots prove the production pipeline, not a
+ * simulation of it. The unlicensed gate is still captured first
+ * (license_sim_set seeds Pro only AFTER the gate frame).
  */
 import { useEffect } from "react";
 import { useViewStore } from "../state/view";
@@ -15,7 +26,7 @@ import { useScanStore } from "../state/scan";
 import { useResultsStore } from "../state/results";
 import { useDevicesStore } from "../state/devices";
 import { invoke, isTauri } from "../lib/ipc";
-import type { DevHooks } from "../types";
+import type { DevHooks, StorageDevice } from "../types";
 
 const DWELL_MS = 2_800;
 
@@ -74,26 +85,79 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => window.setTimeout(r, ms));
 }
 
-async function runTour(_hooks: DevHooks): Promise<void> {
+/** Pick the REAL scan target: the device row matching the tour filter
+ * (the CI job's VHD label), else the first external/other row with a
+ * filesystem the core can scan. Returns "" when the inventory is
+ * empty — the scan step then surfaces the honest failure state. */
+function pickRealDevice(hooks: DevHooks): string {
+  const inv = useDevicesStore.getState().inventory;
+  const rows: StorageDevice[] = [
+    ...(inv?.externalDevices ?? []),
+    ...(inv?.localDisks ?? []),
+    ...(inv?.diskImages ?? []),
+  ];
+  const filter = hooks.deviceFilter?.trim().toLowerCase();
+  if (filter) {
+    const hit = rows.find(
+      (r) =>
+        r.name.toLowerCase().includes(filter) ||
+        r.id.toLowerCase().includes(filter),
+    );
+    if (hit) return hit.id;
+  }
+  return rows[0]?.id ?? "";
+}
+
+/** Wait for the REAL scan to finish (quick + deep on the CI VHD is
+ * fast, but be generous — deep carve on a slow runner can take a
+ * while; the UI keeps rendering live progress meanwhile). */
+async function waitForScanDone(maxMs: number): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (useScanStore.getState().done) return true;
+    await sleep(500);
+  }
+  return useScanStore.getState().done !== null;
+}
+
+/** Wait for the REAL recovery to complete (recover-done swaps the
+ * progress panel for the summary). */
+async function waitForRecoveryDone(maxMs: number): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (useResultsStore.getState().recoverSummary) return true;
+    await sleep(500);
+  }
+  return useResultsStore.getState().recoverSummary !== null;
+}
+
+async function runTour(hooks: DevHooks): Promise<void> {
   const view = useViewStore.getState();
   const scan = useScanStore.getState();
   const devices = useDevicesStore.getState();
   await devices.load();
 
+  const isReal = hooks.core === "real";
+  const deviceId = isReal ? pickRealDevice(hooks) : "usb-F";
+  // The REAL core's scan waits scale with the actual engine (256 MB
+  // VHD: seconds for quick, tens for the carve pass) — give it room.
+  const scanWaitMs = isReal ? 300_000 : 45_000;
+
   const steps: Step[] = [
     { name: "recover", apply: () => view.setPage("recover") },
     { name: "recover-hover-states", apply: () => undefined },
     // Scan start (unlicensed → the gate fires → dialog):
-    { name: "scan-gate-dialog", apply: () => void scan.start("usb-F") },
+    { name: "scan-gate-dialog", apply: () => void scan.start(deviceId) },
     { name: "license-dialog-close", apply: () => useViewStore.getState().closeLicenseDialog(), dwell: 1.2 },
-    // Seed Pro (license_sim_set — the ci-license-sim analog) and scan for real:
+    // Seed Pro (license_sim_set — the ci-tour-gated real arm or the
+    // sim core's native hook) and scan for real:
     {
       name: "license-pro-seeded",
       apply: () => void invoke("license_sim_set", { pro: true }),
       dwell: 1.4,
     },
-    { name: "scan-start", apply: () => void scan.start("usb-F") },
-    { name: "scan-live", apply: () => undefined, dwell: 6 },
+    { name: "scan-start", apply: () => void useScanStore.getState().start(deviceId) },
+    { name: "scan-live", apply: () => undefined, dwell: isReal ? 10 : 6 },
     { name: "results-scanning", apply: () => useViewStore.getState().setPage("results"), dwell: 4 },
     { name: "scan-paused", apply: () => void useScanStore.getState().pause() },
     { name: "scan-resumed", apply: () => void useScanStore.getState().resume(), dwell: 1.4 },
@@ -101,10 +165,7 @@ async function runTour(_hooks: DevHooks): Promise<void> {
     {
       name: "scan-complete",
       apply: async () => {
-        for (let i = 0; i < 90; i++) {
-          if (useScanStore.getState().done) return;
-          await sleep(500);
-        }
+        await waitForScanDone(scanWaitMs);
       },
       dwell: 8,
     },
@@ -130,6 +191,66 @@ async function runTour(_hooks: DevHooks): Promise<void> {
     },
     { name: "results-complete-mode", apply: () => useResultsStore.getState().setResultsMode("complete") },
     { name: "results-essential-mode", apply: () => useResultsStore.getState().setResultsMode("essential") },
+  ];
+
+  if (isReal) {
+    // THE REAL RECOVERY FUNNEL (QA-1's release-truth walk): select
+    // everything the scan found, open the destination rows (real
+    // volumes, the source flagged), pick a non-source drive, run the
+    // export, and land on the summary — the workflow then
+    // byte-compares what landed on disk against the seeds.
+    steps.push(
+      {
+        name: "recovery-select-all",
+        apply: () => {
+          const snap = useResultsStore.getState().snapshot;
+          const files = (snap?.nodes ?? []).filter((n) => !n.isDir);
+          useResultsStore.getState().selectAll(files.map((n) => n.id));
+        },
+      },
+      { name: "recovery-destination-open", apply: () => void useResultsStore.getState().openDestination(), dwell: 2 },
+      {
+        name: "recovery-destination-chosen",
+        apply: () => {
+          const rs = useResultsStore.getState();
+          const rows = rs.destinations;
+          const chosen = rows.find((d) => !d.isSource) ?? rows[0];
+          if (chosen) rs.chooseDestination(chosen.id);
+        },
+        dwell: 1.4,
+      },
+      {
+        name: "recovery-started",
+        apply: async () => {
+          const rs = useResultsStore.getState();
+          const snap = rs.snapshot;
+          const files = (snap?.nodes ?? []).filter((n) => !n.isDir);
+          const ids = [...rs.selectedIds];
+          const bytes = files
+            .filter((n) => rs.selectedIds.has(n.id))
+            .reduce((a, n) => a + n.size, 0);
+          const dest = rs.destinations.find((d) => d.id === rs.chosenDestinationId);
+          if (dest && ids.length > 0) {
+            // Drive the store's funnel so the progress/summary states
+            // render exactly as a user would see them.
+            rs.chooseDestination(dest.id);
+            await rs.beginRecovery(ids, bytes);
+          }
+        },
+        dwell: 2,
+      },
+      {
+        name: "recovery-progress",
+        apply: async () => {
+          await waitForRecoveryDone(180_000);
+        },
+        dwell: 6,
+      },
+      { name: "recovery-complete", apply: () => undefined, dwell: 2 },
+    );
+  }
+
+  steps.push(
     // Tools (free disk health):
     { name: "tools-disk-health", apply: () => useViewStore.getState().setPage("tools") },
     // Cloud:
@@ -138,7 +259,7 @@ async function runTour(_hooks: DevHooks): Promise<void> {
     { name: "settings", apply: () => useViewStore.getState().setPage("settings") },
     // Help:
     { name: "help", apply: () => useViewStore.getState().setPage("help") },
-  ];
+  );
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];

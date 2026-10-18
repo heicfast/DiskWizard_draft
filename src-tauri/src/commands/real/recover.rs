@@ -87,25 +87,32 @@ impl DestWriter for FsDest {
     }
 }
 
+/// The source disk index behind a scan target id (whole-disk /
+/// partition / lost-partition / volume forms). None when the id is not
+/// resolvable to a physical disk — the exclusion then stays unset
+/// (volume handles that fail to open, non-Windows, etc.).
+#[cfg(windows)]
+fn source_disk_index(id: &str) -> Option<u32> {
+    dw_win::volume::parse_device_id(id)
+        .ok()
+        .and_then(|t| match t {
+            dw_win::volume::DeviceTarget::WholeDisk(n)
+            | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
+            | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
+            dw_win::volume::DeviceTarget::Volume(l) => {
+                dw_win::blockdev::RawHandleDevice::open_volume(l)
+                    .ok()
+                    .and_then(|d| d.device_number().ok().map(|(n, _)| n))
+            }
+        })
+}
+
 #[tauri::command]
 pub fn list_recover_destinations(source_device_id: Option<String>) -> Value {
     #[cfg(windows)]
     {
         let inv = dw_win::devices::enumerate_inventory();
-        let source_disk = source_device_id.as_deref().and_then(|id| {
-            dw_win::volume::parse_device_id(id)
-                .map(|t| match t {
-                    dw_win::volume::DeviceTarget::WholeDisk(n)
-                    | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
-                    | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
-                    dw_win::volume::DeviceTarget::Volume(l) => {
-                        dw_win::blockdev::RawHandleDevice::open_volume(l)
-                            .ok()
-                            .and_then(|d| d.device_number().ok().map(|(n, _)| n))
-                    }
-                })
-                .flatten()
-        });
+        let source_disk = source_device_id.as_deref().and_then(source_disk_index);
         let mut rows: Vec<Value> = Vec::new();
         for d in inv.local_disks.iter().chain(inv.external_devices.iter()) {
             if d.letter.is_none() || d.total == 0 {
@@ -159,11 +166,17 @@ pub fn start_recovery(
     if queue.is_empty() {
         return Err("NOTHING_SELECTED. The selection contains no recoverable files.".into());
     }
+    let (dev, _name) = resolve_target(&s.scan.target_id())?;
     // Destination: resolve by name → path (the picker's rows carry
     // the volume label; the actual folder defaults to a timestamped
-    // Recovered folder at the volume root).
-    let (dest_root, dest_display) = resolve_destination(destination_name.as_deref())?;
-    let (dev, _name) = resolve_target(&s.scan.target_id())?;
+    // Recovered folder at the volume root). The SOURCE disk is excluded
+    // outright (§5.1 item 8): recovery never writes back to the device
+    // it scanned, whatever the UI offered.
+    #[cfg(windows)]
+    let exclude_disk = source_disk_index(&s.scan.target_id());
+    #[cfg(not(windows))]
+    let exclude_disk: Option<u32> = None;
+    let (dest_root, dest_display) = resolve_destination(destination_name.as_deref(), exclude_disk)?;
     let enable = enable_repair.unwrap_or(true);
     let app = app.clone();
     std::thread::Builder::new()
@@ -230,7 +243,15 @@ pub fn start_recovery(
     Ok(json!({ "ok": true }))
 }
 
-fn resolve_destination(name: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
+/// Resolve the recovery destination volume by display name (or the
+/// first writable volume when unnamed), REFUSING any volume on the
+/// source disk (MASTER_PROMPT §5.1 item 8: recovery writes must land on
+/// a different device than the source — enforced server-side of the UI,
+/// i.e. here, so the dialog's `isSource` flags are advisory only).
+fn resolve_destination(
+    name: Option<&str>,
+    exclude_disk: Option<u32>,
+) -> Result<(std::path::PathBuf, String), String> {
     #[cfg(windows)]
     {
         // Default: the first non-source writable volume, under a
@@ -240,6 +261,9 @@ fn resolve_destination(name: Option<&str>) -> Result<(std::path::PathBuf, String
         let mut chosen: Option<(String, String)> = None; // (letter, display)
         for d in inv.local_disks.iter().chain(inv.external_devices.iter()) {
             let Some(letter) = &d.letter else { continue };
+            if exclude_disk.is_some_and(|src| src == d.disk_index) {
+                continue; // the source device — never a destination
+            }
             let display = d.name.clone();
             if let Some(want) = name {
                 if display == want || display.starts_with(&format!("{want} (")) {
@@ -251,14 +275,38 @@ fn resolve_destination(name: Option<&str>) -> Result<(std::path::PathBuf, String
         if chosen.is_none() && name.is_none() {
             for d in inv.local_disks.iter().chain(inv.external_devices.iter()) {
                 if let Some(letter) = &d.letter {
+                    if exclude_disk.is_some_and(|src| src == d.disk_index) {
+                        continue;
+                    }
                     chosen = Some((letter.clone(), d.name.clone()));
                     break;
                 }
             }
         }
-        let Some((letter, display)) = chosen else {
+        // A NAMED destination that resolved onto the source disk is a
+        // hard error, not a silent fallback (the UI should have hidden
+        // the row; this is the backstop).
+        if chosen.is_none() {
+            if let Some(want) = name {
+                let inv = dw_win::devices::enumerate_inventory();
+                let on_source = inv
+                    .local_disks
+                    .iter()
+                    .chain(inv.external_devices.iter())
+                    .any(|d| {
+                        d.letter.is_some()
+                            && (d.name == want || d.name.starts_with(&format!("{want} (")))
+                            && exclude_disk.is_some_and(|src| src == d.disk_index)
+                    });
+                if on_source {
+                    return Err(
+                        "DESTINATION_ON_SOURCE. Pick a destination on a different drive.".into(),
+                    );
+                }
+            }
             return Err("NO_DESTINATION. No writable volume found.".into());
-        };
+        }
+        let (letter, display) = chosen.expect("chosen is Some here (none returned above)");
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -269,7 +317,7 @@ fn resolve_destination(name: Option<&str>) -> Result<(std::path::PathBuf, String
     }
     #[cfg(not(windows))]
     {
-        let _ = name;
+        let _ = (name, exclude_disk);
         let dir = std::env::temp_dir().join("dw-recovered");
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         Ok((dir, "Recovered".into()))

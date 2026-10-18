@@ -57,9 +57,17 @@ pub fn get_dev_hooks() -> Value {
         .map(|v| v == "1")
         .unwrap_or(false);
     json!({
+        // Which command surface answered: the TourDriver branches on this
+        // (the real core picks a live device row; the sim core uses its
+        // fixed synthetic device). The mock's get_dev_hooks reports "sim".
+        "core": "real",
         "tour": tour,
         "tourMode": std::env::var("DISKWIZARD_TOUR_MODE").ok(),
         "tourLicenseKey": std::env::var("DISKWIZARD_TOUR_LICENSE_KEY").ok(),
         "scan": std::env::var("DISKWIZARD_SCAN").ok(),
+        // QA-1 (real-core tour): substring filter that selects the device
+        // row to scan (e.g. the CI job's VHD label "DWTEST"). Empty → the
+        // first eligible row.
+        "deviceFilter": std::env::var("DISKWIZARD_TOUR_DEVICE").ok(),
     })
 }
