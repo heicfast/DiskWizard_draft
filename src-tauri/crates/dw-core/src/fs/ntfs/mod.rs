@@ -398,10 +398,13 @@ impl NtfsEngine {
             mft_extents: Vec::new(),
         };
         let cluster = engine.boot.cluster_size();
-        // Record 0 lives at the MFT's first cluster.
+        // Record 0 lives at the MFT's first cluster — mft_lba is an
+        // LCN (cluster number), so the byte offset scales by the
+        // CLUSTER size, never the sector size (spc > 1 volumes:
+        // the VHD integration caught exactly this).
         let rec0 = RawRecord::read(
             &*engine.dev,
-            engine.boot.mft_lba * u64::from(engine.boot.bytes_per_sector),
+            engine.boot.mft_lba * cluster,
             engine.boot.mft_record_size,
             engine.boot.bytes_per_sector,
         )?;
@@ -418,7 +421,7 @@ impl NtfsEngine {
         if mft_extents.is_empty() {
             // Degenerate: the MFT is resident-contiguous at mft_lba.
             mft_extents.push(Extent::new(
-                engine.boot.mft_lba * u64::from(engine.boot.bytes_per_sector),
+                engine.boot.mft_lba * cluster,
                 u64::from(engine.boot.mft_record_size) * 32,
             ));
         }
@@ -898,6 +901,64 @@ mod tests {
         // Extents resolved through the runlist.
         let readme_entry = sink.0.iter().find(|e| e.name == "readme.txt").unwrap();
         assert_eq!(readme_entry.extents, vec![Extent::new(100 * 512, 1024)]);
+        assert_eq!(readme_entry.size, 1024);
+    }
+
+    #[test]
+    fn engine_walk_handles_multi_sector_clusters() {
+        // spc=8 (4 KiB clusters), 1024-byte records: mft_lba is an LCN
+        // — the MFT byte offset is LCN × CLUSTER size. (The VHD
+        // integration on real NTFS caught the old sector-size math
+        // reading zeros and finding nothing.)
+        let mut ram = RamDevice::new(4096 * 4096, 512); // 16 MiB
+        let mut boot = boot_sector_template();
+        boot[0x0D] = 8; // 8 sectors per cluster
+        boot[0x28..0x30]
+            .copy_from_slice(&(u64::try_from(4096 * 4096 / 512).unwrap()).to_le_bytes());
+        boot[0x30..0x38].copy_from_slice(&4u64.to_le_bytes()); // MFT at LCN 4
+        boot[0x40] = 0xF6; // 1024-byte records
+        ram.data[..512].copy_from_slice(&boot);
+        let pad = |mut r: Vec<u8>| -> Vec<u8> {
+            r.resize(1024, 0);
+            r[0x18..0x1C].copy_from_slice(&1024u32.to_le_bytes());
+            r[0x1C..0x20].copy_from_slice(&1024u32.to_le_bytes());
+            r
+        };
+        let mft_base = 4 * 4096; // LCN 4 × cluster size 4096
+        let rec0 = pad(mft_record0(4, 8)); // MFT run: 8 clusters at LCN 4
+        let root = pad(mft_record(0x0003, 5, ".", None));
+        let readme = pad(mft_record(
+            0x0001,
+            5,
+            "readme.txt",
+            Some(([0x11, 0x02, 100], 1024)),
+        ));
+        ram.data[mft_base..mft_base + 1024].copy_from_slice(&rec0);
+        ram.data[mft_base + 5 * 1024..mft_base + 6 * 1024].copy_from_slice(&root);
+        ram.data[mft_base + 6 * 1024..mft_base + 7 * 1024].copy_from_slice(&readme);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = NtfsEngine::new(Arc::clone(&dev)).expect("engine on 4 KiB clusters");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        let ctrl = ScanControl::new();
+        let stats = engine.quick_scan(&mut sink, &ctrl).expect("scan");
+        assert!(stats.entries >= 1, "the file is found through LCN math");
+        let readme_entry = sink
+            .0
+            .iter()
+            .find(|e| e.name == "readme.txt")
+            .expect("readme.txt found");
+        // Runlist LCNs scale by the CLUSTER size (LCN 100 × 4096).
+        assert_eq!(
+            readme_entry.extents,
+            vec![Extent::new(100 * 4096, 2 * 4096)]
+        );
         assert_eq!(readme_entry.size, 1024);
     }
 
