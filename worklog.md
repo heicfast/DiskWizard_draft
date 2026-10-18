@@ -422,3 +422,75 @@ marker path + the byte-truth integration test.
   full app crate locally — the CI fast job covers it).
 - Resident recovery landed (above). Phase-2 repair spec + 6-POV
   reviews + this worklog pushed.
+
+## Session 5 (2026-10-18) — the QA-1 real-core tour + §8 licensing + Phase 0/1/2 artifacts (coordination session)
+
+**Task ID**: 5c
+**Agent**: main (Z.ai) — tour/licensing/docs session
+**Task**: Phase 0/1/2 mandates from a cold start (corpus ingestion +
+registers + plan docs), the QA-1 real-core tour (the owner's TOP P0),
+the §8 licensing re-point, and the quick P1 batch — coordinating with
+the parallel engine agent's pushes.
+
+**Work Log**:
+- Phase 0 from scratch: saved MASTER_PROMPT.md verbatim (PAT redacted
+  per OQ-1 — the repo is PUBLIC; a pushed token gets revoked), cloned
+  all four repos, and ingested the corpus: 49 research docs read
+  line-by-line by this agent + 5 digestion agents covering the tail →
+  `docs/maps/doc-tree.md` (299/299 coverage ledger, 0 uncovered),
+  `docs/maps/context-synthesis.md`, five digests under
+  `docs/maps/digests/` (per-binary/runtime/reversed, MOM/partition/
+  WinPE, UIUX long-tail, donor study, UIUX/SaveScan/FileRepair/config).
+- Verified the parallel agent's claims before building on them (CI
+  green on 6edfddb via the GitHub API; engine constants vs my FULL
+  reads of the ext/HFS+/ReFS research artifacts — kernel-correct).
+- **QA-1 (TOP P0) landed**: `.github/workflows/real-core-tour.yml` —
+  builds WITHOUT sim (only the narrow `ci-tour` license-seed feature,
+  DiskGenie donor pattern: refusal arm in every other build), seeds a
+  VHD (kept present.txt 1 MiB + deleted gone.txt 64 KiB), walks the
+  REAL funnel via a dual-mode TourDriver (`get_dev_hooks.core` → live
+  device pick by DISKWIZARD_TOUR_DEVICE filter → real scan → results →
+  REAL recovery funnel), captures title-synced frames, asserts key
+  frame names, byte-compares BOTH seeds, uploads screenshots + logs.
+  Two launch iterations: a colon in an unquoted YAML step name (zero
+  jobs created), then the concurrency group cancelling runs under the
+  parallel agent's pushes.
+- **§8 licensing fix (OQ-3)**: `dw-license/src/config.rs` — the ONE
+  config module (endpoint `https://diskbytes-license…workers.dev/`,
+  the donor's Ed25519 key + HMAC secret + UA + `x-db-*` headers +
+  DB key prefix + iss/aud), values verified verbatim at the donor
+  source. protocol/token/http/lib re-pointed; UI + both mocks flipped
+  to DB- keys; docs updated to match (ARCHITECTURE, QA-REGISTER §3,
+  README demo table). The session-3 fresh keypair is retired to the
+  swap sheet.
+- **§5.1 item 8 enforced server-side**: `start_recovery` now excludes
+  the source disk in `resolve_destination` (DESTINATION_ON_SOURCE hard
+  error); `snapshot.deviceId` flows to the destination dialog (the
+  old call passed a hardcoded null).
+- **P1 batch**: QA-17 (bytes_found capacity clamp, both report sites,
+  regression test) + QA-8 (`sourceVolumeLive` on scan-done + the
+  results-header live-scan note + both mocks emit it).
+- **M2 fixture gate started**: ext2 real-mkfs fixture test (ignored,
+  DW_EXT2_FIXTURE env, soft-skip locally) + the ci.yml generation
+  steps (mkfs.ext2 + debugfs seed write, byte-truth recovery assert).
+- Phase 1/2 artifacts: `docs/audit/consistency-register.md` (all 13
+  §7 items verdicts + hallucination watch), `docs/audit/ui-gap-register.md`,
+  `docs/architecture/target-codebase-tree.md` (every module cites its
+  governing research artifact), `docs/architecture/phase-build-plan.md`
+  (M0-M5 with exit criteria), `docs/standards/SOP.md`,
+  `docs/dependencies.md` (live-verified versions; OQ-7 npm posture).
+- Coordination: 4 rebases with the parallel agent (engine batch,
+  parse_device_id Option fix — which my QA-8 commit then tripped over
+  and CI caught within minutes; fixed same-cycle), zero lost work.
+
+**Stage Summary**:
+- Gates at each push: fmt, clippy (engines), 126→127 dw-core + 27
+  dw-license tests, tsc, 73 web tests. The app-crate Windows compile
+  rides the CI windows-check job (local box lacks GTK; aws-lc-sys
+  blocks msvc cross-check — the documented limitation).
+- QA-1's workflow is live; the first fully-completing run was racing
+  the parallel agent's pushes (concurrency cancels). CI/MSIX/VHD green
+  on the post-fix commit.
+- Next: tour green confirmation + register updates; HFS+ fixture
+  (hfsprogs) + ReFS runner leg; QA-4 $Bitmap scoring; QA-6 65% proof;
+  the M3 IOCP push.

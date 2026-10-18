@@ -70,6 +70,25 @@ jobs:
         run: cargo test -p dw-core -p dw-license
         working-directory: src-tauri
 
+      # M2 exit criterion (docs/architecture/phase-build-plan.md): the
+      # ext engine must scan + recover ground-truth mkfs output, not
+      # just hand-built structures. ubuntu runners ship e2fsprogs;
+      # the ignored test soft-skips when the env var is absent.
+      - name: "Gate: ext2 real-filesystem fixture (mkfs + debugfs)"
+        run: |
+          set -e
+          dd if=/dev/zero of=/tmp/ext2.img bs=1M count=16 status=none
+          mkfs.ext2 -q -F /tmp/ext2.img
+          python3 -c "open('/tmp/seed.txt','wb').write(bytes((i*7+3)%251 for i in range(1000)))"
+          debugfs -w -R "write /tmp/seed.txt /seed.txt" /tmp/ext2.img >/dev/null 2>&1
+          ls -la /tmp/ext2.img
+        working-directory: src-tauri
+      - name: "Gate: ext2 fixture test (scan + byte-truth recovery)"
+        run: cargo test -p dw-core ext2_real_mkfs_fixture -- --ignored --nocapture
+        working-directory: src-tauri
+        env:
+          DW_EXT2_FIXTURE: /tmp/ext2.img
+
       # The Windows platform layer cross-checked from Linux: dw-win's
       # dependency closure is pure Rust (dw-license's reqwest client is
       # feature-gated OFF for dw-win), so `cargo check/clippy --target

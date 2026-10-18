@@ -1259,4 +1259,98 @@ pub mod tests {
         let _ = engine.quick_scan(&mut sink, &ScanControl::new());
         // No panic = pass; the orphan sweep may still find content.
     }
+
+    // ── REAL-filesystem fixture (M2 exit criterion: engine vs
+    // ground-truth mkfs output, not hand-built structures) ──────────
+    //
+    // CI (ci.yml rust-core job) generates a fresh mkfs.ext2 image,
+    // writes a deterministic seed file via debugfs, and runs this test
+    // with DW_EXT2_FIXTURE=<path>. Soft-skips when the env var is
+    // unset (local runs without the fixture step).
+
+    /// The seed content the CI fixture writes (i*7+3 mod 251, 1000 B).
+    fn ext2_fixture_seed() -> Vec<u8> {
+        (0..1000u32).map(|i| ((i * 7 + 3) % 251) as u8).collect()
+    }
+
+    /// In-memory destination (the recover tests' RamDest pattern).
+    struct MemDest {
+        files: std::collections::HashMap<String, Vec<u8>>,
+    }
+    impl crate::recover::DestWriter for MemDest {
+        fn mkdir(&mut self, _path: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_file(
+            &mut self,
+            path: &str,
+            read: &mut dyn FnMut(&mut [u8]) -> usize,
+        ) -> Result<(), String> {
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let n = read(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            self.files.insert(path.to_string(), out);
+            Ok(())
+        }
+        fn free_bytes(&self) -> Result<u64, String> {
+            Ok(u64::MAX / 4)
+        }
+    }
+
+    #[test]
+    #[ignore = "CI fixture test: run with DW_EXT2_FIXTURE=<mkfs.ext2 image>"]
+    fn ext2_real_mkfs_fixture_scan_and_recover() {
+        let Ok(path) = std::env::var("DW_EXT2_FIXTURE") else {
+            return; // fixture not provided — soft skip (CI provides it)
+        };
+        let data = std::fs::read(&path).expect("fixture image readable");
+        let mut ram = RamDevice::new(data.len(), 512);
+        ram.data = data;
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+
+        // Full pipeline: the controller must detect the ext2
+        // superblock on the raw image (no partition table), run the
+        // engine, and surface the seed file.
+        let mut obs = crate::scan::NoObserver;
+        let (tree, report) = crate::scan::run_scan(
+            Arc::clone(&dev) as Arc<dyn BlockDevice>,
+            "ext2-fixture",
+            &mut obs,
+        )
+        .expect("scan completes");
+        assert!(
+            !report.stopped,
+            "fixture scan must run to completion (fs: {:?})",
+            report.fs
+        );
+        let node = tree
+            .nodes()
+            .iter()
+            .find(|n| n.name == "seed.txt")
+            .expect("the mkfs seed file is found (detection + walk + naming)");
+        let seed = ext2_fixture_seed();
+        assert_eq!(node.size, seed.len() as u64, "exact logical size");
+
+        // Byte-truth recovery through the real queue/extent path.
+        let ids = [node.id];
+        let queue = crate::recover::build_queue(tree.nodes(), &ids);
+        assert!(!queue.is_empty(), "the seed node is recoverable");
+        let mut dest = MemDest {
+            files: std::collections::HashMap::new(),
+        };
+        let ctrl = ScanControl::new();
+        let result = crate::recover::run_recovery(&*dev, &queue, &mut dest, &ctrl, |_| {})
+            .expect("recovery");
+        assert_eq!(result.done_files, 1);
+        assert_eq!(result.failed_files, 0);
+        let recovered = dest.files.values().next().expect("one recovered file");
+        assert_eq!(recovered.len(), seed.len());
+        assert_eq!(recovered, &seed, "recovered bytes are byte-identical");
+    }
 }
