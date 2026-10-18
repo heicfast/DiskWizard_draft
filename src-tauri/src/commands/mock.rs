@@ -114,6 +114,25 @@ pub async fn sdr_diagnose(s: State<'_, SharedState>) -> Result<Value, String> {
     }))
 }
 
+#[tauri::command]
+pub async fn sdr_repair(
+    s: State<'_, SharedState>,
+    _device_id: String,
+    _confirm: bool,
+) -> Result<Value, String> {
+    // The dev-sim shape: same verdict + progress contract as the
+    // real repair (dev harness parity for the UI agents).
+    license_gate(&s)?;
+    delay(3_200).await;
+    Ok(json!({
+        "ok": true,
+        "restoredAccess": true,
+        "sectorsWritten": 1,
+        "description": "Restored the boot sector from the backup copy.",
+        "fs": "exFAT",
+    }))
+}
+
 /* ── Scan lifecycle (licensed) ───────────────────────────────────────── */
 
 #[tauri::command]
