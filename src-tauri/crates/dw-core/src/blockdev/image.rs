@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{check_buf, BlockDevice};
+use super::{BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// Logical sector size detection result.

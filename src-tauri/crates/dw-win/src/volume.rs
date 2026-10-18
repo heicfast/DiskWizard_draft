@@ -27,17 +27,15 @@ pub fn parse_device_id(id: &str) -> Option<DeviceTarget> {
         }
         if let Some(part) = tail.strip_prefix("part") {
             let part_no: u32 = part.parse().ok()?;
-            return Some(DeviceTarget::Partition {
-                disk: idx,
-                part_no,
-            });
+            return Some(DeviceTarget::Partition { disk: idx, part_no });
         }
     }
     // Volume-letter forms: vol-X / usb-X / sd-X / ssd-X.
-    if let Some(letter) = id.rsplit(['-', ':']).next().and_then(|l| l.chars().next()) {
-        if letter.is_ascii_alphabetic() && id.len() <= 8 {
-            return Some(DeviceTarget::Volume(letter.to_ascii_uppercase()));
-        }
+    if let Some(letter) = id.rsplit(['-', ':']).next().and_then(|l| l.chars().next())
+        && letter.is_ascii_alphabetic()
+        && id.len() <= 8
+    {
+        return Some(DeviceTarget::Volume(letter.to_ascii_uppercase()));
     }
     None
 }

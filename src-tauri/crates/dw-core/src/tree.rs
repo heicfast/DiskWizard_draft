@@ -127,15 +127,15 @@ impl TreeBuilder {
         }
         // Merge: same first extent + already structured → absorbed.
         let first_off = e.extents.first().map_or(u64::MAX, |x| x.offset);
-        if first_off != u64::MAX {
-            if let Some(&existing_id) = self.by_first_extent.get(&first_off) {
-                let existing = &mut self.nodes[existing_id as usize];
-                if !existing.is_dir
-                    && matches!(existing.origin, NodeOrigin::Existing | NodeOrigin::Deleted)
-                {
-                    // Structured wins: the carved copy is noise.
-                    return;
-                }
+        if first_off != u64::MAX
+            && let Some(&existing_id) = self.by_first_extent.get(&first_off)
+        {
+            let existing = &mut self.nodes[existing_id as usize];
+            if !existing.is_dir
+                && matches!(existing.origin, NodeOrigin::Existing | NodeOrigin::Deleted)
+            {
+                // Structured wins: the carved copy is noise.
+                return;
             }
         }
         let category = e.category_hint.unwrap_or_else(|| classify(&e.name));
@@ -395,9 +395,11 @@ mod tests {
         b.add(nested);
         let nodes = b.nodes();
         assert!(nodes.len() >= 4);
-        assert!(nodes
-            .iter()
-            .any(|n| n.name == "family.png" && n.path.ends_with("Photos\\family.png")));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.name == "family.png" && n.path.ends_with("Photos\\family.png"))
+        );
         let photos = nodes.iter().find(|n| n.name == "Photos").unwrap();
         assert_eq!(photos.size, 50);
         let (files, bytes) = b.totals();

@@ -259,7 +259,7 @@ mod tests {
         h[..8].copy_from_slice(b"EFI PART");
         h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes()); // rev 1.0
         h[12..16].copy_from_slice(&92u32.to_le_bytes()); // header size
-                                                         // crc at 16 left 0 for the test (parser tolerates)
+        // crc at 16 left 0 for the test (parser tolerates)
         h[72..80].copy_from_slice(&2u64.to_le_bytes()); // entries LBA
         h[80..84].copy_from_slice(&(entries.len() as u32).to_le_bytes());
         h[84..88].copy_from_slice(&128u32.to_le_bytes());

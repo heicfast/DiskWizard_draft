@@ -14,6 +14,7 @@
 //! id/name/letter/kind/fileSystem/used/total/health/bitLocker/trim/
 //! isSystem/diskIndex.
 
+use crate::win_len;
 use serde::{Deserialize, Serialize};
 
 use dw_core::blockdev::{BlockDevice, BlockRead, CachedDevice};
@@ -65,6 +66,7 @@ pub struct DiskFacts {
 /// # Errors
 /// Never fails whole-list: individual enumeration failures degrade
 /// to skipped rows (an unreadable disk doesn't hide the others).
+#[must_use]
 pub fn enumerate_inventory() -> DeviceInventory {
     let mut inv = DeviceInventory::default();
     let letters = mounted_letters();
@@ -78,10 +80,10 @@ pub fn enumerate_inventory() -> DeviceInventory {
         if disk_index == u32::MAX {
             continue;
         }
-        if !disk_facts.iter().any(|d| d.index == disk_index) {
-            if let Some(facts) = probe_disk_facts(disk_index) {
-                disk_facts.push(facts);
-            }
+        if !disk_facts.iter().any(|d| d.index == disk_index)
+            && let Some(facts) = probe_disk_facts(disk_index)
+        {
+            disk_facts.push(facts);
         }
         let vol = volume_facts(*letter);
         let facts = disk_facts
@@ -99,20 +101,26 @@ pub fn enumerate_inventory() -> DeviceInventory {
             file_system: vol.fs.clone(),
             used: vol.used,
             total: vol.total,
-            health: if vol.fs == "RAW" { "raw".into() } else { "ok".into() },
+            health: if vol.fs == "RAW" {
+                "raw".into()
+            } else {
+                "ok".into()
+            },
             bit_locker: "none".into(),
-            trim: facts.trim.map(|t| if t { "on".into() } else { "off".into() }),
+            trim: facts
+                .trim
+                .map(|t| if t { "on".into() } else { "off".into() }),
             is_system,
             disk_index,
         };
         // BitLocker-locked: FS reports blank; boot sector carries the
         // FVE signature (probe via the raw volume).
-        if vol.fs.is_empty() || vol.fs == "RAW" {
-            if crate::bitlocker::volume_is_bitlocker_locked(*letter) {
-                row.health = "bitlocker".into();
-                row.bit_locker = "locked".into();
-                row.file_system = "RAW".into();
-            }
+        if (vol.fs.is_empty() || vol.fs == "RAW")
+            && crate::bitlocker::volume_is_bitlocker_locked(*letter)
+        {
+            row.health = "bitlocker".into();
+            row.bit_locker = "locked".into();
+            row.file_system = "RAW".into();
         }
         if kind == "usb" || kind == "sdcard" || kind == "portable-ssd" {
             inv.external_devices.push(row);
@@ -127,15 +135,16 @@ pub fn enumerate_inventory() -> DeviceInventory {
         if let Ok(dev) = RawHandleDevice::open_physical(facts.index) {
             let cached = std::sync::Arc::new(CachedDevice::new(std::sync::Arc::new(dev)));
             if let Ok(layout) = read_layout(&*cached) {
-                for hint in sweep_for_lost_partitions(&*cached, &layout)
-                    .unwrap_or_default()
-                {
+                for hint in sweep_for_lost_partitions(&*cached, &layout).unwrap_or_default() {
                     inv.local_disks.push(DeviceRow {
                         id: format!("disk{}-lost{}", facts.index, hint.info.start_lba),
+                        // Integer-math GB display (one decimal, no
+                        // u64→f64 precision loss).
                         name: format!(
-                            "Lost {} ({:.1} GB) on Disk {}",
+                            "Lost {} ({}.{:01} GB) on Disk {}",
                             hint.info.fs.wire(),
-                            (hint.info.total_sectors * 512) as f64 / 1_073_741_824.0,
+                            hint.info.total_sectors * 512 / 1_073_741_824,
+                            hint.info.total_sectors * 512 % 1_073_741_824 * 10 / 1_073_741_824,
                             facts.index
                         ),
                         letter: None,
@@ -160,37 +169,42 @@ pub fn enumerate_inventory() -> DeviceInventory {
 /// identity block.
 #[must_use]
 pub fn disk_identity(index: u32) -> (String, String, String) {
-    probe_disk_facts(index)
-        .map(|f| (f.model, f.serial, f.bus))
-        .unwrap_or_else(|| (format!("Disk {index}"), String::new(), String::new()))
+    probe_disk_facts(index).map_or_else(
+        || (format!("Disk {index}"), String::new(), String::new()),
+        |f| (f.model, f.serial, f.bus),
+    )
 }
 
 /// Parse the partition layout of a device (MBR → EBR → GPT chain).
+///
+/// # Errors
+/// Typed [`dw_core::error::CoreError`] when the device can't be read
+/// or the structures are too damaged to parse at all.
 pub fn read_layout(dev: &dyn BlockDevice) -> dw_core::error::CoreResult<PartitionLayout> {
     let sector0 = dev.read_struct_at::<512>(0)?;
     if let Ok((scheme, mut parts)) = dw_core::partition::parse_mbr(&sector0, dev.total_sectors()) {
-        if scheme == dw_core::partition::PartitionScheme::Gpt {
-            if let Ok((_, gpt_parts)) = dw_core::partition::parse_gpt(dev) {
-                return Ok(PartitionLayout {
-                    scheme,
-                    partitions: gpt_parts,
-                });
-            }
+        if scheme == dw_core::partition::PartitionScheme::Gpt
+            && let Ok((_, gpt_parts)) = dw_core::partition::parse_gpt(dev)
+        {
+            return Ok(PartitionLayout {
+                scheme,
+                partitions: gpt_parts,
+            });
         }
         // Walk EBR chains for extended containers.
         let extended: Vec<u64> = sector0[0x1BE..0x1FE]
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .filter(|e| (e[4] == 0x05 || e[4] == 0x0F) && e[8..12] != [0, 0, 0, 0])
-            .map(|e| {
-                u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as u64
-            })
+            .map(|e| u64::from(u32::from_le_bytes([e[8], e[9], e[10], e[11]])))
             .collect();
         for ebr0 in extended {
             if let Ok(logical) = dw_core::partition::parse_ebr_chain(
                 dev,
                 ebr0,
                 dev.total_sectors(),
-                parts.len() as u32,
+                u32::try_from(parts.len()).unwrap_or(u32::MAX),
             ) {
                 parts.extend(logical);
             }
@@ -222,16 +236,14 @@ fn volume_facts(letter: char) -> VolumeFacts {
     let ok = unsafe {
         windows::Win32::Storage::FileSystem::GetVolumeInformationW(
             windows::core::PCWSTR(root_w.as_ptr()),
-            Some(label_buf.as_mut_ptr()),
-            Some(label_buf.len() as u32),
-            Some(&mut serial),
-            Some(&mut max_comp),
-            Some(&mut flags),
-            Some(fs_buf.as_mut_ptr()),
-            Some(fs_buf.len() as u32),
+            Some(&mut label_buf),
+            Some(&raw mut serial),
+            Some(&raw mut max_comp),
+            Some(&raw mut flags),
+            Some(&mut fs_buf),
         )
     };
-    let fs = if ok.as_bool() {
+    let fs = if ok.is_ok() {
         String::from_utf16_lossy(&fs_buf)
             .trim_end_matches('\0')
             .to_string()
@@ -258,16 +270,12 @@ fn volume_space(root: &str) -> (u64, u64) {
     let ok = unsafe {
         windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
             windows::core::PCWSTR(root_w.as_ptr()),
-            Some(&mut free_to_caller),
-            Some(&mut total),
-            Some(&mut free),
+            Some(&raw mut free_to_caller),
+            Some(&raw mut total),
+            Some(&raw mut free),
         )
     };
-    if ok.as_bool() {
-        (total, free)
-    } else {
-        (0, 0)
-    }
+    if ok.is_ok() { (total, free) } else { (0, 0) }
 }
 
 /// All mounted drive letters (fixed + removable).
@@ -298,34 +306,31 @@ fn is_system_volume(letter: char) -> bool {
 
 /// Probe hardware facts for a physical disk (query-property based).
 fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
-    use windows::Win32::Storage::Ioctl::{
-        IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY, STORAGE_PROPERTY_ID,
-        STORAGE_QUERY_TYPE, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY_Type1,
-        STORAGE_PROPERTY_ID_StorageDeviceProperty,
+    use windows::Win32::System::Ioctl::{
+        IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
+        STORAGE_QUERY_TYPE, StorageDeviceProperty,
     };
     let dev = RawHandleDevice::open_physical(index).ok()?;
     let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
     let mut desc_buf = vec![0u8; 4096];
     let mut query = STORAGE_PROPERTY_QUERY {
-        PropertyId: STORAGE_PROPERTY_ID_StorageDeviceProperty,
+        PropertyId: StorageDeviceProperty,
         QueryType: STORAGE_QUERY_TYPE(0),
         AdditionalParameters: [0; 1],
     };
-    let _ = STORAGE_PROPERTY_QUERY_Type1; // (type alias sanity)
-    let _ = STORAGE_PROPERTY_ID(0);
     let ok = unsafe {
         windows::Win32::System::IO::DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&mut query as *mut _ as _),
-            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(desc_buf.as_mut_ptr() as _),
-            desc_buf.len() as u32,
+            Some(&raw mut query as _),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some(desc_buf.as_mut_ptr().cast()),
+            win_len(desc_buf.len()),
             None,
             None,
         )
     };
-    if !ok.as_bool() {
+    if ok.is_err() {
         return None;
     }
     // STORAGE_DEVICE_DESCRIPTOR fixed part is 40 bytes:
@@ -334,7 +339,7 @@ fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
     //   u32 VendorIdOffset, u32 ProductIdOffset, u32 ProductRevisionOffset,
     //   u32 SerialNumberOffset, STORAGE_BUS_TYPE BusType,
     //   u32 RawPropertiesLength, ...
-    let desc: STORAGE_DEVICE_DESCRIPTOR = unsafe { std::ptr::read(desc_buf.as_ptr() as *const _) };
+    let desc: STORAGE_DEVICE_DESCRIPTOR = unsafe { std::ptr::read(desc_buf.as_ptr().cast()) };
     let get_str = |off: u32| -> String {
         if off == 0 {
             return String::new();
@@ -346,11 +351,12 @@ fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
         let end = desc_buf[start..]
             .iter()
             .position(|&b| b == 0)
-            .map(|p| start + p)
-            .unwrap_or(desc_buf.len());
-        String::from_utf8_lossy(&desc_buf[start..end]).trim().to_string()
+            .map_or(desc_buf.len(), |p| start + p);
+        String::from_utf8_lossy(&desc_buf[start..end])
+            .trim()
+            .to_string()
     };
-    let bus_type = desc.BusType as u32;
+    let bus_type = desc.BusType.0;
     let bus = match bus_type {
         0x07 => "USB",
         0x0A => "MMC",
@@ -363,15 +369,19 @@ fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
         _ => "Other",
     }
     .to_string();
-    let removable = desc.RemovableMedia.as_bool();
+    let removable = desc.RemovableMedia;
     let total_bytes = u64::from(dev.sector_size()) * dev.total_sectors();
     let is_ssd = probe_seek_penalty(index);
     let trim = probe_trim(index);
     Some(DiskFacts {
         index,
-        model: format!("{} {}", get_str(desc.VendorIdOffset), get_str(desc.ProductIdOffset))
-            .trim()
-            .to_string(),
+        model: format!(
+            "{} {}",
+            get_str(desc.VendorIdOffset),
+            get_str(desc.ProductIdOffset)
+        )
+        .trim()
+        .to_string(),
         serial: get_str(desc.SerialNumberOffset),
         bus,
         total_bytes,
@@ -383,16 +393,16 @@ fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
 
 fn probe_seek_penalty(index: u32) -> bool {
     // NoSeekPenalty == true → SSD. IOCTL on the physical device.
-    use windows::Win32::Storage::Ioctl::{
-        IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY, DEVICE_SEEK_PENALTY_DESCRIPTOR,
+    use windows::Win32::System::Ioctl::{
+        DEVICE_SEEK_PENALTY_DESCRIPTOR, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY,
     };
     let Ok(dev) = RawHandleDevice::open_physical(index) else {
         return false;
     };
     let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
     let mut query = STORAGE_PROPERTY_QUERY {
-        PropertyId: windows::Win32::Storage::Ioctl::StorageDeviceSeekPenaltyProperty,
-        QueryType: windows::Win32::Storage::Ioctl::PropertyStandardQuery,
+        PropertyId: windows::Win32::System::Ioctl::StorageDeviceSeekPenaltyProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
         AdditionalParameters: [0; 1],
     };
     let mut desc = DEVICE_SEEK_PENALTY_DESCRIPTOR::default();
@@ -400,26 +410,26 @@ fn probe_seek_penalty(index: u32) -> bool {
         windows::Win32::System::IO::DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&mut query as *mut _ as _),
-            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(&mut desc as *mut _ as _),
-            std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() as u32,
+            Some(&raw mut query as _),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some((&raw mut desc).cast()),
+            win_len(std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>()),
             None,
             None,
         )
     };
-    ok.as_bool() && !desc.IncursSeekPenalty.as_bool()
+    ok.is_ok() && !desc.IncursSeekPenalty
 }
 
 fn probe_trim(index: u32) -> Option<bool> {
-    use windows::Win32::Storage::Ioctl::{
-        IOCTL_STORAGE_QUERY_PROPERTY, DEVICE_TRIM_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
+    use windows::Win32::System::Ioctl::{
+        DEVICE_TRIM_DESCRIPTOR, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_PROPERTY_QUERY,
     };
     let dev = RawHandleDevice::open_physical(index).ok()?;
     let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
     let mut query = STORAGE_PROPERTY_QUERY {
-        PropertyId: windows::Win32::Storage::Ioctl::StorageDeviceTrimProperty,
-        QueryType: windows::Win32::Storage::Ioctl::PropertyStandardQuery,
+        PropertyId: windows::Win32::System::Ioctl::StorageDeviceTrimProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
         AdditionalParameters: [0; 1],
     };
     let mut desc = DEVICE_TRIM_DESCRIPTOR::default();
@@ -427,15 +437,15 @@ fn probe_trim(index: u32) -> Option<bool> {
         windows::Win32::System::IO::DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&mut query as *mut _ as _),
-            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(&mut desc as *mut _ as _),
-            std::mem::size_of::<DEVICE_TRIM_DESCRIPTOR>() as u32,
+            Some(&raw mut query as _),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some((&raw mut desc).cast()),
+            win_len(std::mem::size_of::<DEVICE_TRIM_DESCRIPTOR>()),
             None,
             None,
         )
     };
-    ok.as_bool().then_some(desc.TrimEnabled.as_bool())
+    ok.is_ok().then_some(desc.TrimEnabled)
 }
 
 /// The UI `kind` classification from bus/removable/SSD facts.
@@ -465,16 +475,14 @@ fn volume_display_name(letter: char, facts: &DiskFacts) -> String {
     let ok = unsafe {
         windows::Win32::Storage::FileSystem::GetVolumeInformationW(
             windows::core::PCWSTR(root_w.as_ptr()),
-            Some(label_buf.as_mut_ptr()),
-            Some(label_buf.len() as u32),
-            None,
+            Some(&mut label_buf),
             None,
             None,
             None,
             None,
         )
     };
-    let label = if ok.as_bool() {
+    let label = if ok.is_ok() {
         String::from_utf16_lossy(&label_buf)
             .trim_end_matches('\0')
             .to_string()
@@ -482,7 +490,13 @@ fn volume_display_name(letter: char, facts: &DiskFacts) -> String {
         String::new()
     };
     if label.is_empty() {
-        format!("Local Disk ({letter}:)")
+        // No volume label: fall back to the drive model when we have
+        // one (e.g. "Samsung BAR (E:)"), else the generic name.
+        if facts.model.is_empty() {
+            format!("Local Disk ({letter}:)")
+        } else {
+            format!("{} ({letter}:)", facts.model)
+        }
     } else {
         format!("{label} ({letter}:)")
     }

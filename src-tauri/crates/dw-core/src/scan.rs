@@ -122,11 +122,7 @@ impl ScanController {
     /// Build with an EXTERNAL control token (the app layer's managed
     /// pause/stop handle — the run respects it).
     #[must_use]
-    pub fn with_control(
-        dev: Arc<dyn BlockDevice>,
-        root_name: &str,
-        ctrl: ScanControl,
-    ) -> Self {
+    pub fn with_control(dev: Arc<dyn BlockDevice>, root_name: &str, ctrl: ScanControl) -> Self {
         let sectors = dev.total_sectors();
         Self {
             dev: Arc::new(CachedDevice::new(dev)),
@@ -364,17 +360,19 @@ pub fn run_scan(
 /// Read/parse failures surface as typed errors.
 pub fn read_partition_layout(dev: &dyn BlockDevice) -> CoreResult<PartitionLayout> {
     let sector0 = dev.read_struct_at::<512>(0)?;
+    if let Ok((scheme, _)) = partition::parse_mbr(&sector0, dev.total_sectors())
+        && scheme == partition::PartitionScheme::Gpt
+        && let Ok((_, gpt_parts)) = partition::parse_gpt(dev)
+    {
+        return Ok(PartitionLayout {
+            scheme,
+            partitions: gpt_parts,
+        });
+    }
     if let Ok((scheme, mut parts)) = partition::parse_mbr(&sector0, dev.total_sectors()) {
-        if scheme == partition::PartitionScheme::Gpt {
-            if let Ok((_, gpt_parts)) = partition::parse_gpt(dev) {
-                return Ok(PartitionLayout {
-                    scheme,
-                    partitions: gpt_parts,
-                });
-            }
-        }
-        let extended: Vec<u64> = sector0[0x1BE..0x1FE]
-            .chunks_exact(16)
+        let (mbr_entries, _) = sector0[0x1BE..0x1FE].as_chunks::<16>();
+        let extended: Vec<u64> = mbr_entries
+            .iter()
             .filter(|e| (e[4] == 0x05 || e[4] == 0x0F) && e[8..12] != [0, 0, 0, 0])
             .map(|e| u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as u64)
             .collect();

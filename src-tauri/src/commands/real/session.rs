@@ -1,6 +1,6 @@
 //! Session commands — the .rsf list/resume.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::State;
 
 use super::AppState;
@@ -30,13 +30,12 @@ pub fn list_sessions() -> Value {
 pub fn resume_session(s: State<'_, AppState>, session_id: String) -> Result<Value, String> {
     super::license::require_licensed(&s)?;
     let path = std::path::Path::new(&session_id);
-    let loaded = dw_core::session::load(path)
-        .map_err(|e| format!("SESSION_LOAD_FAILED. {e}"))?;
+    let loaded = dw_core::session::load(path).map_err(|e| format!("SESSION_LOAD_FAILED. {e}"))?;
     // Adopt the loaded tree as the current results (generation bump).
     let generation = {
         let st = &s.scan;
-        let gen = st.generation() + 1;
-        st.set_generation(gen);
+        let next = st.generation() + 1;
+        st.set_generation(next);
         st.set_target(loaded.device.name.as_str(), loaded.device.name.as_str());
         *st.tree_slot() = Some(std::sync::Arc::new(loaded.nodes.clone()));
         *st.report_slot() = Some(dw_core::scan::ScanReport {
@@ -47,7 +46,7 @@ pub fn resume_session(s: State<'_, AppState>, session_id: String) -> Result<Valu
             fs: dw_core::types::FsKind::Unknown,
         });
         *st.phase_slot() = dw_core::scan::Phase::Done;
-        gen
+        next
     };
     Ok(json!({ "generation": generation, "deviceName": loaded.device.name }))
 }

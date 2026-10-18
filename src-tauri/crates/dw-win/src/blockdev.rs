@@ -8,6 +8,7 @@
 //! Windows handles onto it (the EPMNtDrv driver contract from the
 //! research remains a drop-in alternative behind the same trait).
 
+use crate::win_len;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
@@ -23,14 +24,14 @@ use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::Storage::Ioctl::{
-    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-    DISK_GEOMETRY_EX, STORAGE_DEVICE_NUMBER,
+use windows::Win32::System::Ioctl::{
+    DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    STORAGE_DEVICE_NUMBER,
 };
 
 /// Open flags for raw devices: heavy sharing (we coexist with the OS)
-/// + no buffering (we do our own caching) — Overlapped required with
-/// NO_BUFFERING for reads >64 KB alignment paths.
+/// plus no buffering (we do our own caching) — Overlapped required
+/// with NO_BUFFERING for reads >64 KB alignment paths.
 const RAW_SHARE: u32 = FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0;
 
 /// A whole physical disk (`\\.\PhysicalDriveN`) or volume (`\\.\X:`)
@@ -68,7 +69,9 @@ impl RawHandleDevice {
     pub fn open_volume(letter: char) -> CoreResult<Self> {
         let up = letter.to_ascii_uppercase();
         if !up.is_ascii_alphabetic() {
-            return Err(CoreError::OpenFailed(format!("bad volume letter {letter:?}")));
+            return Err(CoreError::OpenFailed(format!(
+                "bad volume letter {letter:?}"
+            )));
         }
         let path = Path::new(&format!("\\\\.\\{up}:")).to_path_buf();
         Self::open(&path, &format!("Volume {up}:"))
@@ -84,7 +87,10 @@ impl RawHandleDevice {
             .or_else(|_| {
                 // Retry without NO_BUFFERING (some filter stacks reject
                 // it on volumes; correctness is identical, just slower).
-                OpenOptions::new().read(true).share_mode(RAW_SHARE).open(path)
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(RAW_SHARE)
+                    .open(path)
             })
             .map_err(|e| CoreError::OpenFailed(format!("{}: {e}", path.display())))?;
         let (sector_size, total_sectors) = probe_geometry(&file, path);
@@ -111,13 +117,13 @@ impl RawHandleDevice {
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 None,
                 0,
-                Some(&mut num as *mut _ as _),
-                std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
-                Some(&mut returned),
+                Some((&raw mut num).cast()),
+                win_len(std::mem::size_of::<STORAGE_DEVICE_NUMBER>()),
+                Some(&raw mut returned),
                 None,
             )
         };
-        if !ok.as_bool() {
+        if ok.is_err() {
             return Err(CoreError::Corrupt {
                 structure: "STORAGE_DEVICE_NUMBER",
                 detail: "IOCTL failed".into(),
@@ -137,13 +143,13 @@ fn probe_geometry(file: &File, path: &Path) -> (u32, u64) {
             IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
             None,
             0,
-            Some(geo_out.as_mut_ptr() as _),
-            geo_out.len() as u32,
+            Some(geo_out.as_mut_ptr().cast()),
+            win_len(geo_out.len()),
             None,
             None,
         )
     };
-    if ok.as_bool() {
+    if ok.is_ok() {
         // DISK_GEOMETRY_EX: DISK_GEOMETRY (40 bytes, sector size at
         // offset 8) then LARGE_INTEGER DiskSize at 40 then
         // PARTITION_INFORMATION_EX... total capacity = DiskSize for
@@ -205,7 +211,7 @@ impl BlockDevice for RawHandleDevice {
                     });
                 }
                 Ok(n) => done += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => {
                     return Err(CoreError::ReadFailed {
                         offset,
@@ -233,5 +239,7 @@ impl BlockDevice for RawHandleDevice {
 /// [`CoreError::OpenFailed`] when the device can't be opened.
 pub fn open_cached_physical(index: u32) -> CoreResult<Arc<dw_core::blockdev::CachedDevice>> {
     let dev = RawHandleDevice::open_physical(index)?;
-    Ok(Arc::new(dw_core::blockdev::CachedDevice::new(Arc::new(dev))))
+    Ok(Arc::new(dw_core::blockdev::CachedDevice::new(Arc::new(
+        dev,
+    ))))
 }

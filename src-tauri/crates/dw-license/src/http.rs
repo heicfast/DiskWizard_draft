@@ -2,9 +2,9 @@
 //!
 //! The seam keeps the whole state machine unit-testable with a
 //! scripted fake (the DiskGenie pattern — the live-E2E workflow then
-//! exercises the real transport against the deployed Worker).
-
-use std::time::Duration;
+//! exercises the real transport against the deployed Worker). The
+//! trait is always compiled; the reqwest implementation is gated on
+//! the `client` feature (see Cargo.toml for the cross-check rationale).
 
 /// The transport seam: POST JSON with headers → (status, body).
 pub trait LicenseHttp: Send + Sync {
@@ -21,14 +21,17 @@ pub trait LicenseHttp: Send + Sync {
 
 /// The real transport (reqwest blocking, 30 s timeout; rustls — no
 /// native TLS dependency in the WebView process).
+#[cfg(feature = "client")]
 pub struct ReqwestLicense {
     client: reqwest::blocking::Client,
 }
 
+#[cfg(feature = "client")]
 impl ReqwestLicense {
     /// # Errors
     /// String error when the TLS client cannot be constructed.
     pub fn new() -> Result<Self, String> {
+        use std::time::Duration;
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -37,12 +40,14 @@ impl ReqwestLicense {
     }
 }
 
+#[cfg(feature = "client")]
 impl Default for ReqwestLicense {
     fn default() -> Self {
         Self::new().expect("reqwest blocking client constructs")
     }
 }
 
+#[cfg(feature = "client")]
 impl LicenseHttp for ReqwestLicense {
     fn post_json(
         &self,

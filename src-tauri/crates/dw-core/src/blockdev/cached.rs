@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{check_buf, BlockDevice};
+use super::{BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// Sectors per cache chunk (32 KiB at 512-byte sectors).

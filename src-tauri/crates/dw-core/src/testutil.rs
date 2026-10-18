@@ -1,7 +1,7 @@
 //! Shared test doubles (crate-internal, tests-only).
 #![allow(dead_code)]
 
-use crate::blockdev::{check_buf, BlockDevice};
+use crate::blockdev::{BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// 512-byte-sector RAM device (test double shared across modules).

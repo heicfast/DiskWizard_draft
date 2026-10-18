@@ -1,7 +1,7 @@
 //! Device commands — the real inventory via dw-win, the SMART free
 //! tier, BitLocker unlock, SDR.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::State;
 
 use super::AppState;
@@ -72,9 +72,8 @@ pub fn smart_report(device_id: String) -> Result<Value, String> {
         let Some(index) = disk else {
             return Err(format!("UNKNOWN_DEVICE. {device_id}"));
         };
-        let report = dw_win::smart::report_for_disk(index).map_err(|e| {
-            format!("SMART_UNAVAILABLE. Disk health data could not be read: {e}")
-        })?;
+        let report = dw_win::smart::report_for_disk(index)
+            .map_err(|e| format!("SMART_UNAVAILABLE. Disk health data could not be read: {e}"))?;
         Ok(json!({
             "deviceId": device_id,
             "deviceName": report.device_name,
@@ -185,10 +184,7 @@ pub async fn cloud_sign_in(_drive_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn start_cloud_scan(
-    s: State<'_, AppState>,
-    drive_id: String,
-) -> Result<Value, String> {
+pub async fn start_cloud_scan(s: State<'_, AppState>, drive_id: String) -> Result<Value, String> {
     super::license::require_licensed(&s)?;
     let _ = drive_id;
     Err("NOT_AVAILABLE. Cloud recovery connects in the M3 engine update.".into())

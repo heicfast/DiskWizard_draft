@@ -12,6 +12,18 @@
 
 #![cfg(windows)]
 
+/// Win32 `u32` length for a buffer/size value (saturating).
+///
+/// Every `size_of`/`len()` handed to a Win32 API's `u32` parameter
+/// routes through here: the saturate arm is unreachable for the struct
+/// and few-KiB buffers we pass (bounded far below 4 GiB), and a
+/// saturated length is safe if ever hit — the call simply reports a
+/// shorter usable buffer instead of truncating unpredictably.
+#[must_use]
+pub(crate) fn win_len(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 pub mod admin;
 pub mod bitlocker;
 pub mod blockdev;

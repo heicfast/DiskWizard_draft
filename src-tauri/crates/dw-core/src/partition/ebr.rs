@@ -9,7 +9,7 @@
 
 use crate::error::{CoreError, CoreResult};
 
-use super::{has_dos_signature, mbr_type_to_fs, PartitionInfo};
+use super::{PartitionInfo, has_dos_signature, mbr_type_to_fs};
 
 /// Walk the EBR chain starting at `ebr0_lba`.
 ///
@@ -148,7 +148,7 @@ mod tests {
         let mut ebr0 = vec![0u8; 512];
         build_ebr(Some((0x07, 63, 100)), Some(2000), &mut ebr0);
         ram.data[100 * 512..101 * 512].copy_from_slice(&ebr0); // wrong spot
-                                                               // No valid EBR at 1000: chain yields nothing → salvage error.
+        // No valid EBR at 1000: chain yields nothing → salvage error.
         let r = parse_ebr_chain(&ram, 1000, 10_000, 0);
         assert!(r.is_err());
     }

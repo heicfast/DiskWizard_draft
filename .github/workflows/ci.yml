@@ -51,6 +51,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -67,6 +68,53 @@ jobs:
 
       - name: "Gate: engine tests (dw-core + dw-license)"
         run: cargo test -p dw-core -p dw-license
+        working-directory: src-tauri
+
+      # The Windows platform layer cross-checked from Linux: dw-win's
+      # dependency closure is pure Rust (dw-license's reqwest client is
+      # feature-gated OFF for dw-win), so `cargo check/clippy --target
+      # x86_64-pc-windows-msvc` catches every Windows-only compile error
+      # BEFORE the expensive Windows runners spin up. This gate exists
+      # because a push once carried 20+ windows-rs API-signature errors
+      # that only surfaced in the NSIS job.
+      - name: "Gate: dw-win cross-check (windows-msvc target)"
+        run: |
+          cargo check -p dw-win --target x86_64-pc-windows-msvc
+          cargo clippy -p dw-win --target x86_64-pc-windows-msvc -- -D warnings
+        working-directory: src-tauri
+
+  # Fast app-crate signal on a real Windows toolchain: check + clippy
+  # for the FULL workspace (tauri tree + dw-license client + sim
+  # feature) — minutes instead of the full NSIS bundle cycle. The
+  # NSIS/MSIX jobs remain the authoritative release builds.
+  windows-check:
+    name: Windows app check (clippy, default + sim)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: "Gate: cargo check (workspace, default features)"
+        run: cargo check --workspace --target x86_64-pc-windows-msvc
+        working-directory: src-tauri
+
+      - name: "Gate: clippy -D warnings (engine crates, full client)"
+        run: cargo clippy -p dw-core -p dw-license -p dw-win --target x86_64-pc-windows-msvc -- -D warnings
+        working-directory: src-tauri
+
+      - name: "Gate: cargo check (sim feature — the dev mock core)"
+        run: cargo check --workspace --target x86_64-pc-windows-msvc --features sim
         working-directory: src-tauri
 
   windows-nsis:

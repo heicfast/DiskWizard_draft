@@ -25,7 +25,7 @@ use crate::types::{Category, Extent, FoundEntry, FsKind, NodeOrigin};
 #[allow(unused_imports)]
 use CoreError as _CoreError;
 
-pub use signatures::{signature_set, Signature, SignatureId};
+pub use signatures::{Signature, SignatureId, signature_set};
 
 /// The carve result for one hit.
 pub struct CarvedHit {
@@ -71,7 +71,7 @@ impl RawCarver {
         let mut counter = 0u64;
         while cursor < end {
             counter += 1;
-            if counter % 256 == 0 {
+            if counter.is_multiple_of(256) {
                 ctrl.checkpoint()?;
                 sink.on_progress(cursor - start_byte, end - start_byte);
             }

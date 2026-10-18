@@ -2,18 +2,24 @@
 name = "dw-win"
 version = "0.1.0"
 description = "DiskWizard Windows platform layer — raw IO block devices, device/volume enumeration, SMART, BitLocker, licensing providers."
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.99"
 publish = false
 
 [dependencies]
 dw-core = { path = "../dw-core" }
+# Types/protocol surface only (no reqwest → cross-checkable from
+# Linux for the x86_64-pc-windows-msvc target; the app crate pulls
+# the full client).
+dw-license = { path = "../dw-license", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_IscsiDisc",
+    "Win32_Storage_Nvme",
     "Win32_System_Ioctl",
     "Win32_System_IO",
     "Win32_System_Memory",
@@ -28,7 +34,11 @@ windows = { version = "0.62", features = [
 ] }
 
 [lints.rust]
-unsafe_code = "warn"
+# This crate IS the Win32 FFI boundary: every `unsafe` block below is a
+# raw Win32 call (handles, IOCTLs, registry, DPAPI) with a safety
+# rationale at the call site. The lint stays enforced everywhere else
+# (dw-core/dw-license are pure safe Rust).
+unsafe_code = "allow"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

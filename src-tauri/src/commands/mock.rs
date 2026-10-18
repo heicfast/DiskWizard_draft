@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use state::{LicensePosture, MockState};
@@ -487,14 +487,16 @@ pub fn spawn_scan_ticker(app: AppHandle) {
         .try_state::<SharedState>()
         .map(|s| s.inner().clone())
         .expect("mock state managed before ticker spawn");
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(220));
-        let event = {
-            let mut st = state.lock();
-            st.tick()
-        };
-        if let Some((name, payload)) = event {
-            let _ = app.emit(name, payload);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(220));
+            let event = {
+                let mut st = state.lock();
+                st.tick()
+            };
+            if let Some((name, payload)) = event {
+                let _ = app.emit(name, payload);
+            }
         }
     });
 }

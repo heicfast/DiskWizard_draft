@@ -169,7 +169,8 @@ impl RawRecord {
         let usa_off = u16::from_le_bytes([data[4], data[5]]) as usize;
         let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
         let ss = sector_size as usize;
-        if usa_count == 0 || usa_off + usa_count * 2 > data.len() || data.len() % ss != 0 {
+        if usa_count == 0 || usa_off + usa_count * 2 > data.len() || !data.len().is_multiple_of(ss)
+        {
             return Err(CoreError::Corrupt {
                 structure: "MFT fixup",
                 detail: format!("bad USA off={usa_off} count={usa_count}"),
@@ -240,10 +241,8 @@ pub fn iter_attrs(record: &[u8]) -> Vec<AttrView<'_>> {
         let name_len = record[pos + 9] as usize;
         let name_off = u16::from_le_bytes([record[pos + 10], record[pos + 11]]) as usize;
         let name = if name_len > 0 && pos + name_off + name_len * 2 <= pos + len {
-            let units: Vec<u16> = record[pos + name_off..pos + name_off + name_len * 2]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (units, _) = record[pos + name_off..pos + name_off + name_len * 2].as_chunks::<2>();
+            let units: Vec<u16> = units.iter().map(|c| u16::from_le_bytes(*c)).collect();
             Some(String::from_utf16_lossy(&units))
         } else {
             None
@@ -507,65 +506,63 @@ impl NtfsEngine {
             for attr in iter_attrs(&rec.data) {
                 match attr.kind {
                     ATTR_STANDARD_INFORMATION => {
-                        if let Some(r) = attr.resident {
-                            if r.len() >= 0x30 {
-                                let t = |off: usize| {
-                                    i64::from_le_bytes({
-                                        let mut b = [0u8; 8];
-                                        b.copy_from_slice(&r[off..off + 8]);
-                                        b
-                                    })
-                                };
-                                times.created = Some(ntfs_time(t(0x00)));
-                                times.changed = Some(ntfs_time(t(0x08)));
-                                times.modified = Some(ntfs_time(t(0x10)));
-                                times.accessed = Some(ntfs_time(t(0x18)));
-                                dos_attrs =
-                                    u32::from_le_bytes([r[0x20], r[0x21], r[0x22], r[0x23]]);
-                            }
+                        if let Some(r) = attr.resident
+                            && r.len() >= 0x30
+                        {
+                            let t = |off: usize| {
+                                i64::from_le_bytes({
+                                    let mut b = [0u8; 8];
+                                    b.copy_from_slice(&r[off..off + 8]);
+                                    b
+                                })
+                            };
+                            times.created = Some(ntfs_time(t(0x00)));
+                            times.changed = Some(ntfs_time(t(0x08)));
+                            times.modified = Some(ntfs_time(t(0x10)));
+                            times.accessed = Some(ntfs_time(t(0x18)));
+                            dos_attrs = u32::from_le_bytes([r[0x20], r[0x21], r[0x22], r[0x23]]);
                         }
                     }
                     ATTR_FILE_NAME => {
-                        if let Some(r) = attr.resident {
-                            if r.len() >= 0x42 {
-                                let parent = u64::from_le_bytes({
+                        if let Some(r) = attr.resident
+                            && r.len() >= 0x42
+                        {
+                            let parent = u64::from_le_bytes({
+                                let mut b = [0u8; 8];
+                                b.copy_from_slice(&r[0x00..0x08]);
+                                b
+                            });
+                            let ft = |off: usize| {
+                                i64::from_le_bytes({
                                     let mut b = [0u8; 8];
-                                    b.copy_from_slice(&r[0x00..0x08]);
+                                    b.copy_from_slice(&r[off..off + 8]);
                                     b
-                                });
-                                let ft = |off: usize| {
-                                    i64::from_le_bytes({
-                                        let mut b = [0u8; 8];
-                                        b.copy_from_slice(&r[off..off + 8]);
-                                        b
-                                    })
-                                };
-                                if times.modified.is_none() {
-                                    times.modified = Some(ntfs_time(ft(0x08)));
-                                    times.changed = Some(ntfs_time(ft(0x10)));
-                                    times.accessed = Some(ntfs_time(ft(0x18)));
-                                }
-                                let name_len = r[0x40] as usize;
-                                let namespace = r[0x41];
-                                if name_len == 0 || 0x42 + name_len * 2 > r.len() {
-                                    continue;
-                                }
-                                let units: Vec<u16> = r[0x42..0x42 + name_len * 2]
-                                    .chunks_exact(2)
-                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-                                let name = String::from_utf16_lossy(&units);
-                                // Namespace 2 = Win32, 3 = Win32&DOS (best),
-                                // 0 = POSIX, 1 = DOS-only (8.3 mangled).
-                                if namespace == 1 && names.iter().any(|(p, _)| *p == parent) {
-                                    continue;
-                                }
-                                names.push((parent, name));
-                                if times.deleted.is_none() && !in_use {
-                                    // Deleted time unknown from SI; the
-                                    // change time approximates.
-                                    times.deleted = Some(ntfs_time(ft(0x10)));
-                                }
+                                })
+                            };
+                            if times.modified.is_none() {
+                                times.modified = Some(ntfs_time(ft(0x08)));
+                                times.changed = Some(ntfs_time(ft(0x10)));
+                                times.accessed = Some(ntfs_time(ft(0x18)));
+                            }
+                            let name_len = r[0x40] as usize;
+                            let namespace = r[0x41];
+                            if name_len == 0 || 0x42 + name_len * 2 > r.len() {
+                                continue;
+                            }
+                            let (units, _) = r[0x42..0x42 + name_len * 2].as_chunks::<2>();
+                            let units: Vec<u16> =
+                                units.iter().map(|c| u16::from_le_bytes(*c)).collect();
+                            let name = String::from_utf16_lossy(&units);
+                            // Namespace 2 = Win32, 3 = Win32&DOS (best),
+                            // 0 = POSIX, 1 = DOS-only (8.3 mangled).
+                            if namespace == 1 && names.iter().any(|(p, _)| *p == parent) {
+                                continue;
+                            }
+                            names.push((parent, name));
+                            if times.deleted.is_none() && !in_use {
+                                // Deleted time unknown from SI; the
+                                // change time approximates.
+                                times.deleted = Some(ntfs_time(ft(0x10)));
                             }
                         }
                     }
@@ -683,7 +680,7 @@ mod tests {
         s[0x28..0x2C].copy_from_slice(&4096u32.to_le_bytes()); // total sectors
         s[0x30..0x38].copy_from_slice(&16u64.to_le_bytes()); // MFT at cluster 16
         s[0x40] = 0xF6; // 1-byte... 256-byte records? 0xF6 → 2^(256-246)? No:
-                        // 0xF6 = 246 → 2^(256-246)=2^10=1024? Per spec 0xF6 → 2^10.
+        // 0xF6 = 246 → 2^(256-246)=2^10=1024? Per spec 0xF6 → 2^10.
         s[0x40] = 0x01; // 1 cluster per record = 512 B
         s[0x48..0x50].copy_from_slice(&0x1234_5678_9ABC_DEF0u64.to_le_bytes());
         s[510] = 0x55;
@@ -768,7 +765,7 @@ mod tests {
         r[0x18..0x1C].copy_from_slice(&512u32.to_le_bytes()); // used size
         r[0x1C..0x20].copy_from_slice(&512u32.to_le_bytes()); // alloc size
         r[0x20..0x28].copy_from_slice(&0u64.to_le_bytes()); // base ref
-                                                            // USA: USN at 0x30, one fixup value at 0x32.
+        // USA: USN at 0x30, one fixup value at 0x32.
         r[0x30..0x32].copy_from_slice(&0x0001u16.to_le_bytes());
         r[0x32..0x34].copy_from_slice(&0xABCDu16.to_le_bytes());
         // Sector tail (510..512) must equal USN for the fixup to apply.

@@ -1,7 +1,7 @@
 //! Mock-core seed data: the device inventory (the cherry-blossom
 //! reference page, byte-exact), SMART reports, cloud drives, recovery
 //! destinations, and the per-target scan scale tables.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub const SDR_DEVICE_ID: &str = "sd-H";
 

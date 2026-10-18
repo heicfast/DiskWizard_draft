@@ -4,7 +4,7 @@
 use crate::error::{CoreError, CoreResult};
 use crate::types::FsKind;
 
-use super::{has_dos_signature, PartitionInfo, PartitionScheme};
+use super::{PartitionInfo, PartitionScheme, has_dos_signature};
 
 /// Parse an MBR from the 512-byte sector.
 ///

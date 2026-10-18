@@ -5,15 +5,17 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use dw_license::http::ReqwestLicense;
-use dw_license::posture::{self, LicenseState, LicensePosture};
+use dw_license::posture::{self, LicensePosture, LicenseState};
 use dw_license::protocol::{DeviceFacts, LicenseApi};
 use dw_license::store::StateStore;
 use dw_license::token::LicenseError;
-use dw_license::{LICENSE_PURCHASE_URL, VALIDATION_INTERVAL_S, key_shape_valid, normalize_key, sha256_hex};
+use dw_license::{
+    LICENSE_PURCHASE_URL, VALIDATION_INTERVAL_S, key_shape_valid, normalize_key, sha256_hex,
+};
 
 use super::AppState;
 

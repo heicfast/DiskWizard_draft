@@ -17,8 +17,8 @@ pub mod exfat;
 pub mod fat;
 pub mod ntfs;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::blockdev::{BlockDevice, BlockRead};
 use crate::error::{CoreError, CoreResult};
@@ -162,10 +162,8 @@ pub fn probe_filesystem(dev: &dyn BlockDevice) -> CoreResult<FsKind> {
         }
         // Unlabeled-but-valid BPB → FAT family (real-world mkfs writes
         // the label, but damaged/floppy images skip it).
-        if crate::fs::fat::FatBoot::parse(&sector).is_ok() {
-            if let Ok(boot) = crate::fs::fat::FatBoot::parse(&sector) {
-                return Ok(boot.variant);
-            }
+        if let Ok(boot) = crate::fs::fat::FatBoot::parse(&sector) {
+            return Ok(boot.variant);
         }
     }
     Ok(FsKind::Raw)

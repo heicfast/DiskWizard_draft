@@ -3,7 +3,7 @@
 //! with the category mix, recoverability grading, the RAW-carve
 //! branches (File Path Lost / Tags Extracted) and per-category count
 //! roll-ups reported at the simulated find scale.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Mulberry32 (exact 32-bit translation of the TS mock's PRNG —
 /// same algorithm, same [0,1) output range) so results are
@@ -346,11 +346,7 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
             base.clone()
         };
         let ext = if origin == "lost-name" {
-            if cat == 0 {
-                "jpg".into()
-            } else {
-                "bin".into()
-            }
+            if cat == 0 { "jpg".into() } else { "bin".into() }
         } else {
             ext
         };

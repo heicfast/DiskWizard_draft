@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use dw_core::blockdev::BlockDevice;
 use dw_core::fs::ScanControl;
-use dw_core::recover::{build_queue, run_recovery, DestWriter};
-use dw_core::scan::{run_scan, ProgressObserver};
+use dw_core::recover::{DestWriter, build_queue, run_recovery};
+use dw_core::scan::{ProgressObserver, run_scan};
 use dw_core::types::NodeOrigin;
 
 /// Find the test VHD's volume letter by its label ("DWTEST").
@@ -23,19 +23,19 @@ fn find_test_volume() -> Option<char> {
         let root = format!("{letter}:\\");
         let w: Vec<u16> = root.encode_utf16().chain([0]).collect();
         let mut label = [0u16; 64];
+        // SAFETY: w is NUL-terminated; label is a fixed buffer whose
+        // capacity travels with the slice.
         let ok = unsafe {
             windows::Win32::Storage::FileSystem::GetVolumeInformationW(
                 windows::core::PCWSTR(w.as_ptr()),
-                Some(label.as_mut_ptr()),
-                Some(label.len() as u32),
-                None,
+                Some(&mut label),
                 None,
                 None,
                 None,
                 None,
             )
         };
-        if ok.as_bool() {
+        if ok.is_ok() {
             let l = String::from_utf16_lossy(&label)
                 .trim_end_matches('\0')
                 .to_string();
@@ -95,8 +95,7 @@ fn vhd_end_to_end() {
     let Some(letter) = find_test_volume() else {
         panic!("DWTEST volume not found — attach the VHD first (see the workflow)");
     };
-    let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter)
-        .expect("open the test volume");
+    let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter).expect("open the test volume");
     let display = format!("DWTEST ({letter}:)");
     let mut obs = Quiet;
     let (tree, _report) = run_scan(Arc::new(dev), &display, &mut obs).expect("scan");
@@ -119,12 +118,13 @@ fn vhd_end_to_end() {
     let queue = build_queue(nodes, &ids);
     let dest_root = std::env::temp_dir().join("dw-vhd-recovered");
     let _ = std::fs::remove_dir_all(&dest_root);
-    let mut dest = DirDest { root: dest_root.clone() };
-    let source: Arc<dyn BlockDevice> = Arc::new(
-        dw_win::blockdev::RawHandleDevice::open_volume(letter).expect("reopen"),
-    );
-    let report = run_recovery(&*source, &queue, &mut dest, &ScanControl::new(), |_| {})
-        .expect("recovery");
+    let mut dest = DirDest {
+        root: dest_root.clone(),
+    };
+    let source: Arc<dyn BlockDevice> =
+        Arc::new(dw_win::blockdev::RawHandleDevice::open_volume(letter).expect("reopen"));
+    let report =
+        run_recovery(&*source, &queue, &mut dest, &ScanControl::new(), |_| {}).expect("recovery");
     assert_eq!(report.done_files, 2, "both files recover: {report:?}");
     assert_eq!(report.failed_files, 0);
 
@@ -147,7 +147,7 @@ fn enumeration_reports_devices() {
         "the runner has at least one local disk"
     );
     for d in &inv.local_disks {
-        assert!(!d.name.is_empty());
+        assert!(!d.name.is_empty(), "device row has a name");
         assert!(d.total > 0);
     }
 }

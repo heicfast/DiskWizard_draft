@@ -13,9 +13,7 @@ pub use mock::*;
 mod real;
 
 #[cfg(not(feature = "sim"))]
-pub use real::{
-    devices::*, license::*, recover::*, scan::*, session::*, settings::*,
-};
+pub use real::{devices::*, license::*, recover::*, scan::*, session::*, settings::*};
 
 /// Bootstrap: start whatever background machinery the active build
 /// needs (the scan ticker for sim; nothing for the real core — its

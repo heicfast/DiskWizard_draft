@@ -273,8 +273,9 @@ impl ExFatEngine {
                         });
                     }
                     x if x == ET_NAME & 0x7F => {
-                        for c in data[soff + 2..soff + 32].chunks_exact(2) {
-                            let u = u16::from_le_bytes([c[0], c[1]]);
+                        let (units, _) = data[soff + 2..soff + 32].as_chunks::<2>();
+                        for c in units {
+                            let u = u16::from_le_bytes(*c);
                             if u == 0 {
                                 break;
                             }
@@ -400,7 +401,7 @@ mod tests {
         set_fat(&mut ram, 2, 0xFFFFFFFF); // root dir: cluster 2
         set_fat(&mut ram, 5, 0xFFFFFFFF); // notes.txt: cluster 5
         set_fat(&mut ram, 6, 0xFFFFFFFF); // deleted.bin: cluster 6
-                                          // Root dir at cluster 2 → sector 3.
+        // Root dir at cluster 2 → sector 3.
         let root = 3 * 512;
         // notes.txt: File set = 0x85 (1 secondary) + 0xC0 + 0xC1.
         let name_u16: Vec<u16> = "notes.txt".encode_utf16().collect();

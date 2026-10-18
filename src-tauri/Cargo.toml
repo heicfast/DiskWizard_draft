@@ -3,8 +3,8 @@ name = "diskwizard"
 version = "0.1.0"
 description = "DiskWizard — data recovery. Rust core + Tauri 2 (WebView2) + React/TS Canvas UI."
 authors = ["DiskWizard"]
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.99"
 
 # The Tauri app crate is also the Cargo workspace root (the DiskGenie
 # D10 pattern): `crates/` holds the engine layers so they build and

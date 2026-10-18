@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::{check_buf, BlockDevice};
+use super::{BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// A sector-range view over `parent`.

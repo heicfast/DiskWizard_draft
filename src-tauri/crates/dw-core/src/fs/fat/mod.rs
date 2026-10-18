@@ -193,7 +193,7 @@ impl FatEngine {
                     return 0;
                 }
                 let v = u16::from_le_bytes([self.fat[off], self.fat[off + 1]]);
-                if n % 2 == 0 {
+                if n.is_multiple_of(2) {
                     u32::from(v & 0x0FFF)
                 } else {
                     u32::from(v >> 4)
@@ -290,12 +290,13 @@ impl FatEngine {
         let mut out = Vec::new();
         let mut lfn_parts: Vec<(u8, Vec<u16>)> = Vec::new(); // (seq, chars)
         let mut live_region = true;
-        for entry in data.chunks_exact(32) {
+        let (entries, _) = data.as_chunks::<32>();
+        for entry in entries {
             let first = entry[0];
             if first == 0x00 {
                 live_region = false; // end of allocated entries — the
-                                     // erased region may still hold recoverable 0xE5s
-                                     // (keep scanning: deep behavior per the research).
+                // erased region may still hold recoverable 0xE5s
+                // (keep scanning: deep behavior per the research).
                 continue;
             }
             let attrs = entry[0x0B];
@@ -308,8 +309,9 @@ impl FatEngine {
                 }
                 let mut chars = Vec::with_capacity(13);
                 for (start, len) in [(0x01usize, 10usize), (0x0E, 12), (0x1C, 4)] {
-                    for c in entry[start..start + len].chunks_exact(2) {
-                        let u = u16::from_le_bytes([c[0], c[1]]);
+                    let (units, _) = entry[start..start + len].as_chunks::<2>();
+                    for c in units {
+                        let u = u16::from_le_bytes(*c);
                         if u == 0x0000 || u == 0xFFFF {
                             continue;
                         }
@@ -335,11 +337,7 @@ impl FatEngine {
                 }
                 lfn_parts.clear();
                 let n = String::from_utf16_lossy(&units);
-                if n.is_empty() {
-                    short_name(entry)
-                } else {
-                    n
-                }
+                if n.is_empty() { short_name(entry) } else { n }
             };
             if name == "." || name == ".." {
                 continue;
@@ -563,7 +561,7 @@ mod tests {
         set16(&mut ram, 2, 0xFFFF); // readme.txt: single cluster
         set16(&mut ram, 3, 0xFFFF); // gone.log (deleted)
         set16(&mut ram, 4, 0xFFFF); // docs dir: single cluster
-                                    // Root dir at sector 2 (reserved 1 + FAT 1): 16 entries × 32 B.
+        // Root dir at sector 2 (reserved 1 + FAT 1): 16 entries × 32 B.
         let root = 2 * 512;
         let put = |ram: &mut RamDevice, slot: usize, entry: &[u8; 32]| {
             let off = root + slot * 32;

@@ -185,25 +185,27 @@ pub fn sweep_for_lost_partitions(
         let mut probed = 0u32;
         while lba < end && probed < 64 {
             let mut buf = vec![0u8; ss];
-            if dev.read_sectors(lba, &mut buf).is_ok() {
-                if let Some(probe) = probe_boot_sector(&buf) {
-                    let size = probe
-                        .total_sectors
-                        .unwrap_or(end - lba)
-                        .min(end - lba)
-                        .max(1);
-                    hints.push(LostPartitionHint {
-                        info: PartitionInfo {
-                            index: 0, // renumbered by the caller
-                            start_lba: lba,
-                            total_sectors: size,
-                            fs: probe.fs,
-                            in_table: false,
-                            type_tag: "lost".into(),
-                        },
-                        confidence: probe.confidence,
-                    });
-                }
+            if let Some(probe) = dev
+                .read_sectors(lba, &mut buf)
+                .ok()
+                .and_then(|()| probe_boot_sector(&buf))
+            {
+                let size = probe
+                    .total_sectors
+                    .unwrap_or(end - lba)
+                    .min(end - lba)
+                    .max(1);
+                hints.push(LostPartitionHint {
+                    info: PartitionInfo {
+                        index: 0, // renumbered by the caller
+                        start_lba: lba,
+                        total_sectors: size,
+                        fs: probe.fs,
+                        in_table: false,
+                        type_tag: "lost".into(),
+                    },
+                    confidence: probe.confidence,
+                });
             }
             // 1 MiB stride + the gap start itself.
             lba = if probed == 0 {
@@ -252,7 +254,7 @@ pub fn unallocated_gaps(layout: &PartitionLayout, device_sectors: u64) -> Vec<(u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partition::{parse_mbr, PartitionScheme};
+    use crate::partition::{PartitionScheme, parse_mbr};
     use crate::testutil::RamDevice;
 
     #[test]
@@ -330,8 +332,10 @@ mod tests {
         ram.data[4096 * 512..4097 * 512].copy_from_slice(&sector);
         let layout = PartitionLayout::default();
         let hints = sweep_for_lost_partitions(&ram, &layout).expect("sweep");
-        assert!(hints
-            .iter()
-            .any(|h| h.info.start_lba == 4096 && h.info.fs == FsKind::Ntfs));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.info.start_lba == 4096 && h.info.fs == FsKind::Ntfs)
+        );
     }
 }

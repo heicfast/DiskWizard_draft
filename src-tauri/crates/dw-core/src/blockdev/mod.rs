@@ -96,7 +96,7 @@ impl<T: BlockDevice + ?Sized> BlockRead for T {}
 /// Validate that `buf` is sector-multiple sized (impl helper).
 #[must_use]
 pub fn check_buf(buf: &[u8], sector_size: u32) -> Option<CoreError> {
-    if sector_size == 0 || buf.len() % sector_size as usize != 0 {
+    if sector_size == 0 || !buf.len().is_multiple_of(sector_size as usize) {
         Some(CoreError::Corrupt {
             structure: "BlockDevice",
             detail: format!(

@@ -7,7 +7,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 
-use crate::{b64url_decode, from_hex, CLOCK_SKEW_S};
+use crate::{CLOCK_SKEW_S, b64url_decode, from_hex};
 
 /// The decoded token claims.
 #[derive(Debug, Clone, Deserialize)]

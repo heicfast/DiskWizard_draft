@@ -1,12 +1,12 @@
 //! Scan commands — the real engine lifecycle: start (worker thread),
 //! pause/resume/stop, progress events, results snapshots.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use dw_core::blockdev::BlockDevice;
@@ -51,8 +51,8 @@ impl ScanSession {
     }
 
     /// Test/resume adoption helpers (session commands).
-    pub fn set_generation(&self, gen: u64) {
-        self.generation.store(gen, Ordering::SeqCst);
+    pub fn set_generation(&self, value: u64) {
+        self.generation.store(value, Ordering::SeqCst);
     }
 
     pub fn set_target(&self, id: &str, name: &str) {
@@ -77,14 +77,14 @@ impl ScanSession {
     }
 
     fn begin(&self, device_id: &str, display_name: &str) -> u64 {
-        let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let next = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.target_id.lock() = device_id.to_string();
         *self.target_name.lock() = display_name.to_string();
         *self.control.lock() = ScanControl::new();
         *self.tree.lock() = None;
         *self.report.lock() = None;
         *self.started_at.lock() = Some(Instant::now());
-        gen
+        next
     }
 }
 
@@ -154,16 +154,19 @@ impl ProgressObserver for EventObserver {
 fn resolve_target(device_id: &str) -> Result<(Arc<dyn BlockDevice>, String), String> {
     #[cfg(windows)]
     {
-        use dw_win::volume::{parse_device_id, DeviceTarget};
-        let target = parse_device_id(device_id)
-            .ok_or_else(|| format!("UNKNOWN_DEVICE. {device_id}"))?;
+        use dw_win::volume::{DeviceTarget, parse_device_id};
+        let target =
+            parse_device_id(device_id).ok_or_else(|| format!("UNKNOWN_DEVICE. {device_id}"))?;
         match target {
             DeviceTarget::WholeDisk(n) => {
                 let dev = dw_win::blockdev::RawHandleDevice::open_physical(n)
                     .map_err(|e| format!("DEVICE_OPEN_FAILED. {e}"))?;
                 Ok((Arc::new(dev), format!("Disk {n}")))
             }
-            DeviceTarget::Partition { disk: n, part_no: _ } => {
+            DeviceTarget::Partition {
+                disk: n,
+                part_no: _,
+            } => {
                 // The engine reads the whole disk and resolves the
                 // partition through the table.
                 let dev = dw_win::blockdev::RawHandleDevice::open_physical(n)
@@ -213,7 +216,9 @@ fn volume_display_name(letter: char) -> String {
         )
     };
     if ok.as_bool() {
-        let l = String::from_utf16_lossy(&label).trim_end_matches('\0').to_string();
+        let l = String::from_utf16_lossy(&label)
+            .trim_end_matches('\0')
+            .to_string();
         if !l.is_empty() {
             return format!("{l} ({letter}:)");
         }
@@ -246,8 +251,7 @@ fn start_scan_common(
                 last_percent: 0.0,
             };
             let state: State<'_, AppState> = app.state();
-            let mut controller =
-                ScanController::with_control(dev, &display_name, control.clone());
+            let mut controller = ScanController::with_control(dev, &display_name, control.clone());
             let result = controller.run(&mut obs);
             match result {
                 Ok((tree, report)) => {
@@ -258,8 +262,7 @@ fn start_scan_common(
                     // Auto-save the .rsf session (the mock contract's
                     // auto_<Volume>_<ts>.rsf naming).
                     let now = unix_now();
-                    let session_file =
-                        dw_core::session::auto_save_name(&display_name, now);
+                    let session_file = dw_core::session::auto_save_name(&display_name, now);
                     let path = dw_core::session::sessions_dir().join(&session_file);
                     let _ = dw_core::session::save(
                         &path,

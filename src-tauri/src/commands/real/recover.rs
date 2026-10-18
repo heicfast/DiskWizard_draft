@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use dw_core::blockdev::BlockDevice;
-use dw_core::recover::{build_queue, run_recovery, DestWriter};
+use dw_core::recover::{DestWriter, build_queue, run_recovery};
 use dw_core::tree::TreeNode;
 
-use super::scan::resolve_target;
 use super::AppState;
+use super::scan::resolve_target;
 
 /// The filesystem destination writer (real IO; the core's seam impl).
 struct FsDest {
@@ -92,14 +92,18 @@ pub fn list_recover_destinations(source_device_id: Option<String>) -> Value {
     {
         let inv = dw_win::devices::enumerate_inventory();
         let source_disk = source_device_id.as_deref().and_then(|id| {
-            dw_win::volume::parse_device_id(id).map(|t| match t {
-                dw_win::volume::DeviceTarget::WholeDisk(n)
-                | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
-                | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
-                dw_win::volume::DeviceTarget::Volume(l) => dw_win::blockdev::RawHandleDevice::open_volume(l)
-                    .ok()
-                    .and_then(|d| d.device_number().ok().map(|(n, _)| n)),
-            }).flatten()
+            dw_win::volume::parse_device_id(id)
+                .map(|t| match t {
+                    dw_win::volume::DeviceTarget::WholeDisk(n)
+                    | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
+                    | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
+                    dw_win::volume::DeviceTarget::Volume(l) => {
+                        dw_win::blockdev::RawHandleDevice::open_volume(l)
+                            .ok()
+                            .and_then(|d| d.device_number().ok().map(|(n, _)| n))
+                    }
+                })
+                .flatten()
         });
         let mut rows: Vec<Value> = Vec::new();
         for d in inv.local_disks.iter().chain(inv.external_devices.iter()) {
@@ -165,7 +169,9 @@ pub fn start_recovery(
         .name("dw-recover")
         .spawn(move || {
             let state: State<'_, AppState> = app.state();
-            let mut dest = FsDest { root: dest_root.clone() };
+            let mut dest = FsDest {
+                root: dest_root.clone(),
+            };
             let ctrl = state.scan.control.lock().clone();
             let total_files = queue.len() as u64;
             let total_bytes: u64 = queue.iter().map(|i| i.node.size).sum();
@@ -303,7 +309,10 @@ pub fn preview_file(
         if want == 0 {
             continue;
         }
-        if dev.read_bytes(ext.offset, &mut buf[filled..filled + want]).is_err() {
+        if dev
+            .read_bytes(ext.offset, &mut buf[filled..filled + want])
+            .is_err()
+        {
             buf[filled..filled + want].fill(0);
         }
         filled += want;
@@ -331,8 +340,16 @@ fn b64_encode(data: &[u8]) -> String {
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(T[(n >> 18) as usize & 0x3F] as char);
         out.push(T[(n >> 12) as usize & 0x3F] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 0x3F] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 0x3F] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 0x3F] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 0x3F] as char
+        } else {
+            '='
+        });
     }
     out
 }

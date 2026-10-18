@@ -19,7 +19,7 @@ mod mbr;
 
 pub use ebr::parse_ebr_chain;
 pub use gpt::parse_gpt;
-pub use lost::{sweep_for_lost_partitions, LostPartitionHint};
+pub use lost::{LostPartitionHint, sweep_for_lost_partitions};
 pub use mbr::{mbr_type_to_fs, parse_mbr};
 
 use serde::{Deserialize, Serialize};

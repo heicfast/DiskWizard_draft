@@ -13,6 +13,7 @@
 /// sector 0 of the raw volume.)
 #[must_use]
 pub fn volume_is_bitlocker_locked(letter: char) -> bool {
+    use dw_core::blockdev::BlockDevice;
     let Ok(dev) = crate::blockdev::RawHandleDevice::open_volume(letter) else {
         return false;
     };
@@ -66,15 +67,19 @@ pub fn unlock_volume(letter: char, credential: &Credential) -> Result<(), String
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| format!("PowerShell launch failed: {e}"))?;
-    let code = output.status.code().unwrap_or(-1);
+    // PowerShell exit codes carry HRESULTs as unsigned values; code()
+    // hands them back as i32, so compare on the u32 view.
+    let code = output.status.code().unwrap_or(-1).cast_unsigned();
     match code {
         0 => Ok(()),
         // 0x8031004B = FVE_E_FAILED_AUTHENTICATION (wrong password).
-        2_150_694_923 => Err("That password didn't unlock this drive. Check it and try again.".into()),
+        0x8031_004B => {
+            Err("That password didn't unlock this drive. Check it and try again.".into())
+        }
         // 0x80310033 = FVE_E_RECOVERY_KEY_REQUIRED.
-        2_150_694_891 => Err("This drive needs its recovery key, not a password.".into()),
+        0x8031_0033 => Err("This drive needs its recovery key, not a password.".into()),
         3 => Err("BitLocker volume not found for that drive.".into()),
-        other => Err(format!("BitLocker unlock failed (code {other}).")),
+        other => Err(format!("BitLocker unlock failed (code {other:#x}).")),
     }
 }
 
@@ -89,6 +94,8 @@ pub enum Credential {
 pub fn volume_unlocked(letter: char) -> bool {
     let root: Vec<u16> = format!("{letter}:\\").encode_utf16().chain([0]).collect();
     let mut fs_buf = [0u16; 32];
+    // SAFETY: root is NUL-terminated; fs_buf is a fixed buffer whose
+    // capacity travels with the slice (the wrapper passes its len).
     let ok = unsafe {
         windows::Win32::Storage::FileSystem::GetVolumeInformationW(
             windows::core::PCWSTR(root.as_ptr()),
@@ -96,10 +103,10 @@ pub fn volume_unlocked(letter: char) -> bool {
             None,
             None,
             None,
-            None,
-            Some(fs_buf.as_mut_ptr()),
-            Some(fs_buf.len() as u32),
+            Some(&mut fs_buf),
         )
     };
-    ok.as_bool() && !fs_buf.is_empty()
+    // An unlocked volume reports a filesystem name (FAT/NTFS/...);
+    // a locked one fails the query or returns an empty string.
+    ok.is_ok() && fs_buf[0] != 0
 }

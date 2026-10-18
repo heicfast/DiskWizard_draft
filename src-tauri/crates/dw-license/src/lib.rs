@@ -29,11 +29,13 @@ pub mod protocol;
 pub mod store;
 pub mod token;
 
-pub use http::{LicenseHttp, ReqwestLicense};
-pub use posture::{posture, LicensePosture};
-pub use protocol::{DeviceFacts, LicenseApi, LICENSE_API_BASE, LICENSE_PURCHASE_URL};
-pub use store::{license_path, StateStore};
-pub use token::{verify_token, TokenClaims};
+pub use http::LicenseHttp;
+#[cfg(feature = "client")]
+pub use http::ReqwestLicense;
+pub use posture::{LicensePosture, posture};
+pub use protocol::{DeviceFacts, LICENSE_API_BASE, LICENSE_PURCHASE_URL, LicenseApi};
+pub use store::{StateStore, license_path};
+pub use token::{TokenClaims, verify_token};
 
 /// Revalidation interval (24 h — doc §6).
 pub const VALIDATION_INTERVAL_S: i64 = 24 * 60 * 60;
@@ -91,7 +93,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Parse lowercase/uppercase hex into bytes.
 #[must_use]
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len().div_ceil(2))
