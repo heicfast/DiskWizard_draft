@@ -178,7 +178,7 @@ jobs:
             Get-Content "$env:RUNNER_TEMP\app-stderr.log" -Tail 40
           }
 
-      - name: Byte-truth: verify the recovered files against the seeds
+      - name: "Byte-truth: verify the recovered files against the seeds"
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
