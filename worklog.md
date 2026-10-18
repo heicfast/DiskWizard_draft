@@ -578,3 +578,13 @@ regression). CI (with the new --tests app-crate gate), Windows
 Integration, MSIX, and UI Screenshots green on the same SHA. The
 register (QA-1 + §6 snapshot), session report, and this worklog are
 synced to the evidence.
+
+### Session 6 close — the green sweep holds (33d5190)
+
+F19 (the directory-walk path explosion, 11 s → 1 ms) closed the last
+runner finding; the timeout artifact now seeds the fat corpus
+permanently. ALL SIX workflows green on consecutive SHAs (aa82d57,
+33d5190) — the Real-Core Tour green twice in a row (stable, not
+lucky), the Fuzz suite green with the regression seed in-corpus.
+Register F13–F19, §6 snapshot, session report, and this log carry the
+verbatim evidence chains. Session complete per §17.

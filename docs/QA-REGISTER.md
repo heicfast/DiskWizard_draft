@@ -35,6 +35,7 @@
 | F16 | `iocp_batch` integration test raced `vhd_end_to_end` in parallel test threads — the mounted NTFS's own metadata writes ($MFT/$LogFile) legitimately changed window 0 between the sequential reference and the batch read (diverged with ZERO bad sectors; passed untouched on the next run) | Runner evidence: panicked 14:18:11 while the VHD test finished 14:18:38; fixed with the `VHD_LOCK` serialization + first-divergence-offset assert diagnostics in 74d599a |
 | F17 | Real-Core Tour silent skips: the driver skipped recovery on empty selection/destination, burned the 180 s wait, stamped `recovery-complete` anyway; the app's `beginRecovery` ALSO swallowed `start_recovery` errors (a real user would stare at "Preparing…" forever — same defect class) | Tour run 39135278286: all 33 frames captured incl. t30-recovery-complete, then `RECOVERY_OUTPUT_MISSING`; fixed in 74d599a — t99-tour-fail-<reason> loud frames + stage precondition asserts + workflow TOUR_FAIL detection + honest error summary (`Recovery Could Not Start` variant over the backend's typed error) |
 | F18 | **The destination mkdir bug the t99 instrumentation named on its first flight**: the real inventory formats letters as `"C:"` (dw-win `devices.rs:99`) but `resolve_destination` appended `":\\"` again → `C::\DiskWizard Recovered …` → Windows ERROR_INVALID_NAME — the mock layer's bare letters masked it, and no test surface ran the real inventory through the mkdir until the tour | Tour run on 609daae: `t99-tour-fail-recovery-cmd-mkdir-destination-the-filename-dire…`; fixed in the same cycle — letter normalization + the coded `DESTINATION_MKDIR_FAILED {path}` error + a windows-gated unit regression (`destination_path_is_legal_and_created`), plus the CI blind-spot fix: `cargo check --tests` now gates the app crate's test code on windows-latest (plain check skips #[cfg(test)]) |
+| F19 | **The directory-walk path explosion** (the fat target's second-run timeout, b86b108): an 11-SECOND walk of a 514-byte image — walk_dir had a depth guard but no GLOBAL visited set, so a directory wired into itself re-walks once per PATH (2^depth). The identical pattern sat in exFAT's walk and ext's ignored `named.insert` return. NTFS audited immune (linear MFT walk); HFS+ structurally different (catalog B-tree, 15.7M-exec sweep clean) | Downloaded timeout artifact replayed: 11 s → 1 ms after the one-cluster-one-walk guard in all three engines; the artifact now lives in `fuzz/corpus/fat/` as a permanent regression seed (verified in the green 33d5190 run); dict sweeps fat 961K / exfat 21M / ext 23.8M / scan_pipeline 305K all clean |
 
 **Verified correct by direct evidence** (no action needed):
 `bitlocker.rs` exit codes compare on the `cast_unsigned()` view with
@@ -248,9 +249,10 @@ release).
 
 ## 6. Release-evidence snapshot (the green pipeline)
 
-**Current state (session 6, commit aa82d57, 2026-10-18): all SIX
-workflows green on the same SHA** — the first full-sweep green
-including the release-truth surfaces:
+**Current state (session 6 final, commit 33d5190, 2026-10-18): all
+SIX workflows green on consecutive SHAs** (aa82d57, then 33d5190
+with the F19 guard + timeout regression seed) — the full sweep
+including the release-truth surfaces, stable across reruns:
 
 | Workflow | Result | Key evidence |
 |---|---|---|
