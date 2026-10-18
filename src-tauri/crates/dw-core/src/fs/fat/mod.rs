@@ -174,6 +174,16 @@ impl FatEngine {
         let sector = dev.read_struct_at::<512>(0)?;
         let boot = FatBoot::parse(&sector)?;
         let fat_bytes = u64::from(boot.sectors_per_fat) * u64::from(boot.bytes_per_sector);
+        // The FAT lives ON the volume: a size exceeding the device is
+        // corrupt metadata, not a multi-GiB allocation to attempt (the
+        // fuzz suite's 12-GiB-malloc catch — allocate AFTER the guard,
+        // never before the read that would reject the region).
+        if fat_bytes == 0 || fat_bytes > dev.capacity_bytes() {
+            return Err(CoreError::Corrupt {
+                structure: "fat boot",
+                detail: format!("FAT bytes {fat_bytes} exceed the volume"),
+            });
+        }
         let mut fat = vec![0u8; fat_bytes as usize];
         dev.read_bytes(
             u64::from(boot.reserved_sectors) * u64::from(boot.bytes_per_sector),
@@ -628,6 +638,22 @@ mod tests {
         off += 32;
         ram.data[off..off + 32].copy_from_slice(&e3);
         ram
+    }
+
+    /// The fat fuzz target's catch (run 39139452642, 12-GiB malloc):
+    /// `sectors_per_fat × bytes_per_sector` was allocated BEFORE the
+    /// read that would reject the region. An over-volume FAT size is
+    /// corrupt metadata — guard, never allocate.
+    #[test]
+    fn implausible_fat_size_is_corrupt_not_oom() {
+        let mut ram = fat16_image();
+        // 65535 sectors/FAT × 512 B = 33.5 MiB on a 4 MiB image.
+        ram.data[0x16..0x18].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        assert!(
+            FatEngine::new(dev).is_err(),
+            "an over-volume FAT size is corrupt metadata, never an allocation"
+        );
     }
 
     #[test]

@@ -192,7 +192,23 @@ pub trait BlockRead: BlockDevice {
             });
         }
         let first_lba = offset / ss;
-        let last_end = offset + out.len() as u64;
+        // The device-boundary overflow guard: a hostile parser can
+        // funnel an offset near u64::MAX here (fuzzed runlists, GDT
+        // block numbers…) — the plain `offset + len` aborted the
+        // process under overflow checks (the ntfs fuzz target's
+        // catch at this exact line). Out-of-range reads are the
+        // typed error every hostile path must funnel to, never a
+        // panic. In-range sums are byte-identical math after this.
+        let Some(last_end) = offset.checked_add(out.len() as u64) else {
+            return Err(CoreError::ReadFailed {
+                offset,
+                len: out.len() as u64,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "read end overflows u64",
+                ),
+            });
+        };
         let last_lba_excl = last_end.div_ceil(ss);
         let n_sectors = (last_lba_excl - first_lba) as usize;
         let mut bounce = vec![0u8; n_sectors * ss as usize];
@@ -308,6 +324,26 @@ mod tests {
         let mut out = [0u8; 137];
         ram.read_bytes(1000, &mut out).expect("read");
         assert_eq!(&out[..], &ram.data[1000..1137]);
+    }
+
+    /// The ntfs fuzz target's catch: `offset + len` at this exact
+    /// primitive overflowed u64 and aborted the process (hostile
+    /// parsers funnel near-u64::MAX offsets here through runlists and
+    /// GDT block numbers). The device boundary must answer with the
+    /// typed ReadFailed, never a panic.
+    #[test]
+    fn read_bytes_end_overflow_is_typed_error() {
+        let ram = RamDevice::new(512 * 4, 512);
+        let mut out = [0u8; 512];
+        let err = ram.read_bytes(u64::MAX - 16, &mut out);
+        assert!(
+            err.is_err(),
+            "an overflowing read end is a typed error, never a panic"
+        );
+        // And the mirrored engine-side view: huge but non-overflowing
+        // ends still fail cleanly at the device boundary.
+        let err2 = ram.read_bytes(1 << 40, &mut out);
+        assert!(err2.is_err());
     }
 
     #[test]

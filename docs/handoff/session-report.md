@@ -1,9 +1,13 @@
-# DiskWizard — Session Report (2026-10-18, session 5c)
+# DiskWizard — Session Report (2026-10-18, session 5c + session 6 addendum)
 
 > The coordination session: Phase 0/1/2 mandates from a cold start,
 > the QA-1 real-core tour (the owner's TOP P0), the §8 licensing
 > re-point, and the quick P1 batch — landing in step with the parallel
 > engine agent's session-5 work (ext/HFS+/ReFS engines, dedup, SDR).
+>
+> **Session 6 addendum at the bottom** — the runner-caught defect
+> cycle (F13–F17), the §5.1 evidence closure, and the current
+> release-truth state.
 
 ## What landed
 
@@ -60,3 +64,54 @@
   `dw-license/src/config.rs`).
 - The public-repo PAT policy (OQ-1): the token stays redacted in
   MASTER_PROMPT.md; rotate it if it ever leaked elsewhere.
+
+---
+
+# Session 6 addendum (2026-10-18, later) — the runner-caught defect cycle
+
+> Context recovery after a mid-session crash (§16), then the first
+> COMPLETED runs of the new QA surfaces each caught a real defect —
+> every one fixed with its catching regression in the same cycle.
+
+## What landed (session 6)
+
+| Area | Deliverable | Evidence |
+|---|---|---|
+| §5.1-3/5 (QA-11) | IOCP completion-pool batch reads + adaptive media profiles (HDD 1–4 MiB/QD1–2, flash 4–16 MiB/QD4–16, probed per device) wired through the carver | `0f2d98e`; batch≡sequential equivalence at every depth (dw-core + Windows runner) |
+| §5.1-10 | The benchmark harness + **real-runner numbers recorded** (8-profile sweep, ~370–430 MiB/s via the cache-backed VHD stack, flat 9.7 MiB WS, CPU ≤ 0.0001 s/MiB) | `docs/benchmarks/io-backend.md`, run 39137841845 |
+| QA-4 | NTFS deleted-viability $Bitmap scoring (the research destroy rule) | `5911705` |
+| QA-5 | exFAT chain-resolution ladder (NoFatChain → FAT → damaged-FAT re-derivation) | `b8eb224` |
+| QA-6 | The ~65% essential-mode reduction proven end-to-end with an exact engineered census | `7525bd8` |
+| §12.3 | The cargo-fuzz suite: ten whole-engine targets + dict + CI workflow (push 90 s/target + weekly deep) | `88b2b43` |
+| F13 | `DISK_GEOMETRY_EX` hallucinated layout → typed struct read (the runner's IOCP test caught sector size "12") | `73e3d86` |
+| F14 | **ext rev-1 superblock offsets +4 off** (missing resuid/resgid): real mkfs images found NOTHING; engine + probe + fixtures all fixed; byte-truth regression embeds the real superblock; ext3/ext4 probe discrimination repaired | `d71570d`; e2fsprogs 1.47.4 ground truth |
+| F15 | Fuzz harness usize-overflow abort → checked math + typed error | `74d599a` |
+| F16 | IOCP test vs VHD test race → VHD_LOCK serialization + divergence diagnostics | `74d599a` |
+| F17 | Tour silent skips + the swallowed `start_recovery` error (real users would stare at "Preparing…" forever) → t99-tour-fail loud frames + honest "Recovery Could Not Start" summary variant | `74d599a` |
+| §11 | Phase-7 multi-POV record + the reviews INDEX (every phase boundary mapped to its evidence) | `docs/reviews/` |
+
+## Verified state at session-6 close
+
+- d71570d: CI ✅ / Windows Integration ✅ / MSIX ✅ / UI Screenshots ✅
+  (ext2 real-mkfs gate GREEN on the runner; bench recorded).
+- 609daae (F15+F16+F17): all six workflows in flight at report time —
+  the fuzz suite, the serialized integration, and the instrumented
+  tour are the three surfaces whose green runs close the cycle.
+- 137 dw-core + 27 dw-license engine tests; 73 web tests; tsc clean;
+  fmt/clippy `-D warnings` clean on both Linux and the msvc
+  cross-check (including `--all-targets` over the integration tests).
+
+## What's next (updated priority order)
+
+1. **The tour's first green run** — the t99 instrumentation names the
+   broken stage if it fails again; fix that stage specifically. This
+   is the last release-evidence artifact (QA-1).
+2. Fuzz corpus growth + first crash-artifact triage (weekly deep runs
+   land artifacts automatically).
+3. HFS+ real-formatter fixture (hfsprogs) — the same soft-skip
+   pattern as the ext2 gate; ReFS needs a Server-runner leg
+   (Format-Volume) — both are coverage gaps no Linux runner can
+   close.
+4. OQ-5 preview-cap decision + OQ-7 npm stack upgrade + QA-16 live
+   license E2E (owner inputs).
+5. Phase-2 repair suite per `TODO/phase-2-advanced-repair.md`.

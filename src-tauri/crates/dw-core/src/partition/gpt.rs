@@ -62,7 +62,14 @@ pub fn parse_gpt(
         let mut any_ok = false;
         for s in 0..read_sectors {
             let mut sector = vec![0u8; ss];
-            if dev.read_sectors(entry_lba + s as u64, &mut sector).is_ok() {
+            // `entries_lba` is raw from the header and ungated by the
+            // sanity checks — the partition fuzz target's add-overflow
+            // catch at this exact line. Saturate: the read then fails
+            // at the device boundary instead of panicking.
+            if dev
+                .read_sectors(entry_lba.saturating_add(s as u64), &mut sector)
+                .is_ok()
+            {
                 let off = s * ss;
                 let n = ss.min(raw.len() - off);
                 raw[off..off + n].copy_from_slice(&sector[..n]);

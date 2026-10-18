@@ -432,10 +432,16 @@ pub fn decode_runlist(
         if lcn < 0 || len_clusters == 0 || len_clusters > max_clusters {
             continue; // implausible — skip this run, keep walking
         }
-        out.push(Extent::new(
-            lcn as u64 * cluster_size,
-            len_clusters * cluster_size,
-        ));
+        // Scale to bytes with overflow discipline (the same fuzz catch
+        // as the boot math): a run whose byte scale overflows is
+        // implausible — skip it, keep walking.
+        let (Some(offset), Some(len)) = (
+            (lcn as u64).checked_mul(cluster_size),
+            len_clusters.checked_mul(cluster_size),
+        ) else {
+            continue;
+        };
+        out.push(Extent::new(offset, len));
     }
     Ok(out)
 }
@@ -462,13 +468,30 @@ impl NtfsEngine {
             mft_extents: Vec::new(),
         };
         let cluster = engine.boot.cluster_size();
+        // Checked LCN→byte math: a fuzzed/hostile boot sector can pair a
+        // huge `mft_lba` with a 2-MiB cluster whose product overflows
+        // u64 (the ntfs fuzz target's `attempt to multiply with
+        // overflow`). Corrupt metadata errors out — the engine never
+        // multiplies blind.
+        let mft_off =
+            engine
+                .boot
+                .mft_lba
+                .checked_mul(cluster)
+                .ok_or_else(|| CoreError::Corrupt {
+                    structure: "ntfs boot",
+                    detail: format!(
+                        "mft_lba {} × cluster {cluster} overflows",
+                        engine.boot.mft_lba
+                    ),
+                })?;
         // Record 0 lives at the MFT's first cluster — mft_lba is an
         // LCN (cluster number), so the byte offset scales by the
         // CLUSTER size, never the sector size (spc > 1 volumes:
         // the VHD integration caught exactly this).
         let rec0 = RawRecord::read(
             &*engine.dev,
-            engine.boot.mft_lba * cluster,
+            mft_off,
             engine.boot.mft_record_size,
             engine.boot.bytes_per_sector,
         )?;
@@ -485,7 +508,7 @@ impl NtfsEngine {
         if mft_extents.is_empty() {
             // Degenerate: the MFT is resident-contiguous at mft_lba.
             mft_extents.push(Extent::new(
-                engine.boot.mft_lba * cluster,
+                mft_off,
                 u64::from(engine.boot.mft_record_size) * 32,
             ));
         }
@@ -899,6 +922,22 @@ mod tests {
         let mut s = boot_sector_template();
         s[3..11].copy_from_slice(b"EXFAT   ");
         assert!(NtfsBoot::parse(&s).is_err());
+    }
+
+    /// The ntfs fuzz target's catch (run 39139452642): a fuzzed boot
+    /// sector's `mft_lba × cluster_size` overflows u64 — under cargo-
+    /// fuzz's overflow checks that ABORTED the process. Hostile
+    /// metadata must produce a typed Corrupt error instead.
+    #[test]
+    fn mft_lba_scale_overflow_is_corrupt_not_panic() {
+        let mut s = boot_sector_template();
+        s[0x30..0x38].copy_from_slice(&u64::MAX.to_le_bytes()); // mft_lba
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        ram.data[..512].copy_from_slice(&s);
+        assert!(
+            NtfsEngine::new(Arc::new(ram)).is_err(),
+            "an overflowing mft_lba scale is corrupt metadata, never a panic"
+        );
     }
 
     #[test]

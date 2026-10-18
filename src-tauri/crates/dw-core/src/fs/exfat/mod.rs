@@ -146,6 +146,15 @@ impl ExFatEngine {
         let sector = dev.read_struct_at::<512>(0)?;
         let boot = ExFatBoot::parse(&sector)?;
         let fat_bytes = u64::from(boot.fat_length) * u64::from(boot.bytes_per_sector);
+        // The FAT lives ON the volume (the exfat fuzz target's
+        // allocation-size-too-big catch): guard BEFORE allocating —
+        // an over-volume FAT length is corrupt metadata.
+        if fat_bytes == 0 || fat_bytes > dev.capacity_bytes() {
+            return Err(CoreError::Corrupt {
+                structure: "exfat boot",
+                detail: format!("FAT bytes {fat_bytes} exceed the volume"),
+            });
+        }
         let mut fat = vec![0u8; fat_bytes as usize];
         dev.read_bytes(
             u64::from(boot.fat_offset) * u64::from(boot.bytes_per_sector),
@@ -586,6 +595,23 @@ mod tests {
         s[3..11].copy_from_slice(b"EXFAT   ");
         s[0x2F] = 9;
         assert!(ExFatBoot::parse(&s).is_err()); // missing layout
+    }
+
+    /// The exfat fuzz target's catch (run 39139452642,
+    /// allocation-size-too-big): `fat_length × bytes_per_sector` was
+    /// allocated BEFORE the read that would reject the region. An
+    /// over-volume FAT size is corrupt metadata — guard, never
+    /// allocate.
+    #[test]
+    fn implausible_fat_size_is_corrupt_not_oom() {
+        let mut ram = exfat_image();
+        // 0x00FF_FFFF sectors × 512 B ≈ 8 GiB of FAT on a 32 KiB image.
+        ram.data[0x17..0x1B].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        assert!(
+            ExFatEngine::new(dev).is_err(),
+            "an over-volume FAT length is corrupt metadata, never an allocation"
+        );
     }
 
     /// One exFAT entry set appended to a directory buffer (primary +

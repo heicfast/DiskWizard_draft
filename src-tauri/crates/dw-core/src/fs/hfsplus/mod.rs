@@ -96,8 +96,8 @@ impl ForkData {
             if count == 0 {
                 return;
             }
-            let off = u64::from(start) * block_size;
-            let len = u64::from(count) * block_size;
+            let off = u64::from(start).saturating_mul(block_size);
+            let len = u64::from(count).saturating_mul(block_size);
             match out.last_mut() {
                 Some(last) if last.end() == off => last.len += len,
                 _ => out.push(Extent::new(off, len)),
@@ -362,8 +362,8 @@ fn read_fork_bytes(
             break;
         }
         let take = count.min(remaining_blocks);
-        let off = u64::from(start) * bs;
-        let want = ((u64::from(take) * bs) as usize).min(buf.len() - pos);
+        let off = u64::from(start).saturating_mul(bs);
+        let want = (u64::from(take).saturating_mul(bs) as usize).min(buf.len() - pos);
         if off >= dev.capacity_bytes() {
             break;
         }

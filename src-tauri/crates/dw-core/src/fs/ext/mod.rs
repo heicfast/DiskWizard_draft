@@ -185,10 +185,13 @@ impl ExtSuper {
         })
     }
 
-    /// Byte offset of an absolute block number.
+    /// Byte offset of an absolute block number. Saturating: fuzzed
+    /// GDT/inode block numbers can overflow the scale — a saturated
+    /// offset simply fails at the device boundary instead of panicking
+    /// under overflow checks (the fuzz suite's discipline).
     #[must_use]
     pub fn block_offset(&self, block: u64) -> u64 {
-        block * u64::from(self.block_size)
+        block.saturating_mul(u64::from(self.block_size))
     }
 
     /// The refined family member.
@@ -357,8 +360,10 @@ impl ExtEngine {
         let Some(g) = self.gdt.get(group) else {
             return Ok(None);
         };
-        let off =
-            self.sb.block_offset(g.inode_table) + u64::from(idx) * u64::from(self.sb.inode_size);
+        let off = self
+            .sb
+            .block_offset(g.inode_table)
+            .saturating_add(u64::from(idx) * u64::from(self.sb.inode_size));
         let mut raw = vec![0u8; self.sb.inode_size as usize];
         self.dev.read_bytes(off, &mut raw)?;
         // Zero mode = never-used slot (inodes keep mode through
@@ -420,7 +425,7 @@ impl ExtEngine {
                 if len == 0 || phys == 0 || phys >= self.sb.blocks_count {
                     continue;
                 }
-                out.push(Extent::new(phys * bs, len * bs));
+                out.push(Extent::new(phys.saturating_mul(bs), len.saturating_mul(bs)));
             } else {
                 let child = u64::from(u32::from_le_bytes([e[4], e[5], e[6], e[7]]))
                     | (u64::from(u16::from_le_bytes([e[8], e[9]])) << 32);
@@ -460,7 +465,7 @@ impl ExtEngine {
             ]))
         };
         let push = |out: &mut Vec<Extent>, p: u64| {
-            let off = p * bs;
+            let off = p.saturating_mul(bs);
             match out.last_mut() {
                 Some(last) if last.end() == off => last.len += bs,
                 _ => out.push(Extent::new(off, bs)),
