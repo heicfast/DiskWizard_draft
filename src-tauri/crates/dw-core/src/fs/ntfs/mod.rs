@@ -208,6 +208,45 @@ impl RawRecord {
     }
 }
 
+/// Read a resident stream's inline content from its MFT record —
+/// the resident-marker recovery path (sub-record-size NTFS files
+/// live INSIDE their MFT record; the tree emits them with a
+/// zero-length extent marker whose offset is the record position).
+///
+/// Matches the stream by size when several resident $DATA
+/// attributes exist (named streams); the unnamed stream wins ties.
+#[must_use]
+pub fn read_resident_stream(
+    dev: &dyn BlockDevice,
+    record_offset: u64,
+    size: u64,
+) -> Option<Vec<u8>> {
+    // Geometry from the boot sector (record + sector sizes).
+    let sector = dev.read_struct_at::<512>(0).ok()?;
+    let boot = NtfsBoot::parse(&sector).ok()?;
+    let rec = RawRecord::read(
+        dev,
+        record_offset,
+        boot.mft_record_size,
+        boot.bytes_per_sector,
+    )
+    .ok()?;
+    let mut fallback: Option<Vec<u8>> = None;
+    for attr in iter_attrs(&rec.data) {
+        if attr.kind != ATTR_DATA {
+            continue;
+        }
+        let Some(r) = attr.resident else { continue };
+        if r.len() as u64 == size {
+            return Some(r.to_vec());
+        }
+        if attr.name.is_none() && fallback.is_none() {
+            fallback = Some(r.to_vec());
+        }
+    }
+    fallback
+}
+
 /// One parsed attribute header view (resident or non-resident).
 pub struct AttrView<'a> {
     pub kind: u32,
@@ -928,6 +967,120 @@ mod tests {
         let readme_entry = sink.0.iter().find(|e| e.name == "readme.txt").unwrap();
         assert_eq!(readme_entry.extents, vec![Extent::new(100 * 512, 1024)]);
         assert_eq!(readme_entry.size, 1024);
+    }
+
+    /// A record whose $DATA is RESIDENT (inline content) — the
+    /// sub-record-size file class.
+    fn mft_record_resident(flags: u16, parent: u64, name: &str, content: &[u8]) -> Vec<u8> {
+        let mut r = mft_record(flags, parent, name, None);
+        // Append a resident $DATA after the $FILE_NAME attribute:
+        // find the end marker and write over it.
+        let mut pos = 0x38usize;
+        // Skip the $FILE_NAME attribute (its length at +4).
+        let fn_len =
+            u32::from_le_bytes([r[0x38 + 4], r[0x38 + 5], r[0x38 + 6], r[0x38 + 7]]) as usize;
+        pos += fn_len;
+        let attr_len = 0x18 + content.len();
+        r[pos..pos + 4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        r[pos + 4..pos + 8].copy_from_slice(&(attr_len as u32).to_le_bytes());
+        r[pos + 8] = 0; // resident
+        r[pos + 0x10..pos + 0x14].copy_from_slice(&(content.len() as u32).to_le_bytes());
+        r[pos + 0x14..pos + 0x16].copy_from_slice(&0x18u16.to_le_bytes()); // content off
+        r[pos + 0x18..pos + 0x18 + content.len()].copy_from_slice(content);
+        let end = pos + attr_len;
+        r[end..end + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        r
+    }
+
+    #[test]
+    fn resident_file_scans_and_recovers_inline_content() {
+        // The M2 senior finding closed: sub-record-size files
+        // (resident $DATA) recover their INLINE bytes, not zeros.
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let boot = boot_sector_template();
+        ram.data[..512].copy_from_slice(&boot);
+        let root = mft_record(0x0003, 5, ".", None);
+        let content = b"tiny resident payload - 33 bytes";
+        let tiny = mft_record_resident(0x0001, 5, "tiny.txt", content);
+        let mft_base = 16 * 512;
+        ram.data[mft_base..mft_base + 512].copy_from_slice(&mft_record0(16, 32));
+        ram.data[mft_base + 5 * 512..mft_base + 6 * 512].copy_from_slice(&root);
+        ram.data[mft_base + 6 * 512..mft_base + 7 * 512].copy_from_slice(&tiny);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = NtfsEngine::new(Arc::clone(&dev)).expect("engine");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        engine
+            .quick_scan(&mut sink, &ScanControl::new())
+            .expect("scan");
+        let tiny_entry = sink.0.iter().find(|e| e.name == "tiny.txt").expect("found");
+        assert_eq!(tiny_entry.size, content.len() as u64);
+        // The resident marker: one zero-length extent at the record.
+        assert_eq!(tiny_entry.extents.len(), 1);
+        assert_eq!(tiny_entry.extents[0].len, 0);
+        let record_offset = tiny_entry.extents[0].offset;
+        assert_eq!(record_offset, (mft_base + 6 * 512) as u64);
+        // The helper reads the inline bytes.
+        let inline =
+            read_resident_stream(&*dev, record_offset, tiny_entry.size).expect("resident content");
+        assert_eq!(inline.as_slice(), content);
+        // And the recovery export path materializes them: build a
+        // tree node carrying the marker, run the export, byte-check.
+        let mut tree = crate::tree::TreeBuilder::with_root("NTFS (G:)");
+        let mut fe = FoundEntry::structured("tiny.txt".into(), false, FsKind::Ntfs);
+        fe.size = content.len() as u64;
+        fe.extents = vec![Extent::new(record_offset, 0)];
+        tree.add(fe);
+        let nodes = tree.nodes().to_vec();
+        let tiny_id = nodes
+            .iter()
+            .find(|n| n.name == "tiny.txt")
+            .map_or(0, |n| n.id);
+        let queue = crate::recover::build_queue(&nodes, &[tiny_id]);
+        struct RamDest {
+            files: std::collections::HashMap<String, Vec<u8>>,
+        }
+        impl crate::recover::DestWriter for RamDest {
+            fn mkdir(&mut self, _p: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn write_file(
+                &mut self,
+                path: &str,
+                read: &mut dyn FnMut(&mut [u8]) -> usize,
+            ) -> Result<(), String> {
+                let mut out = Vec::new();
+                let mut buf = [0u8; 64];
+                loop {
+                    let n = read(&mut buf);
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                self.files.insert(path.to_string(), out);
+                Ok(())
+            }
+            fn free_bytes(&self) -> Result<u64, String> {
+                Ok(1 << 30)
+            }
+        }
+        let mut dest = RamDest {
+            files: std::collections::HashMap::new(),
+        };
+        let report =
+            crate::recover::run_recovery(&*dev, &queue, &mut dest, &ScanControl::new(), |_| {})
+                .expect("recovery");
+        assert_eq!(report.done_files, 1);
+        assert_eq!(report.failed_files, 0);
+        let recovered = dest.files.values().next().expect("exported");
+        assert_eq!(recovered.as_slice(), content, "inline bytes, not zeros");
     }
 
     #[test]

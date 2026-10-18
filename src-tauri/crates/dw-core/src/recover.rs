@@ -226,6 +226,26 @@ fn export_one_to(
     target_path: &str,
 ) -> CoreResult<u64> {
     let node = &item.node;
+    // Resident-marker path: a zero-length extent whose offset is the
+    // MFT record position — the content lives INSIDE the record
+    // (sub-record-size NTFS files). Read it through the NTFS helper
+    // instead of streaming (which would zero-fill).
+    if let Some(marker) = node.extents.first().filter(|e| e.len == 0)
+        && let Some(content) = crate::fs::ntfs::read_resident_stream(dev, marker.offset, node.size)
+    {
+        let take = (node.size as usize).min(content.len());
+        let mut pos = 0usize;
+        dest.write_file(target_path, &mut |buf| {
+            let n = buf.len().min(take.saturating_sub(pos));
+            buf[..n].copy_from_slice(&content[pos..pos + n]);
+            pos += n;
+            n
+        })
+        .map_err(CoreError::Destination)?;
+        return Ok(node.size);
+    }
+    // Fall through: unreadable record → the zero-fill stream
+    // (the failure surfaces in the recovery log via grading).
     let mut stream = ExtentStream {
         dev,
         extents: &node.extents,
