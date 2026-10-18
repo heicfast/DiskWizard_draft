@@ -84,5 +84,15 @@ jobs:
           detach vdisk
           "@
           $script | Out-File -Encoding ascii "$env:TEMP\dp-clean.txt"
-          diskpart /s "$env:TEMP\dp-clean.txt" | Out-Host
+          # The volume can take a moment to settle after the test
+          # process exits; retry the detach, and never fail the
+          # workflow from cleanup (the results already decided it).
+          $ok = $false
+          foreach ($i in 1..3) {
+            diskpart /s "$env:TEMP\dp-clean.txt" | Out-Host
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) { Write-Host "detach retried out — removing the file anyway" }
           Remove-Item "$env:TEMP\dwtest.vhd" -Force -ErrorAction SilentlyContinue
+          exit 0

@@ -373,8 +373,25 @@ impl ScanController {
     /// when the target is a whole disk with a table, the device
     /// itself otherwise. Partition units are `SubDevice` slices over
     /// the SAME cached device (one cache layer, absolute-LBA keyed).
+    ///
+    /// Ordering matters: a filesystem boot sector (NTFS/FAT/exFAT —
+    /// all carry the 0x55AA signature AND code bytes where MBR
+    /// entries would sit) means the target IS a volume — partition
+    /// dispatch would read the boot code as phantom table entries.
+    /// Only Raw probes (whole disks, superfloppies, damaged volumes)
+    /// get layout analysis.
     fn scan_units(&self) -> Vec<ScanUnit> {
         let mut units = Vec::new();
+        let direct = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
+        if !matches!(direct, FsKind::Raw | FsKind::Unknown) {
+            units.push(ScanUnit {
+                dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
+                sectors: self.dev.total_sectors(),
+                prefix: None,
+                fs: direct,
+            });
+            return units;
+        }
         let layout = read_partition_layout(&*self.dev).unwrap_or_default();
         if layout.partitions.is_empty() {
             // Whole-disk without a table (superfloppy/volume target) or
@@ -505,6 +522,39 @@ pub fn read_partition_layout(dev: &dyn BlockDevice) -> CoreResult<PartitionLayou
 mod tests {
     use super::*;
     use crate::testutil::RamDevice;
+
+    #[test]
+    fn volume_boot_sector_targets_do_not_dispatch_partitions() {
+        // NTFS boot sector: label at 3, 0x55AA at 510, and boot-code
+        // bytes where MBR entries sit (the phantom-partition trap that
+        // broke volume scans before the probe-first ordering).
+        let mut ram = RamDevice::new(512 * 2048, 512);
+        ram.data[3..11].copy_from_slice(b"NTFS    ");
+        ram.data[0x1BE] = 0x07;
+        ram.data[0x1BE + 8..0x1BE + 12].copy_from_slice(&1u32.to_le_bytes());
+        ram.data[0x1BE + 12..0x1BE + 16].copy_from_slice(&100u32.to_le_bytes());
+        ram.data[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let ctrl = ScanController::new(Arc::new(ram), "volume");
+        let units = ctrl.scan_units();
+        assert_eq!(units.len(), 1, "a boot-sector target is ONE unit");
+        assert_eq!(units[0].fs, FsKind::Ntfs);
+        assert!(units[0].prefix.is_none());
+    }
+
+    #[test]
+    fn whole_disk_targets_dispatch_partitions() {
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        // MBR with one FAT32 entry (start 2048, len 1024).
+        ram.data[0x1BE + 4] = 0x0B;
+        ram.data[0x1BE + 8..0x1BE + 12].copy_from_slice(&2048u32.to_le_bytes());
+        ram.data[0x1BE + 12..0x1BE + 16].copy_from_slice(&1024u32.to_le_bytes());
+        ram.data[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let ctrl = ScanController::new(Arc::new(ram), "disk");
+        let units = ctrl.scan_units();
+        assert_eq!(units.len(), 1, "one table entry → one partition unit");
+        assert_eq!(units[0].sectors, 1024);
+        assert_eq!(units[0].prefix.as_deref(), Some("Partition 1"));
+    }
 
     struct Recorder(Vec<Progress>, Vec<Phase>);
     impl ProgressObserver for Recorder {

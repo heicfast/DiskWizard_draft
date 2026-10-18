@@ -241,6 +241,88 @@ pub fn get_scan_results(s: State<'_, SharedState>) -> Value {
     s.lock().results.clone().unwrap_or(Value::Null)
 }
 
+/// Preview a file's leading bytes (simulated: deterministic pattern
+/// bytes synthesized from the node id/name — same payload shape as
+/// the real core; images decode client-side from the base64).
+#[tauri::command]
+pub fn preview_file(
+    s: State<'_, SharedState>,
+    generation: u64,
+    node_id: u64,
+    max_bytes: Option<u64>,
+) -> Result<Value, String> {
+    let cap = max_bytes.unwrap_or(2 * 1024 * 1024).min(16 * 1024 * 1024);
+    let st = s.lock();
+    if st.generation != generation {
+        return Err("STALE_GENERATION. The results changed; re-open the preview.".into());
+    }
+    let nodes = st
+        .results
+        .as_ref()
+        .and_then(|r| r["nodes"].as_array().cloned())
+        .ok_or("NO_SCAN_RESULTS. Nothing to preview.")?;
+    let node = nodes
+        .iter()
+        .find(|n| n["id"].as_u64() == Some(node_id))
+        .ok_or("UNKNOWN_NODE. That file is no longer in the results.")?;
+    if node["isDir"].as_bool().unwrap_or(false) {
+        return Err("IS_DIRECTORY. Directories have no preview bytes.".into());
+    }
+    let name = node["name"].as_str().unwrap_or("file").to_string();
+    let size = node["size"].as_u64().unwrap_or(0);
+    let take = usize::try_from(size.min(cap)).unwrap_or(0);
+    // Deterministic synthetic content: a seeded byte pattern that
+    // previews identically on every tour run.
+    let mut buf = Vec::with_capacity(take);
+    let seed = u32::try_from(node_id).unwrap_or(1).max(1);
+    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    for i in 0..take {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        buf.push((x as u8).wrapping_add((i % 251) as u8));
+    }
+    let mime = if name.to_lowercase().ends_with(".png") {
+        "image/png"
+    } else if name.to_lowercase().ends_with(".jpg") || name.to_lowercase().ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    };
+    Ok(json!({
+        "mime": mime,
+        "size": size,
+        "data": b64_sim(&buf),
+    }))
+}
+
+/// Standard base64 (the preview payload codec — no external dep).
+fn b64_sim(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 0x3F] as char);
+        out.push(T[(n >> 12) as usize & 0x3F] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 0x3F] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 0x3F] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /* ── Sessions ────────────────────────────────────────────────────────── */
 
 #[tauri::command]
