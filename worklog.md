@@ -111,3 +111,60 @@ detected** — exceeding the donor's capture fidelity.
 pipelines green with hygiene; Senior-dev check/clippy/fmt clean +
 73 tests + mock parity; Designer 9/9/9/8 pages, AA proven per-theme;
 Paying-user honest licensing + free disk-health trust builder.
+
+## Session 3 — The real core lands (core-interface session)
+
+**Task ID**: 3
+**Agent**: main (Z.ai) — core/interface session
+**Task**: Replace the simulated core with the production Rust engine
+behind the frozen IPC contract; keep the mock as a dev-only feature.
+
+**Work Log**:
+- Read the full research corpus (299 .md files across architecture/,
+  re-workspace/artifacts/ — MOM modules, SearchDLL engines, UIUX
+  deep-dives, PartitionRecovery, SaveScan, licensing, config files);
+  distilled structured summaries into the session context.
+- Ported the DiskGenie licensing architecture verbatim into
+  `crates/dw-license` (Ed25519 entitlement tokens, HMAC-signed
+  protocol, posture machine, hardware-id + persistence seams);
+  generated a fresh DiskWizard keypair (deployment sheet for the
+  owner; public key + client secret embedded per the architecture).
+- Built `crates/dw-core` (platform-independent engine): BlockDevice
+  seam (image/sub/cached-LRU), MBR/EBR/GPT + lost-partition sweep,
+  NTFS engine (MFT walk, fixups, runlists, deleted records, LZNT1),
+  FAT12/16/32 (LFN, cycle-guarded chains, 0xE5 reanimation), exFAT
+  (entry sets), RAW carver (19 format grammars), tree builder
+  (dense-id arena, lost branches, structured-wins merge,
+  classification, grading), scan controller (quick→deep→organize
+  phases, external pause/stop token), recovery engine (extent
+  streams, space gate, collision suffixes), .rsf sessions
+  (zlib-chunked records, auto-save naming).
+- Built `crates/dw-win` (Windows layer): raw-IO block devices,
+  device/volume enumeration with lost-partition surfacing, SMART
+  (SAT + NVMe transports), BitLocker FVE detection + unlock,
+  licensing platform providers (MachineGuid/CPUID/DPAPI/SMBIOS).
+- Wired the real command surface (`commands/real/*`) — every frozen
+  command name/shape served by the engine; worker threads for scan
+  + recovery; throttled progress events; .rsf auto-save; preview_file
+  (base64 stream); L6 license gates in Rust.
+- Feature routing: default = real core; `sim` = the session-1/2 mock
+  (ui-screenshots.yml builds with `--features sim`; release builds
+  never enable it).
+- CI: new rust-core gate (fmt + clippy -D warnings + 109 engine tests
+  on ubuntu); windows-nsis now ships the real core.
+- Wrote docs/CORE-PLAN.md (the master build plan: architecture,
+  phases, SOPs, ADRs) and todo-uiux/CORE-INTERFACE-GAPS.md (the UI
+  contract extensions for the parallel agents: start_recovery
+  nodeIds, preview_file wiring, BitLocker args).
+
+**Stage Summary**:
+- 109 unit tests green across dw-core (82) + dw-license (27); clippy
+  clean; the engine crates compile on any OS (the seam proving
+  itself in CI).
+- The app crate compiles on Windows runners (local box lacks GTK —
+  the workflows carry it; first Windows compile in flight).
+- License deployment: the owner's worker secrets are in the
+  DISKWIZARD_LICENSE_SECRETS handoff (not in the repo).
+- Next: Windows CI compile pass, VHD end-to-end integration test,
+  M2 engines (ext/HFS+/ReFS), SDR deep repair, then the repair
+  phase per docs/TODO.md.
