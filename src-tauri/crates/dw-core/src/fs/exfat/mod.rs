@@ -124,6 +124,10 @@ struct EntrySet {
     data_len: u64,
     valid_len: u64,
     allocated: bool,
+    /// Stream-dentry GeneralSecondaryFlags bit 1: the file occupies
+    /// contiguous clusters FirstCluster..+DataLength and the FAT is
+    /// meaningless for it (the spec's NoFatChain).
+    no_fat_chain: bool,
 }
 
 /// The engine.
@@ -182,9 +186,61 @@ impl ExFatEngine {
         out
     }
 
+    /// `count` contiguous clusters starting at `first` (bounded by
+    /// the cluster heap) — one cluster-rounded extent.
+    fn contiguous_extents(&self, first: u32, needed: u64) -> Vec<Extent> {
+        if first < 2 {
+            return Vec::new();
+        }
+        let cs = self.boot.cluster_size();
+        let count = needed.div_ceil(cs).max(1);
+        // Cluster numbers run 2..(2 + cluster_count − 1).
+        let avail = u64::from(self.boot.cluster_count)
+            .saturating_sub(u64::from(first - 2))
+            .max(1);
+        let count = count.min(avail);
+        vec![Extent::new(self.boot.cluster_offset(first), count * cs)]
+    }
+
+    /// Resolve a file's data extents — the QA-5 chain-resolution
+    /// ladder (research: `fat-exfat-engine-algorithms-v2.md` §3 + the
+    /// shared-props finding):
+    ///
+    /// 1. `NoFatChain` flagged → the spec's contiguous layout
+    ///    (FirstCluster..+DataLength) — EXACT, no penalty.
+    /// 2. FAT chain covering DataLength → the chain (fragmented
+    ///    files keep their real layout).
+    /// 3. FAT damaged/short (deleted exFAT files' entries are
+    ///    typically zeroed) → contiguous RE-DERIVATION from
+    ///    FirstCluster covering DataLength — flagged so the caller
+    ///    lowers confidence (the "possibly damaged but listed" UX).
+    ///
+    /// `needed == 0` (unknown length — the root directory) trusts
+    /// the FAT chain alone.
+    fn chain_extents_derived(
+        &self,
+        first: u32,
+        needed: u64,
+        no_fat_chain: bool,
+    ) -> (Vec<Extent>, bool) {
+        if no_fat_chain && needed > 0 {
+            return (self.contiguous_extents(first, needed), false);
+        }
+        let chain = self.chain_extents(first);
+        if needed == 0 {
+            return (chain, false);
+        }
+        let covered: u64 = chain.iter().map(|e| e.len).sum();
+        if covered >= needed {
+            (chain, false)
+        } else {
+            (self.contiguous_extents(first, needed), true)
+        }
+    }
+
     /// Read one directory chain's bytes (bounded).
-    fn read_dir_data(&self, first: u32) -> Vec<u8> {
-        let extents = self.chain_extents(first);
+    fn read_dir_data(&self, first: u32, needed: u64, no_fat_chain: bool) -> Vec<u8> {
+        let (extents, _) = self.chain_extents_derived(first, needed, no_fat_chain);
         let total: u64 = extents.iter().map(|e| e.len).sum();
         if total == 0 || total > 16 * 1024 * 1024 {
             return Vec::new();
@@ -243,6 +299,7 @@ impl ExFatEngine {
             let mut first_cluster = 0u32;
             let mut data_len = 0u64;
             let mut valid_len = 0u64;
+            let mut no_fat_chain = false;
             let mut set_len = 1 + secondary_count;
             for s in 1..=secondary_count {
                 let soff = i + s * 32;
@@ -255,6 +312,10 @@ impl ExFatEngine {
                     x if x == ET_STREAM & 0x7F => {
                         let name_len = data[soff + 3] as usize;
                         let _ = name_len;
+                        // GeneralSecondaryFlags (offset +1): bit 1 =
+                        // NoFatChain (contiguous layout, FAT
+                        // meaningless — the spec's exact fast path).
+                        no_fat_chain = data[soff + 1] & 0x02 != 0;
                         valid_len = u64::from_le_bytes({
                             let mut b = [0u8; 8];
                             b.copy_from_slice(&data[soff + 0x08..soff + 0x10]);
@@ -295,6 +356,7 @@ impl ExFatEngine {
                     data_len,
                     valid_len,
                     allocated,
+                    no_fat_chain,
                 });
             }
             i += set_len * 32;
@@ -302,6 +364,7 @@ impl ExFatEngine {
         out
     }
 
+    #[allow(clippy::too_many_arguments)] // recursive dir walk state
     fn walk_dir(
         &self,
         cluster: u32,
@@ -310,6 +373,8 @@ impl ExFatEngine {
         ctrl: &ScanControl,
         stats: &mut ScanStats,
         depth: usize,
+        needed_len: u64,
+        no_fat_chain: bool,
     ) -> CoreResult<()> {
         if depth > 32 {
             return Ok(());
@@ -318,7 +383,7 @@ impl ExFatEngine {
         if cluster < 2 {
             return Ok(());
         }
-        let data = self.read_dir_data(cluster);
+        let data = self.read_dir_data(cluster, needed_len, no_fat_chain);
         for e in Self::parse_dir(&data) {
             let child_path = if path.is_empty() {
                 e.name.clone()
@@ -330,7 +395,11 @@ impl ExFatEngine {
             } else {
                 NodeOrigin::Deleted
             };
-            let extents = self.chain_extents(e.first_cluster);
+            let (extents, rederived) = if e.is_dir {
+                (Vec::new(), false)
+            } else {
+                self.chain_extents_derived(e.first_cluster, e.data_len, e.no_fat_chain)
+            };
             let mut entry = FoundEntry::structured(e.name.clone(), e.is_dir, FsKind::ExFat);
             entry.parent_hint = Some(path.to_string());
             entry.attrs = FileAttrs(u32::from(e.attrs));
@@ -342,12 +411,28 @@ impl ExFatEngine {
                 e.data_len.min(e.valid_len.max(e.data_len))
             };
             entry.extents = if e.is_dir { Vec::new() } else { extents };
-            entry.confidence = if e.allocated { 100 } else { 75 };
+            entry.confidence = {
+                let base: u8 = if e.allocated { 100 } else { 75 };
+                if rederived {
+                    base.saturating_sub(20)
+                } else {
+                    base
+                }
+            };
             stats.entries += u64::from(!e.is_dir);
             stats.bytes += entry.size;
             sink.on_entry(entry);
             if e.is_dir {
-                self.walk_dir(e.first_cluster, &child_path, sink, ctrl, stats, depth + 1)?;
+                self.walk_dir(
+                    e.first_cluster,
+                    &child_path,
+                    sink,
+                    ctrl,
+                    stats,
+                    depth + 1,
+                    e.data_len,
+                    e.no_fat_chain,
+                )?;
             }
         }
         Ok(())
@@ -361,7 +446,18 @@ impl ScanEngine for ExFatEngine {
 
     fn quick_scan(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
-        self.walk_dir(self.boot.root_cluster, "", sink, ctrl, &mut stats, 0)?;
+        // The root has no stream dentry: unknown length → FAT-only
+        // chain (needed_len = 0).
+        self.walk_dir(
+            self.boot.root_cluster,
+            "",
+            sink,
+            ctrl,
+            &mut stats,
+            0,
+            0,
+            false,
+        )?;
         Ok(stats)
     }
 }
@@ -490,5 +586,100 @@ mod tests {
         s[3..11].copy_from_slice(b"EXFAT   ");
         s[0x2F] = 9;
         assert!(ExFatBoot::parse(&s).is_err()); // missing layout
+    }
+
+    /// One exFAT entry set appended to a directory buffer (primary +
+    /// stream + name), the fixture builder's byte layout.
+    fn entry_set(
+        primary_type: u8,
+        stream_type: u8,
+        stream_flags: u8,
+        name: &str,
+        first_cluster: u32,
+        data_len: u64,
+    ) -> Vec<u8> {
+        let name_u16: Vec<u16> = name.encode_utf16().collect();
+        let mut set = Vec::new();
+        let mut f = [0u8; 32];
+        f[0] = primary_type;
+        f[1] = 2; // 2 secondaries
+        f[8..10].copy_from_slice(&0x20u16.to_le_bytes()); // archive
+        set.extend_from_slice(&f);
+        let mut st = [0u8; 32];
+        st[0] = stream_type;
+        st[1] = stream_flags; // bit 1 = NoFatChain
+        st[3] = name_u16.len() as u8;
+        st[8..16].copy_from_slice(&data_len.to_le_bytes()); // valid size
+        st[0x14..0x18].copy_from_slice(&first_cluster.to_le_bytes());
+        st[0x18..0x20].copy_from_slice(&data_len.to_le_bytes()); // data length
+        set.extend_from_slice(&st);
+        let mut nm = [0u8; 32];
+        nm[0] = stream_type | 0x01; // the name dentry's type class
+        for (i, u) in name_u16.iter().enumerate() {
+            nm[2 + i * 2..4 + i * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        set.extend_from_slice(&nm);
+        set
+    }
+
+    #[test]
+    fn qa5_damaged_fat_chain_rederivation() {
+        // Research: fat-exfat-engine-algorithms-v2 §3 — when the FAT
+        // is damaged (deleted exFAT files' entries typically zeroed),
+        // the chain re-derivation rebuilds contiguous extents from
+        // FirstCluster × DataLength; NoFatChain files resolve their
+        // contiguous layout EXACTLY (spec — no penalty) regardless
+        // of FAT state.
+        let mut ram = exfat_image();
+        // biglost.bin: DELETED, 3 clusters (7-9), 1536 B, FAT[7..9]
+        // stay ZERO (the damage) — the walk must re-derive.
+        // contig.bin: EXISTING, NoFatChain, clusters 10-11 (1024 B),
+        // FAT[10..12] zero (meaningless under NoFatChain).
+        let root = 3 * 512; // root dir cluster 2 → sector 3
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&entry_set(0x05, 0x40, 0x01, "biglost.bin", 7, 1536));
+        extra.extend_from_slice(&entry_set(0x85, 0xC0, 0x03, "contig.bin", 10, 1024));
+        let at = root + 192; // after notes.txt + gone.tmp (6 entries)
+        ram.data[at..at + extra.len()].copy_from_slice(&extra);
+        // Distinct content bytes so extent targets are provable.
+        for (i, b) in ram.data[(8 * 512)..(8 * 512) + 1536].iter_mut().enumerate() {
+            *b = (i % 251) as u8; // clusters 7-9 = sectors 8-10
+        }
+        ram.data[11 * 512..11 * 512 + 4].copy_from_slice(b"NFC!");
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = ExFatEngine::new(dev).expect("engine");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        engine
+            .quick_scan(&mut sink, &ScanControl::new())
+            .expect("scan");
+        let find = |n: &str| sink.0.iter().find(|e| e.name == n);
+
+        // Damaged FAT → contiguous re-derivation, lowered confidence.
+        let big = find("biglost.bin").expect("re-derived file listed");
+        assert_eq!(big.origin, NodeOrigin::Deleted);
+        assert_eq!(big.size, 1536);
+        assert_eq!(big.extents, vec![Extent::new(8 * 512, 1536)]);
+        assert_eq!(big.confidence, 55, "deleted 75 − 20 re-derivation penalty");
+
+        // NoFatChain → the spec's exact contiguous layout, NO penalty.
+        let nfc = find("contig.bin").expect("NoFatChain file listed");
+        assert_eq!(nfc.origin, NodeOrigin::Existing);
+        assert_eq!(nfc.size, 1024);
+        assert_eq!(nfc.extents, vec![Extent::new(11 * 512, 1024)]);
+        assert_eq!(nfc.confidence, 100, "spec-exact — no penalty");
+
+        // Healthy-FAT files keep the chain path (no regression).
+        let notes = find("notes.txt").expect("notes");
+        assert_eq!(notes.confidence, 100);
+        assert_eq!(notes.extents, vec![Extent::new(6 * 512, 512)]);
+        let gone = find("gone.tmp").expect("gone");
+        assert_eq!(gone.confidence, 75);
     }
 }
