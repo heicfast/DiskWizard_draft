@@ -405,5 +405,20 @@ OVERLAPPED writes + 4Kn sector-size awareness).
 **Deferred register** (docs/TODO.md, each with evidence trail):
 ext4 journal reanimation, HFS+ journal replay, ReFS MSB tree
 enumeration (needs a real-ReFS fixture reversed on the runner),
-ext name↔content association, the prior M2 NTFS items
-($ATTRIBUTE_LIST, hole-aware extents, resident recovery).
+ext name↔content association, and the remaining M2 NTFS items
+($ATTRIBUTE_LIST forking, hole-aware extents). **Resident-content
+recovery CLOSED** (8109a2c): read_resident_stream + the export
+marker path + the byte-truth integration test.
+
+**Session-5 close-out additions** (through be8d3a0):
+- CI stabilization: three Windows-compile catches fixed same-hour
+  (OVERLAPPED union init, BlockDevice trait import, mock sdr_repair
+  twin — the sim surface must mirror the real one); the mock
+  determinism flake pinned with fake timers (73 web tests green);
+  the parallel agent's .ok()-on-Option release blocker fixed.
+- Local cross-check discipline restored: dw-core + dw-win +
+  dw-license all pass cargo check + clippy -D warnings on
+  x86_64-pc-windows-msvc BEFORE push (aws-lc-sys still blocks the
+  full app crate locally — the CI fast job covers it).
+- Resident recovery landed (above). Phase-2 repair spec + 6-POV
+  reviews + this worklog pushed.
