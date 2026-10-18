@@ -168,13 +168,22 @@ release).
   public key), HMAC-SHA256 request signing, postures
   (unlicensed/pro/grace 14 d/degraded), 24 h revalidation scheduler,
   DPAPI at rest, hardware fingerprint (MachineGuid ‖ volume serial ‖
-  CPUID). `LICENSE_PUBLIC_KEY_HEX` embedded; `LICENSE_API_BASE` →
-  `https://diskwizard-license.heictojpg-pics.workers.dev/`.
+  CPUID).
+- **§8 fix (session 5, OQ-3)**: the client was re-pointed at the
+  **DiskGenie deployment** exactly per MASTER_PROMPT §8 — endpoint
+  `https://diskbytes-license.heictojpg-pics.workers.dev/`, the donor's
+  Ed25519 public key + HMAC client secret, `x-db-*` auth headers, UA
+  `DiskBytes-License-Client/1`, token `iss="db-license"` /
+  `aud="diskgenie"`, and the `DB` key prefix (the server registry knows
+  DB keys only). ALL values live in the ONE config module
+  `dw-license/src/config.rs` — the future DiskWizard-server swap is a
+  one-file change (the fresh DiskWizard keypair from the
+  DISKWIZARD_LICENSE_SECRETS handoff is the swap target, not the
+  current key).
 - **QA-16 (deployment)**: the live E2E (activate/validate/deactivate
-  against the real Worker with a real DW- key) has not been run —
-  the server must be deployed with the matching Ed25519 seed + the
-  client secret from the `DISKWIZARD_LICENSE_SECRETS` handoff. Until
-  then the CI license tests use fake transports only.
+  against the real DiskGenie Worker with a real DB- key) has not been
+  run — until the owner issues a DB-key for a test activation, the CI
+  license tests use fake transports only.
 - Free-tier boundary verified: only `smart_report`,
   `list_devices`/`refresh_devices`, settings and `get_dev_hooks` are
   ungated; every scan/recovery/session command passes

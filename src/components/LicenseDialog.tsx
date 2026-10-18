@@ -1,7 +1,7 @@
 /**
  * The activation dialog + Pro status card (DiskGenie licensing §7,
  * adapted to DiskWizard copy): Later/Purchase when empty, Activate
- * when the key is complete (DW-XXXXX-XXXXX-XXXXX-XXXXX), typed error
+ * when the key is complete (DB-XXXXX-XXXXX-XXXXX-XXXXX), typed error
  * copy from the server contract (KEY_NOT_FOUND / LICENSE_EXPIRED /
  * KEY_REVOKED / DEVICE_SLOT_TAKEN), a ~1.4s success state that
  * auto-closes, and the Pro card (Status: Active, identity, tier,
@@ -109,7 +109,7 @@ export function LicenseDialog() {
                   ref={inputRef}
                   value={key}
                   onChange={(e) => setKey(formatKeyInput(e.target.value))}
-                  placeholder="DW-XXXXX-XXXXX-XXXXX-XXXXX"
+                  placeholder="DB-XXXXX-XXXXX-XXXXX-XXXXX"
                   spellCheck={false}
                   autoComplete="off"
                   maxLength={KEY_DISPLAY_LEN}

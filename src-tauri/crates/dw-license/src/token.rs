@@ -7,13 +7,14 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 
+use crate::config::{TOKEN_AUDIENCE, TOKEN_ISSUER};
 use crate::{CLOCK_SKEW_S, b64url_decode, from_hex};
 
 /// The decoded token claims.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenClaims {
-    /// Fixed issuer `dw-license`.
+    /// Fixed issuer ([`crate::config::TOKEN_ISSUER`]).
     pub iss: String,
     /// Format version (1).
     pub ver: u32,
@@ -44,7 +45,7 @@ pub struct TokenClaims {
     /// Key id (present tokens must be kid 1 = the embedded key).
     #[serde(default)]
     pub kid: Option<u32>,
-    /// Audience (`diskwizard` when present).
+    /// Audience ([`crate::config::TOKEN_AUDIENCE`] when present).
     #[serde(default)]
     pub aud: Option<String>,
 }
@@ -148,7 +149,7 @@ pub fn verify_token(
 
     let claims: TokenClaims =
         serde_json::from_slice(&payload).map_err(|_| LicenseError::Spoofed)?;
-    if claims.iss != "dw-license"
+    if claims.iss != TOKEN_ISSUER
         || claims.ver != 1
         || claims.plat != platform
         || claims.key != expected_key_hash
@@ -157,7 +158,7 @@ pub fn verify_token(
         || claims.iat > now + CLOCK_SKEW_S
         || matches!(claims.lexp, Some(lexp) if lexp <= now)
         || matches!(claims.kid, Some(k) if k != 1)
-        || matches!(claims.aud.as_deref(), Some(a) if a != "diskwizard")
+        || matches!(claims.aud.as_deref(), Some(a) if a != TOKEN_AUDIENCE)
     {
         return Err(LicenseError::Spoofed);
     }
@@ -188,7 +189,7 @@ mod tests {
         lexp: Option<i64>,
     ) -> String {
         let payload = serde_json::json!({
-            "iss": "dw-license",
+            "iss": TOKEN_ISSUER,
             "ver": 1,
             "jti": "0123456789abcdef",
             "iat": iat,

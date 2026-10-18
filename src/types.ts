@@ -259,7 +259,7 @@ export interface CloudDrive {
   total: number;
 }
 
-/* ── Licensing (DiskGenie architecture, DW-prefixed) ─────────────────── */
+/* ── Licensing (DiskGenie architecture, DB-prefixed) ─────────────────── */
 
 export interface LicenseStatus {
   posture: "unlicensed" | "pro" | "grace" | "degraded";

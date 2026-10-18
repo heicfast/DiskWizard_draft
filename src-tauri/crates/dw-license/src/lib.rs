@@ -8,7 +8,8 @@
 //!   b64url) — verified client-side against the embedded public key;
 //!   a spoofed license server cannot forge one (the private seed
 //!   lives only as a Worker secret).
-//! * **HMAC-SHA256 request auth** — `X-DW-*` headers over
+//! * **HMAC-SHA256 request auth** — `X-DB-*` headers (the deployed
+//!   DiskGenie worker's guard contract) over
 //!   (timestamp, nonce, method, path, body-hash) with ±300 s window
 //!   and server-side single-use nonces.
 //! * **Device binding** — the hardware fingerprint inside the signed
@@ -16,12 +17,18 @@
 //! * **Postures** — `unlicensed / pro / grace / degraded` with the
 //!   24 h revalidation + 14-day offline grace semantics.
 //!
+//! **§8 posture**: every server URL / key-material value lives in
+//! [`config`] — currently the DiskGenie deployment + secrets (the
+//! DiskGenie server validates DiskWizard activations until the
+//! DiskWizard worker deploys). The swap is a one-file change.
+//!
 //! Layering: this crate is platform-independent and fully unit-tested
 //! (fake transport + injected clock + fixture keypairs). The Windows
 //! fingerprint/DPAPI providers are injected through the
 //! [`hwid::HwIdProvider`] and [`store::StateStore`] seams by the app
 //! crate; nothing here touches Win32.
 
+pub mod config;
 pub mod http;
 pub mod hwid;
 pub mod posture;
@@ -29,11 +36,15 @@ pub mod protocol;
 pub mod store;
 pub mod token;
 
+pub use config::{
+    CLIENT_SECRET_HEX, HEADER_APP, HEADER_PREFIX, KEY_PREFIX, LICENSE_API_BASE, LICENSE_API_ENV,
+    LICENSE_PUBLIC_KEY_HEX, LICENSE_PURCHASE_URL, LICENSE_USER_AGENT, TOKEN_AUDIENCE, TOKEN_ISSUER,
+};
 pub use http::LicenseHttp;
 #[cfg(feature = "client")]
 pub use http::ReqwestLicense;
 pub use posture::{LicensePosture, posture};
-pub use protocol::{DeviceFacts, LICENSE_API_BASE, LICENSE_PURCHASE_URL, LicenseApi};
+pub use protocol::{DeviceFacts, LicenseApi};
 pub use store::{StateStore, license_path};
 pub use token::{TokenClaims, verify_token};
 
@@ -48,7 +59,9 @@ pub const GRACE_DAYS: i64 = 14;
 pub const CLOCK_SKEW_S: i64 = 300;
 
 /// Normalize a license key: uppercase, strip non-alphanumerics.
-/// The DW format: `DW` + 20 Crockford base32 chars (no I/L/O/U) = 22.
+/// The DB format (config::KEY_PREFIX): `DB` + 20 Crockford base32
+/// chars (no I/L/O/U) = 22 — the DiskGenie server's key registry
+/// only knows DB-prefixed keys while it validates our activations.
 #[must_use]
 pub fn normalize_key(raw: &str) -> String {
     raw.to_uppercase()
@@ -62,11 +75,12 @@ pub fn normalize_key(raw: &str) -> String {
 /// the mock marker keys).
 pub const CROCKFORD: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Validate the normalized-key shape (22 chars: `DW` + 20 Crockford).
+/// Validate the normalized-key shape (22 chars: KEY_PREFIX + 20
+/// Crockford — see [`config::KEY_PREFIX`]).
 #[must_use]
 pub fn key_shape_valid(normalized: &str) -> bool {
     normalized.len() == 22
-        && normalized.starts_with("DW")
+        && normalized.starts_with(KEY_PREFIX)
         && normalized[2..].chars().all(|c| CROCKFORD.contains(c))
 }
 
@@ -151,13 +165,14 @@ mod tests {
     #[test]
     fn key_normalization_and_shape() {
         assert_eq!(
-            normalize_key("dw-test s dem00 pr000 c0de0"),
-            "DWTESTSDEM00PR000C0DE0"
+            normalize_key("db-test s dem00 pr000 c0de0"),
+            "DBTESTSDEM00PR000C0DE0"
         );
-        assert!(key_shape_valid("DWTESTSDEM00PR000C0DE0"));
-        assert!(!key_shape_valid("DWTESTSDEM00PR000C0DE")); // 21
-        assert!(!key_shape_valid("DWTESTSDEM00PR000C0DEI")); // I not Crockford
-        assert!(!key_shape_valid("ABTESTSDEM00PR000C0DE0")); // wrong prefix
+        assert!(key_shape_valid("DBTESTSDEM00PR000C0DE0"));
+        assert!(!key_shape_valid("DBTESTSDEM00PR000C0DE")); // 21
+        assert!(!key_shape_valid("DBTESTSDEM00PR000C0DEI")); // I not Crockford
+        assert!(!key_shape_valid("DWTESTSDEM00PR000C0DE0")); // DW prefix rejected while
+        // the DiskGenie server validates (its registry knows DB keys only)
     }
 
     #[test]

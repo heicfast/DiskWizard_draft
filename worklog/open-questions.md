@@ -55,7 +55,11 @@ DiskWizard keypair is retired to the deployment sheet for the future
 swap. (Verification of the actual values in the donor repos before
 committing the change — evidence-first.)
 
-**Status**: ADOPTED, fix landed this session (see worklog session 5).
+**Status**: RESOLVED (2026-10-18, session 5) — `dw-license/src/config.rs`
+is the ONE config module; values verified verbatim against the donor
+client (`license.rs:34/40-47/126/695-704`) and the server guard/keys
+sources. See docs/QA-REGISTER.md §3 for the exact ported values and
+QA-16 for the remaining live-E2E flag.
 
 ## OQ-4 — "Free data recovery software" wording conflict
 

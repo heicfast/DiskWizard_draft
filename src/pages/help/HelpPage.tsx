@@ -53,7 +53,7 @@ const TOPICS: Topic[] = [
   {
     icon: KeyIcon,
     title: "Activate your license",
-    body: "Enter your DW-XXXXX-XXXXX-XXXXX-XXXXX code from the Activate dialog. No reinstallation or rescan is required after activation.",
+    body: "Enter your DB-XXXXX-XXXXX-XXXXX-XXXXX code from the Activate dialog. No reinstallation or rescan is required after activation.",
     tag: "Licensing",
   },
   {

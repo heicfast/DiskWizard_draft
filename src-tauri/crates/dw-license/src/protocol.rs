@@ -1,5 +1,9 @@
 //! The protocol client — activate / validate / deactivate against the
 //! Worker, with HMAC-signed requests and untrusted-response handling.
+//!
+//! Every URL / key-material value comes from [`crate::config`] (the
+//! §8 single config module — currently the DiskGenie deployment so
+//! the DiskGenie server validates DiskWizard activations).
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -7,37 +11,22 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use crate::config::{CLIENT_SECRET_HEX, HEADER_APP, HEADER_PREFIX, LICENSE_API_ENV};
 use crate::http::LicenseHttp;
 use crate::sha256_hex;
 use crate::token::LicenseError as LE;
 
-/// Default production license-server base. The owner deploys the
-/// DiskWizard worker (the diskgenie-license-server codebase under the
-/// DiskWizard identity) and pins this URL; the env
-/// `DISKWIZARD_LICENSE_API` overrides for tests/local dev.
-pub const LICENSE_API_BASE: &str = "https://diskwizard-license.heictojpg-pics.workers.dev/";
+/// Default production license-server base (re-exported from the config
+/// module for the app layer; env override below).
+pub use crate::config::LICENSE_API_BASE;
 
-/// The purchase page.
-pub const LICENSE_PURCHASE_URL: &str = "https://diskwizard.app/pricing";
-
-/// Ed25519 public key (64 hex) — the ONLY key this binary holds. The
-/// matching private seed lives as the Worker secret
-/// `LICENSE_SIGNING_PRIVATE_KEY` (deployment sheet: the owner's
-/// DISKWIZARD_LICENSE_SECRETS document). Rotation procedure: new pair
-/// → Worker secret → update here → ship.
-pub const LICENSE_PUBLIC_KEY_HEX: &str =
-    "2d44bbd8034e85810cccac455be9bb1bc9df839842e6a0b33ea68c1f3d15a91b";
-
-/// HMAC-SHA256 request secret (64 hex) shared with the Worker secret
-/// `CLIENT_REQUEST_SECRET`. Honest threat model (doc §2 L2): ships in
-/// the binary — abuse friction, NOT the security boundary; the
-/// boundary is the Ed25519 signature above.
-const CLIENT_SECRET_HEX: &str = "f8f479824b54c9feb52bd6ee15c0d2eb2a36aa47993a962490d9dcf2bef5340a";
+/// The purchase page (re-exported from the config module).
+pub use crate::config::LICENSE_PURCHASE_URL;
 
 /// Resolve the API base (env override for tests/local dev).
 #[must_use]
 pub fn api_base() -> String {
-    std::env::var("DISKWIZARD_LICENSE_API").unwrap_or_else(|_| LICENSE_API_BASE.to_string())
+    std::env::var(LICENSE_API_ENV).unwrap_or_else(|_| LICENSE_API_BASE.to_string())
 }
 
 /// The device facts collected at activation (what the D1 `devices`
@@ -167,15 +156,18 @@ impl<H: LicenseHttp> LicenseApi<H> {
         let body_hash = sha256_hex(body);
         let message = format!("{timestamp}.{nonce}.POST.{path}.{body_hash}");
         let sig = self.hmac_hex(&message);
+        // The x-db-* header family is the deployed worker's guard
+        // contract (config::HEADER_PREFIX / HEADER_APP) — see the donor
+        // license.rs:695-704 and the server src/guard.ts.
         let headers = vec![
-            ("x-dw-app".to_string(), "diskwizard".to_string()),
+            (format!("{HEADER_PREFIX}-app"), HEADER_APP.to_string()),
             (
-                "x-dw-version".to_string(),
+                format!("{HEADER_PREFIX}-version"),
                 env!("CARGO_PKG_VERSION").to_string(),
             ),
-            ("x-dw-timestamp".to_string(), timestamp.to_string()),
-            ("x-dw-nonce".to_string(), nonce),
-            ("x-dw-signature".to_string(), sig),
+            (format!("{HEADER_PREFIX}-timestamp"), timestamp.to_string()),
+            (format!("{HEADER_PREFIX}-nonce"), nonce),
+            (format!("{HEADER_PREFIX}-signature"), sig),
         ];
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
         self.http
@@ -384,21 +376,21 @@ mod tests {
             "https://unit.test/".into(),
             SECRET.to_string(),
         );
-        let _ = api.activate("DWTESTSDEM00PR000C0DE0", &facts());
+        let _ = api.activate("DBTESTSDEM00PR000C0DE0", &facts());
         let headers = probe.0.lock().unwrap()[0].clone();
         let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         for expected in [
-            "x-dw-app",
-            "x-dw-version",
-            "x-dw-timestamp",
-            "x-dw-nonce",
-            "x-dw-signature",
+            "x-db-app",
+            "x-db-version",
+            "x-db-timestamp",
+            "x-db-nonce",
+            "x-db-signature",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
         let sig = headers
             .iter()
-            .find(|(k, _)| k == "x-dw-signature")
+            .find(|(k, _)| k == "x-db-signature")
             .map(|(_, v)| v.clone())
             .unwrap();
         assert_eq!(sig.len(), 64);

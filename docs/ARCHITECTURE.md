@@ -73,10 +73,15 @@ distributions, and the licensing posture machine.
 
 ### Key format (the frozen licensing contract)
 
-`DW` + 20 Crockford base32 chars (no I/L/O/U — no confusables),
-normalized to 22 chars, displayed `DW-XXXXX-XXXXX-XXXXX-XXXXX`
+`DB` + 20 Crockford base32 chars (no I/L/O/U — no confusables),
+normalized to 22 chars, displayed `DB-XXXXX-XXXXX-XXXXX-XXXXX`
 (`src/lib/licenseKey.ts`; the Rust mock enforces the identical body
-alphabet). Mock marker words are Crockford-safe 5-char leet riding
+alphabet; the prefix lives in the §8 config module
+`dw-license/src/config.rs` → `KEY_PREFIX`). **§8 posture**: while the
+DiskGenie server validates DiskWizard activations, the key prefix is
+the donor's `DB` (the server registry knows DB keys only); it flips
+back to `DW` in the one-file config swap when the DiskWizard worker
+deploys. Mock marker words are Crockford-safe 5-char leet riding
 inside shape-valid keys: `WR0NG` → KEY_NOT_FOUND, `EXP1R` →
 LICENSE_EXPIRED, `REV0K` → KEY_REVOKED, `TAKEN` → DEVICE_SLOT_TAKEN,
 `TESTS` → lifetime tier (see the demo-key table in README).

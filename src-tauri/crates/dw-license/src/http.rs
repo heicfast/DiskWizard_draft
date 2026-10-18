@@ -60,8 +60,13 @@ impl LicenseHttp for ReqwestLicense {
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             // WIRE CONTRACT: the Worker's request guard pins this UA
-            // exactly — BAD_UA otherwise.
-            .header(reqwest::header::USER_AGENT, "DiskWizard-License-Client/1");
+            // exactly — BAD_UA otherwise. The value lives in the §8
+            // config module (crate::config::LICENSE_USER_AGENT; the
+            // deployed DiskGenie worker validates the pre-rename UA).
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::config::LICENSE_USER_AGENT,
+            );
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }

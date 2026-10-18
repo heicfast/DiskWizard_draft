@@ -24,7 +24,7 @@ Rust core + **Tauri 2 (WebView2)** + **React/TypeScript**. No Electron, no brows
 - **Scan Results** — the scan runs *inside* the results page: live searching strip, progressive tree fill, pause/stop, category tabs, folders/types tree, virtualized file table with **recoverability indicators** (Excellent / Good / Poor), inline preview panel with the recovery-chances gauge, essential-vs-complete result modes (the ~65% noise reduction), and the full recovery funnel (destination picker with Local/Cloud tabs, enable-file-repair, space gates).
 - **Disk Tools** — S.M.A.R.T. dashboard (free forever — the Monitor-tier analog): per-disk health verdicts, temperature, wear, and the full attribute table; SD Card Rescue, lost-partition guidance, BitLocker unlock and disk imaging as licensed rescue tools.
 - **Cloud Recovery** — iCloud, Google Drive, Dropbox, OneDrive sign-in → scan → recover, with the no-records-kept trust copy.
-- **Licensing (DiskGenie architecture)** — paid app: every capability except disk health requires activation. Postures (unlicensed / pro / grace / degraded), typed server-error copy, Pro status card, command-layer `ACTIVATION_REQUIRED` gates, `DW-XXXXX-XXXXX-XXXXX-XXXXX` keys.
+- **Licensing (DiskGenie architecture)** — paid app: every capability except disk health requires activation. Postures (unlicensed / pro / grace / degraded), typed server-error copy, Pro status card, command-layer `ACTIVATION_REQUIRED` gates, `DB-XXXXX-XXXXX-XXXXX-XXXXX` keys.
 - **Elevated + maximized** — the app requests administrator (raw-disk access; `requireAdministrator` manifest) and opens maximized by default.
 
 ## Develop
@@ -57,16 +57,16 @@ CI builds the real artifacts (same pipelines as DiskGenie):
 
 ## Demo license keys (mock-core)
 
-Keys are `DW` + 20 Crockford base32 chars (no I/L/O/U), grouped `DW-XXXXX-XXXXX-XXXXX-XXXXX`. The mock activation accepts any shape-valid key; these carry marker words (Crockford-safe 5-char leet) that select the typed server responses:
+Keys are `DB` + 20 Crockford base32 chars (no I/L/O/U), grouped `DB-XXXXX-XXXXX-XXXXX-XXXXX`. The mock activation accepts any shape-valid key; these carry marker words (Crockford-safe 5-char leet) that select the typed server responses:
 
 | Key | Result |
 | --- | --- |
-| `DW-TESTS-DEM00-PR000-C0DE0` | Activates — **Lifetime** tier |
-| `DW-Y0RKE-DEM00-PR000-C0DE0` | Activates — **Yearly** tier (expires in 365 days) |
-| `DW-WR0NG-00000-00000-00000` | `KEY_NOT_FOUND` — invalid key copy |
-| `DW-EXP1R-00000-00000-00000` | `LICENSE_EXPIRED` — renew copy |
-| `DW-REV0K-00000-00000-00000` | `KEY_REVOKED` — contact-support copy |
-| `DW-TAKEN-00000-00000-00000` | `DEVICE_SLOT_TAKEN` — move-license copy |
+| `DB-TESTS-DEM00-PR000-C0DE0` | Activates — **Lifetime** tier |
+| `DB-Y0RKE-DEM00-PR000-C0DE0` | Activates — **Yearly** tier (expires in 365 days) |
+| `DB-WR0NG-00000-00000-00000` | `KEY_NOT_FOUND` — invalid key copy |
+| `DB-EXP1R-00000-00000-00000` | `LICENSE_EXPIRED` — renew copy |
+| `DB-REV0K-00000-00000-00000` | `KEY_REVOKED` — contact-support copy |
+| `DB-TAKEN-00000-00000-00000` | `DEVICE_SLOT_TAKEN` — move-license copy |
 
 ## Layout
 

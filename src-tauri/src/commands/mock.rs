@@ -444,13 +444,13 @@ pub async fn activate_license(s: State<'_, SharedState>, key: String) -> Result<
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    // Shape: DW prefix + 20 Crockford base32 chars (no I/L/O/U) — the
+    // Shape: DB prefix + 20 Crockford base32 chars (no I/L/O/U) — the
     // same contract as the frontend normalize (lib/licenseKey.ts) and
     // the future server's normalized-hash form.
     const CROCKFORD: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     let body: String = normalized[2..].to_string();
     if normalized.len() != 22
-        || !normalized.starts_with("DW")
+        || !normalized.starts_with(dw_license::KEY_PREFIX)
         || !body.chars().all(|c| CROCKFORD.contains(c))
     {
         return Err("BAD_REQUEST. The license key format is invalid.".into());

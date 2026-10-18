@@ -151,7 +151,7 @@ impl LicenseManager {
         let expected_hw = facts.hardware_hash;
         let claims = dw_license::token::verify_token(
             token,
-            dw_license::protocol::LICENSE_PUBLIC_KEY_HEX,
+            dw_license::LICENSE_PUBLIC_KEY_HEX,
             &sha256_hex(&normalize_key(key)),
             &expected_hw,
             "windows",
