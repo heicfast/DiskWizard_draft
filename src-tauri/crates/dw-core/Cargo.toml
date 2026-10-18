@@ -42,3 +42,5 @@ match_same_arms = "allow"
 items_after_statements = "allow"
 must_use_candidate = "allow"
 let_underscore_untyped = "allow"
+# assert!(x.is_empty()) is the idiomatic test form we want.
+assert_is_empty = "allow"

@@ -160,6 +160,13 @@ pub fn probe_filesystem(dev: &dyn BlockDevice) -> CoreResult<FsKind> {
                 return Ok(FsKind::Refs);
             }
         }
+        // Unlabeled-but-valid BPB → FAT family (real-world mkfs writes
+        // the label, but damaged/floppy images skip it).
+        if crate::fs::fat::FatBoot::parse(&sector).is_ok() {
+            if let Ok(boot) = crate::fs::fat::FatBoot::parse(&sector) {
+                return Ok(boot.variant);
+            }
+        }
     }
     Ok(FsKind::Raw)
 }

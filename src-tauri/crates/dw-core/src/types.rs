@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 
 /// Filesystem kinds the engines cover (`FileSystemKind` in the UI
 /// contract; codes follow the vendor FS-code table where sensible).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub enum FsKind {
+    #[default]
     Fat12,
     Fat16,
     Fat32,
