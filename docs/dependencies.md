@@ -67,3 +67,18 @@ latest-stable, verified above.
   a tracked TODO for the hardening phase — see docs/TODO.md).
 - `npm ci --no-audit --no-fund` in workflows (audit deferred with the
   same ticket).
+
+## Fuzzing toolchain (added 2026-10-18, session 6)
+
+| Tool | Version | Verified |
+|---|---|---|
+| cargo-fuzz (CLI) | 0.13.2 | `cargo install cargo-fuzz --locked` (latest at install) |
+| libfuzzer-sys | 0.4.13 | crates.io index (latest stable) |
+| Rust nightly | rustc 1.90.0-nightly | the sanitizer profile cargo-fuzz requires |
+
+The fuzz crate (`src-tauri/crates/dw-core/fuzz`) is a detached
+workspace with ten whole-engine targets (carve + every filesystem
+engine + partition tables + repair diagnosis + the full scan
+pipeline) over a read-only device whose bytes ARE the fuzz input —
+the hostile-media threat model. `.github/workflows/fuzz.yml` runs
+them on every push (90 s/target) and deep weekly (Sundays).

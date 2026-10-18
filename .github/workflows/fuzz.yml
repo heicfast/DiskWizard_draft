@@ -1,0 +1,61 @@
+name: Fuzz
+
+# SOP §12.3: cargo-fuzz on every parser — zero panics, zero unbounded
+# allocations. Short runs ride every push; the weekly schedule goes
+# deep. Crash artifacts upload for triage.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        default: "90"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 0" # Sundays 03:00 UTC — the deep run
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: cargo-fuzz / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [carve, ntfs, fat, exfat, ext, hfsplus, refs, partition, repair, scan_pipeline]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (nightly — the sanitizer profile)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri/crates/dw-core/fuzz
+
+      - name: Install cargo-fuzz (latest)
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          $seconds = "${{ github.event.inputs.seconds }}"
+          if (-not $seconds) { $seconds = "90" }
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$seconds -rss_limit_mb=4096 -timeout=10 -max_len=1048576 -dict=dw.dict
+        shell: pwsh
+        working-directory: src-tauri/crates/dw-core/fuzz
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: src-tauri/crates/dw-core/fuzz/artifacts
+          if-no-files-found: ignore

@@ -1,0 +1,89 @@
+[package]
+name = "dw-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.dw-core]
+path = ".."
+
+# The fuzz crate is its OWN workspace (detached from the app-crate
+# workspace above) — cargo-fuzz drives it with the nightly sanitizer
+# profile from this directory.
+[workspace]
+
+[[bin]]
+name = "carve"
+path = "fuzz_targets/carve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs"
+path = "fuzz_targets/ntfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat"
+path = "fuzz_targets/fat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exfat"
+path = "fuzz_targets/exfat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ext"
+path = "fuzz_targets/ext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hfsplus"
+path = "fuzz_targets/hfsplus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "refs"
+path = "fuzz_targets/refs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partition"
+path = "fuzz_targets/partition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repair"
+path = "fuzz_targets/repair.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scan_pipeline"
+path = "fuzz_targets/scan_pipeline.rs"
+test = false
+doc = false
+bench = false
