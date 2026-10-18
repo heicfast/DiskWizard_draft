@@ -88,26 +88,36 @@
 | F15 | Fuzz harness usize-overflow abort → checked math + typed error | `74d599a` |
 | F16 | IOCP test vs VHD test race → VHD_LOCK serialization + divergence diagnostics | `74d599a` |
 | F17 | Tour silent skips + the swallowed `start_recovery` error (real users would stare at "Preparing…" forever) → t99-tour-fail loud frames + honest "Recovery Could Not Start" summary variant | `74d599a` |
+| F18 + the fuzz class | The "C:"-letter mkdir bug the t99 frame named on its first flight (`C::\DiskWizard Recovered…` → ERROR_INVALID_NAME) → letter normalization + coded error + windows-gated unit regression + the CI `--tests` gate for app-crate test code; five hostile-media guards (ntfs multiply, fat/exfat pre-read allocations, the read_bytes boundary, GPT salvage math) each with its catching regression | `604ee3d`, `cb3b712` |
 | §11 | Phase-7 multi-POV record + the reviews INDEX (every phase boundary mapped to its evidence) | `docs/reviews/` |
 
-## Verified state at session-6 close
+## Verified state at session-6 close — ALL SIX WORKFLOWS GREEN (aa82d57)
 
-- d71570d: CI ✅ / Windows Integration ✅ / MSIX ✅ / UI Screenshots ✅
-  (ext2 real-mkfs gate GREEN on the runner; bench recorded).
-- 609daae (F15+F16+F17): all six workflows in flight at report time —
-  the fuzz suite, the serialized integration, and the instrumented
-  tour are the three surfaces whose green runs close the cycle.
-- 137 dw-core + 27 dw-license engine tests; 73 web tests; tsc clean;
+- **The Real-Core Tour posted its FIRST GREEN RUN** — QA-1 closed
+  with release-truth evidence: 33/33 frames, `recovery root:
+  C:\DiskWizard Recovered 1792339399`, `present.txt: 1 MiB
+  byte-identical`, `gone.txt: 64 KiB byte-identical (DELETED file
+  recovered)`. The road there was the point: the tour caught F17 and
+  F18 on its first completing runs — the second named by the
+  t99-tour-fail instrumentation on its first flight.
+- **Fuzz green for the first time** — all ten targets with the
+  dictionary, after the five hostile-media guards; 307K–23M
+  executions per target locally + both crash-artifact replays
+  clean.
+- CI (incl. the new `--tests` app-crate gate), Windows Integration
+  (VHD byte-truth + IOCP equivalence + the §5.1-10 bench), MSIX, UI
+  Screenshots — green on the same SHA.
+- 141 dw-core + 27 dw-license engine tests; 73 web tests; tsc clean;
   fmt/clippy `-D warnings` clean on both Linux and the msvc
   cross-check (including `--all-targets` over the integration tests).
 
 ## What's next (updated priority order)
 
-1. **The tour's first green run** — the t99 instrumentation names the
-   broken stage if it fails again; fix that stage specifically. This
-   is the last release-evidence artifact (QA-1).
-2. Fuzz corpus growth + first crash-artifact triage (weekly deep runs
-   land artifacts automatically).
+1. ~~The tour's first green run~~ **DONE — QA-1 closed** (aa82d57,
+   byte-truth evidence in the QA register §6). Keep it green.
+2. Fuzz corpus growth + crash-artifact triage (weekly deep runs land
+   artifacts automatically); grow per-target budgets as the corpus
+   matures.
 3. HFS+ real-formatter fixture (hfsprogs) — the same soft-skip
    pattern as the ext2 gate; ReFS needs a Server-runner leg
    (Format-Volume) — both are coverage gaps no Linux runner can
