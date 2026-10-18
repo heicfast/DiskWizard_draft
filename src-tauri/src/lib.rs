@@ -14,7 +14,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
+// The command layer is the crate's IPC surface; `pub` so the live
+// license E2E test (tests/live_license_facts.rs) shares the exact
+// production facts-collection path (the donor's pattern).
+pub mod commands;
 
 use tauri::Manager;
 

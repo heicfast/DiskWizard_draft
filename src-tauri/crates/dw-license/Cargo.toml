@@ -27,9 +27,21 @@ default = ["client"]
 # The reqwest blocking transport (`http::ReqwestLicense`). Off = the
 # pure type/protocol/token surface only.
 client = ["dep:reqwest"]
+# The LIVE end-to-end license test (tests/live_license.rs): runs ONLY
+# when explicitly enabled (`cargo test --features live-license-e2e`),
+# never in the normal `cargo test` pass, never in NSIS/MSIX release
+# builds (the release pipelines never pass this feature). Compiled in
+# by the license-e2e workflow against the deployed worker — the
+# DiskGenie donor pattern (diskgenie-v2/src-tauri/tests/live_license.rs).
+live-license-e2e = ["client"]
 
 [dev-dependencies]
 tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "blocking",
+    "json",
+] }
 
 [lints.rust]
 unsafe_code = "forbid"

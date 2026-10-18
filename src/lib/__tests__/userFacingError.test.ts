@@ -43,6 +43,20 @@ describe("userFacingError", () => {
     );
   });
 
+  it("maps the marker-for contract the backend command layer emits", () => {
+    // The exact strings user_facing() produces (commands/real/license.rs)
+    // — the markers the activation dialog can receive from the real core.
+    expect(userFacingError("NETWORK. Network unavailable. DiskWizard keeps working offline.")).toBe(
+      "Could not reach the activation server. Check your connection and try again.",
+    );
+    expect(userFacingError("SERVER_ERROR. The license server had a problem. Try again in a moment.")).toBe(
+      "The license server had a problem. Try again in a moment.",
+    );
+    expect(
+      userFacingError("SPOOFED. The license server's response could not be verified. Reconnect and try again."),
+    ).toBe("The license server's response could not be verified. Reconnect and try again.");
+  });
+
   it("falls back to honest generic copy for unknown codes", () => {
     expect(userFacingError("SOMETHING_ELSE. ???")).toBe("Activation failed. Please try again.");
   });

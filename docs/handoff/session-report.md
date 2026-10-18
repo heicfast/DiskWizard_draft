@@ -125,3 +125,41 @@
 4. OQ-5 preview-cap decision + OQ-7 npm stack upgrade + QA-16 live
    license E2E (owner inputs).
 5. Phase-2 repair suite per `TODO/phase-2-advanced-repair.md`.
+
+---
+
+# Session 7 addendum (2026-10-19) — licensing live-E2E + the activation symptom, root-caused
+
+> Owner report: new keys activate "with no feedback and no D1 queries."
+> Root cause found by live probing; the donor's license testing stack
+> ported 1:1 with the E2E now running green against the production
+> worker.
+
+## What landed (session 7)
+
+| Area | Deliverable | Evidence |
+|---|---|---|
+| Root cause | The tested build was pre-§8 (or pre-rebuild): it hit the dead `diskwizard-license…` hostname (Cloudflare 1042) — vague error, zero D1 writes. Current main's wire format is PROVEN live (scripted probe + Rust E2E → 200 + token + device row + audit). One early-probe token mismatched the embedded pubkey while all later tokens verify — the worker was redeployed/re-secreted mid-session; the donor's soft-spoof policy covers exactly this window | probe scripts + this session's worklog |
+| QA-16 CLOSED | The LIVE lifecycle E2E ported 1:1 (`dw-license/tests/live_license.rs`): generate → activate → verify Ed25519 against the production pubkey → revalidate-with-changed-facts (wipe regression) → slot rule → deactivate/re-register → revoke; PASSED live twice | run output in the session worklog |
+| Real-device leg | `src-tauri/tests/live_license_facts.rs` (Windows runner): determinism, sanitation, REAL-claim round-trip field-for-field, pure-refresh, cleanup | CI: `license-e2e.yml` |
+| Workflow parity | `.github/workflows/license-e2e.yml` (donor shape: windows-latest, secret guard, both legs, health check); `LIVE_ADMIN_KEY` registered via the encrypted GitHub secrets API | Actions secret list |
+| Donor behaviors | activation retry/backoff (Network/ServerError, 2× jittered; RATE_LIMITED never), soft-spoof validate (rotation window safe), shared `collect_device_facts()` path | `commands/real/license.rs` |
+| UX honesty | `userFacingError` maps SPOOFED/NETWORK/SERVER_ERROR to typed copy (the "says nothing" fix) + 3 pinning tests | `src/lib/userFacingError.ts` |
+
+## Verified state at session-7 close
+
+- fmt/clippy(`-D warnings`, incl. the e2e feature)/tsc clean; 141+27
+  engine tests; 74 web tests; live E2E green ×2 against the deployed
+  worker; the new workflow dispatches on every push to main.
+
+## What the owner should do
+
+1. **Rebuild from current main** (`npm run tauri dev` or the NSIS/MSIX
+   artifact from the latest run) — the binary you tested predates the
+   §8 re-point. Then activate the key you created: expect the success
+   state + a new D1 devices row within seconds.
+2. Keep `LIVE_ADMIN_KEY` in the repo secrets for the live E2E (rotate
+   the admin key on the worker + the secret together if it ever leaks).
+3. The worker redeploy mid-session (signing-key change) is benign for
+   activated installs — the soft-spoof policy holds grace; new
+   activations verify against the current key.

@@ -743,6 +743,7 @@ dependencies = [
  "dw-license",
  "dw-win",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",

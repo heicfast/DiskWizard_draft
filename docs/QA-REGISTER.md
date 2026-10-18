@@ -196,10 +196,23 @@ release).
   one-file change (the fresh DiskWizard keypair from the
   DISKWIZARD_LICENSE_SECRETS handoff is the swap target, not the
   current key).
-- **QA-16 (deployment)**: the live E2E (activate/validate/deactivate
-  against the real DiskGenie Worker with a real DB- key) has not been
-  run — until the owner issues a DB-key for a test activation, the CI
-  license tests use fake transports only.
+- **QA-16 (deployment)**: ✅ **CLOSED (session 7)** — the live E2E now
+  runs against the real DiskGenie Worker with self-minted DB-keys:
+  `crates/dw-license/tests/live_license.rs` (the donor's lifecycle
+  test ported 1:1 — admin-generate → activate → verify the Ed25519
+  token against the production public key → revalidate with changed
+  facts → wipe-regression assert → slot rule → deactivate → revoke)
+  PASSED twice locally against the deployed worker, and
+  `.github/workflows/license-e2e.yml` runs BOTH legs on every push to
+  main on a Windows runner (lifecycle + the real-device-facts
+  round-trip in `src-tauri/tests/live_license_facts.rs`). The admin
+  bearer lives in the repo Actions secret `LIVE_ADMIN_KEY` (set via
+  the encrypted GitHub secrets API — never in code; the repo is
+  public). Session-7 investigation finding: the owner's morning
+  symptom ("activate → nothing, no D1 queries") traced to a stale
+  pre-§8 build hitting the dead `diskwizard-license…` hostname
+  (Cloudflare 1042) — the current main wiring is proven
+  end-to-end live.
 - Free-tier boundary verified: only `smart_report`,
   `list_devices`/`refresh_devices`, settings and `get_dev_hooks` are
   ungated; every scan/recovery/session command passes

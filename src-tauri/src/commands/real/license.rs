@@ -114,35 +114,11 @@ impl LicenseManager {
     }
 
     /// Collect this machine's device facts (best-effort strings;
-    /// binding inputs required).
+    /// binding inputs required) — the shared [`collect_device_facts`]
+    /// path (command layer AND the live E2E test, so what CI proves is
+    /// what production sends — the DiskGenie donor pattern).
     fn device_facts() -> Result<DeviceFacts, String> {
-        #[cfg(windows)]
-        {
-            use dw_license::hwid::HwIdProvider;
-            let p = dw_win::license_plat::WinHwId;
-            Ok(DeviceFacts {
-                platform: "windows".into(),
-                hardware_hash: dw_license::hwid::hardware_id_from(&p)?,
-                hostname: dw_win::license_plat::hostname(),
-                os_version: dw_win::license_plat::os_version(),
-                app_version: env!("CARGO_PKG_VERSION").into(),
-                comp_machine: dw_license::hwid::component_hash("machine:", p.machine_guid().ok()),
-                comp_volume: dw_license::hwid::component_hash(
-                    "volume:",
-                    p.system_drive_serial().ok().map(|s| s.to_string()),
-                ),
-                comp_cpu: dw_license::hwid::component_hash("cpu:", p.cpuid_brand().ok()),
-                cpu_brand: p.cpuid_brand().ok(),
-                ram_mb: dw_win::license_plat::ram_mb(),
-                machine_model: dw_win::license_plat::machine_model(),
-                cpu_cores: dw_win::license_plat::cpu_cores(),
-                arch: Some(std::env::consts::ARCH.into()),
-            })
-        }
-        #[cfg(not(windows))]
-        {
-            Err("DEVICE_FACTS_UNAVAILABLE. Licensing requires Windows.".into())
-        }
+        collect_device_facts()
     }
 
     /// Apply a server response token: verify locally, persist.
@@ -173,7 +149,12 @@ impl LicenseManager {
         Ok(())
     }
 
-    /// The activate round-trip.
+    /// The activate round-trip — the donor's transport policy: retry
+    /// the round-trip on Network/ServerError (two quick retries with
+    /// jittered backoff when the edge blips). RATE_LIMITED deliberately
+    /// does NOT retry: each attempt consumes another window slot, and
+    /// the hourly window cannot expire inside a seconds-scale retry
+    /// loop — the typed copy ("wait a minute") is the honest response.
     pub fn activate(&self, key: &str) -> Result<Value, String> {
         let normalized = normalize_key(key);
         if !key_shape_valid(&normalized) {
@@ -181,7 +162,22 @@ impl LicenseManager {
         }
         let facts = Self::device_facts()?;
         let api = LicenseApi::new(ReqwestLicense::new().map_err(String::from)?);
-        match api.activate(&normalized, &facts) {
+        let mut attempt = 0u32;
+        let mut outcome = api.activate(&normalized, &facts);
+        while matches!(
+            &outcome,
+            Err(e) if matches!(e, LicenseError::Network | LicenseError::ServerError) && attempt < 2
+        ) {
+            attempt += 1;
+            let jitter = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::from(d.subsec_nanos() % 150));
+            std::thread::sleep(std::time::Duration::from_millis(
+                250 * u64::from(attempt) + jitter,
+            ));
+            outcome = api.activate(&normalized, &facts);
+        }
+        match outcome {
             Ok(dto) => {
                 self.apply_token(&normalized, &dto.token)
                     .map_err(|e| user_facing(&e))?;
@@ -224,12 +220,20 @@ impl LicenseManager {
         };
         let api = LicenseApi::new(ReqwestLicense::new().map_err(String::from)?);
         match api.validate(&st.license_key, &facts) {
-            Ok(dto) => {
-                self.apply_token(&st.license_key, &dto.token)
-                    .map_err(|e| user_facing(&e))?;
-                self.persist();
-                Ok(self.status_json())
-            }
+            Ok(dto) => match self.apply_token(&st.license_key, &dto.token) {
+                Ok(()) => {
+                    self.persist();
+                    Ok(self.status_json())
+                }
+                // Spoofed/rotation-mismatch is deliberately SOFT here —
+                // grace continues with the timestamps frozen; the stored
+                // token's own `exp` is the hard stop. This is the honest
+                // choice during a server key rotation, where a stale app
+                // build would otherwise mass-deactivate (the DiskGenie
+                // donor's validate_cycle policy, proven live through the
+                // rotation window).
+                Err(_) => Ok(self.status_json()),
+            },
             Err(e) if e.is_hard() => {
                 // Hard failures deactivate locally (doc §6).
                 *self.state.write() = LicenseState::default();
@@ -258,6 +262,48 @@ impl LicenseManager {
 impl Default for LicenseManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Collect this machine's REAL device claim (the DiskGenie donor's
+/// `collect_device_facts`): the composite fingerprint first (its
+/// failure is an activation error — activation must not proceed with
+/// a soft identity), then every best-effort descriptive fact, each
+/// independently `None` when unreadable (the server COALESCEs; a
+/// missing fact never blanks a stored one). The command layer AND the
+/// live E2E test (`src-tauri/tests/live_license_facts.rs`) share this
+/// exact path, so what CI proves is what production sends.
+///
+/// # Errors
+/// String error when the composite hardware-identity inputs are
+/// unreadable, or off-Windows (licensing requires Windows).
+pub fn collect_device_facts() -> Result<DeviceFacts, String> {
+    #[cfg(windows)]
+    {
+        use dw_license::hwid::HwIdProvider;
+        let p = dw_win::license_plat::WinHwId;
+        Ok(DeviceFacts {
+            platform: "windows".into(),
+            hardware_hash: dw_license::hwid::hardware_id_from(&p)?,
+            hostname: dw_win::license_plat::hostname(),
+            os_version: dw_win::license_plat::os_version(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            comp_machine: dw_license::hwid::component_hash("machine:", p.machine_guid().ok()),
+            comp_volume: dw_license::hwid::component_hash(
+                "volume:",
+                p.system_drive_serial().ok().map(|s| s.to_string()),
+            ),
+            comp_cpu: dw_license::hwid::component_hash("cpu:", p.cpuid_brand().ok()),
+            cpu_brand: p.cpuid_brand().ok(),
+            ram_mb: dw_win::license_plat::ram_mb(),
+            machine_model: dw_win::license_plat::machine_model(),
+            cpu_cores: dw_win::license_plat::cpu_cores(),
+            arch: Some(std::env::consts::ARCH.into()),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Err("DEVICE_FACTS_UNAVAILABLE. Licensing requires Windows.".into())
     }
 }
 

@@ -588,3 +588,66 @@ permanently. ALL SIX workflows green on consecutive SHAs (aa82d57,
 lucky), the Fuzz suite green with the regression seed in-corpus.
 Register F13–F19, §6 snapshot, session report, and this log carry the
 verbatim evidence chains. Session complete per §17.
+
+## Session 7 (2026-10-19) — the licensing live-E2E port + the owner's activation symptom, root-caused
+
+Owner report: "after connecting diskgenie's server, when I create a
+new license key and use it in DiskWizard it says nothing — and I see
+no queries on the database." Task: study DiskGenie's implementation,
+fix it, and copy the license testing workflow + tests 1:1 with full
+production setup.
+
+Investigation (evidence-first, all against the LIVE worker):
+- The deployed worker is healthy (v3 health, admin API answers) and
+  accepts the exact §8 wire format: a scripted probe (same HMAC
+  headers/UA/secret as `dw-license/src/protocol.rs`) activated a
+  self-minted key → 200 + token + D1 device row + audit event. The
+  wire path in current main is CORRECT.
+- The owner's symptom reproduced only against the PRE-§8 wiring: the
+  old endpoint `diskwizard-license…workers.dev` answers Cloudflare
+  "error code: 1042" (route dead) — an older build's activation dies
+  there with a vague ServerError and NEVER touches the DiskGenie D1.
+  Conclusion: the tested build predates the §8 re-point (86f013d) or
+  was built from it — rebuild from current main.
+- Signing-key observation: one early probe token failed verification
+  against the embedded pubkey while every later token (the Rust live
+  E2E + fresh validates) verifies — the deployed worker was
+  redeployed/re-secreted during the session window (Cloudflare
+  gradual deployment explains the split). The donor's soft-spoof
+  validate policy exists precisely for this window — now ported.
+
+What landed (the donor 1:1 port, `diskgenie-v2` → DiskWizard):
+- `crates/dw-license/tests/live_license.rs` — the LIVE lifecycle E2E
+  (feature `live-license-e2e`): admin-generate → activate with the
+  full claim → verify the Ed25519 token against the production public
+  key → revalidate with CHANGED facts (the v1 wipe regression, LIVE)
+  → slot rule → deactivate frees the slot → re-register → revoke →
+  revoked-validation hard-fails. PASSED live twice locally.
+- `src-tauri/tests/live_license_facts.rs` — the REAL-device leg
+  (Windows runner): fingerprint determinism across two collections,
+  fact sanitation, activate with the REAL claim, admin-lookup asserts
+  field-for-field equality (the "hashes match" proof), pure-refresh
+  revalidate, deactivate + revoke cleanup.
+- `.github/workflows/license-e2e.yml` — the donor's workflow shape:
+  windows-latest, `LIVE_ADMIN_KEY` repo secret (set via the encrypted
+  GitHub secrets API — registered, never in code), secrets-guard
+  skip, both test legs, post-run health check. Runs on every push.
+- `LicenseManager::activate` — the donor's transport policy: two
+  jittered retries on Network/ServerError; RATE_LIMITED never retries
+  (window slots).
+- `LicenseManager::validate` — the donor's soft-spoof policy: a
+  response that fails local verification keeps grace frozen (the
+  stored token's `exp` is the hard stop) — a server key rotation can
+  no longer mass-deactivate the fleet mid-window.
+- `collect_device_facts()` — the donor's shared-path pattern: the
+  command layer AND the live E2E use ONE collection function (`pub`
+  through `commands::`), so CI proves exactly what production sends.
+- UI `userFacingError` — SPOOFED / NETWORK / SERVER_ERROR markers now
+  map to honest typed copy (the "it says nothing" fix: every state
+  the backend can emit lands as actionable text, never the generic
+  lie). +3 vitest cases pinning the exact backend strings.
+
+Gates: fmt clean; clippy `-D warnings` clean (default AND with
+`live-license-e2e`); 141 dw-core + 27 dw-license tests; 74 web tests;
+tsc clean; YAML validated; live E2E green ×2. QA-16 CLOSED with the
+run evidence (docs/QA-REGISTER.md §3).

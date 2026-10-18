@@ -82,3 +82,19 @@ engine + partition tables + repair diagnosis + the full scan
 pipeline) over a read-only device whose bytes ARE the fuzz input —
 the hostile-media threat model. `.github/workflows/fuzz.yml` runs
 them on every push (90 s/target) and deep weekly (Sundays).
+
+## Live license E2E toolchain (added 2026-10-19, session 7)
+
+No new external dependencies: the E2E reuses the existing `reqwest
+0.13.5` (rustls + blocking), `serde_json 1.0.154` and
+`ed25519-dalek 3.0.0`. Two additions, same versions as the existing
+record:
+
+| Dependency | Resolved | Registry latest | Verified |
+|---|---|---|---|
+| reqwest (dev-dep, app crate) | 0.13.5 | 0.13.5 | ✅ same version as dw-license `client` — the live E2E admin client (`src-tauri/tests/live_license_facts.rs`) |
+| reqwest (dev-dep, dw-license) | 0.13.5 | 0.13.5 | ✅ the lifecycle test's admin client (`crates/dw-license/tests/live_license.rs`) |
+
+Verification method: `cargo tree -i reqwest` (single 0.13.5 across the
+workspace) + the local live run against the deployed worker (both E2E
+legs PASS, 2026-10-19).

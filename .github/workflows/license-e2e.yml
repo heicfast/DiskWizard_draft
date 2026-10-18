@@ -1,0 +1,87 @@
+name: License E2E (live worker)
+
+# The REAL-FLOW license verification (the DiskGenie donor's
+# license-e2e workflow, ported 1:1): on every push, a Windows runner
+# runs the Rust license client end-to-end against the DEPLOYED
+# Cloudflare worker —
+#
+#   admin-generate a throwaway key → activate with the full device
+#   claim → verify the Ed25519 token against the compiled-in PRODUCTION
+#   public key → revalidate with changed facts → admin-lookup and
+#   assert the device row kept them (the v1 wipe regression, LIVE) →
+#   assert the one-slot-per-platform rule → deactivate → assert the
+#   slot freed → revoke for cleanup. The second leg collects the REAL
+#   device facts on the runner itself (determinism + field-for-field
+#   round-trip).
+#
+# The admin key lives in the repo secret LIVE_ADMIN_KEY (set in repo
+# Settings → Secrets and variables → Actions; the repo is public, so
+# the secret store — not the code — is the only place it may live).
+# Until it is set, the job exits green with a "skipped" notice
+# (secrets-presence guard), so a fresh clone never fails on missing
+# secrets.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: license-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: "Run the live license lifecycle test (dw-license)"
+        # The feature gates tests/live_license.rs to nothing in every
+        # other build; option_env! reads the admin key at compile time
+        # (same step), the test reads DISKWIZARD_LIVE_LICENSE_E2E at
+        # run time. Key material is never printed (only the last-4).
+        env:
+          DISKWIZARD_LIVE_ADMIN_KEY: ${{ secrets.LIVE_ADMIN_KEY }}
+          DISKWIZARD_LIVE_LICENSE_E2E: "1"
+        shell: pwsh
+        run: |
+          if (-not $env:DISKWIZARD_LIVE_ADMIN_KEY) {
+            Write-Host "::notice::LIVE_ADMIN_KEY secret not set — skipping the live E2E (set it in repo Settings → Secrets and variables → Actions)."
+            exit 0
+          }
+          cargo test --manifest-path src-tauri/Cargo.toml -p dw-license --features live-license-e2e --test live_license -- --nocapture
+
+      - name: "Run the real-device-facts test (app crate)"
+        # The REAL collection path the activation command uses:
+        # determinism + sanitize + activate + field-for-field round-trip.
+        env:
+          DISKWIZARD_LIVE_ADMIN_KEY: ${{ secrets.LIVE_ADMIN_KEY }}
+          DISKWIZARD_LIVE_LICENSE_E2E: "1"
+        shell: pwsh
+        run: |
+          if (-not $env:DISKWIZARD_LIVE_ADMIN_KEY) {
+            exit 0
+          }
+          cargo test --manifest-path src-tauri/Cargo.toml -p diskwizard --features live-license-e2e --test live_license_facts -- --nocapture
+
+      - name: Post-run health check
+        shell: pwsh
+        run: |
+          try {
+            $h = Invoke-RestMethod -Uri "https://diskbytes-license.heictojpg-pics.workers.dev/v1/health" -TimeoutSec 20
+            Write-Host "worker healthy: version=$($h.version)"
+          } catch {
+            Write-Host "::warning::health check failed: $_"
+          }
