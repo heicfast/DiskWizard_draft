@@ -511,6 +511,70 @@ impl NtfsEngine {
         None
     }
 
+    /// Load the volume $Bitmap (cluster-allocation bits) from MFT
+    /// record 6 — the `CNTFSBuildVolumeBitmap` role (research:
+    /// `ntfs-engine-algorithms-v2--deleted-viability.md` §1/§3).
+    ///
+    /// Bounded and conservative: never larger than
+    /// `ceil(total_clusters / 8)`, never above 128 MiB, and ANY
+    /// failure (missing record, damaged runlist, read error) → `None`
+    /// — the deleted-viability destroy rule only fires with a VALID
+    /// bitmap, so unverifiable always means "keep the candidate".
+    fn load_volume_bitmap(&self) -> Option<Vec<u8>> {
+        let spc = u64::from(self.boot.sectors_per_cluster.max(1));
+        let total_clusters = self.boot.total_sectors / spc;
+        let expected = usize::try_from(total_clusters.div_ceil(8)).ok()?;
+        if expected == 0 || expected > 128 * 1024 * 1024 {
+            return None;
+        }
+        let offset = self.record_offset(6)?;
+        let rec = RawRecord::read(
+            &*self.dev,
+            offset,
+            self.boot.mft_record_size,
+            self.boot.bytes_per_sector,
+        )
+        .ok()?;
+        for attr in iter_attrs(&rec.data) {
+            if attr.kind != ATTR_DATA || attr.name.is_some() {
+                continue;
+            }
+            if let Some(r) = attr.resident {
+                // Tiny volumes keep the bitmap resident.
+                let mut bm = vec![0u8; expected];
+                let n = r.len().min(expected);
+                bm[..n].copy_from_slice(&r[..n]);
+                return Some(bm);
+            }
+            let rl = attr.runlist?;
+            let extents =
+                decode_runlist(rl, self.boot.cluster_size(), total_clusters.max(1)).ok()?;
+            let mut bm = vec![0u8; expected];
+            let ss = u64::from(self.boot.bytes_per_sector);
+            let mut pos = 0usize;
+            'outer: for e in extents {
+                let mut off = e.offset;
+                let end = e.offset + e.len;
+                while off < end {
+                    // Extent bounds are cluster multiples → sector
+                    // multiples; chunk at 256 KiB to bound each read.
+                    let take = ((end - off).min(256 * 1024)) as usize;
+                    let take = take.min(expected - pos);
+                    if take == 0 {
+                        break 'outer;
+                    }
+                    self.dev
+                        .read_sectors(off / ss, &mut bm[pos..pos + take])
+                        .ok()?;
+                    pos += take;
+                    off += take as u64;
+                }
+            }
+            return Some(bm);
+        }
+        None
+    }
+
     /// Total records addressable by the MFT extents.
     #[must_use]
     fn record_count(&self) -> u64 {
@@ -533,6 +597,9 @@ impl NtfsEngine {
         // overkill; single pass resolves most parents because names
         // are stored IN the child's $FILE_NAME, not the parent's).
         let mut batch_check = 0u64;
+        // Lazily-loaded volume $Bitmap for the QA-4 deleted-viability
+        // walk (outer Option = "computed", inner = "loaded OK").
+        let mut bitmap_cache: Option<Option<Vec<u8>>> = None;
         for record_no in 0..total {
             batch_check += 1;
             if batch_check >= 512 {
@@ -655,6 +722,62 @@ impl NtfsEngine {
             } else {
                 NodeOrigin::Deleted
             };
+            // ── QA-4: deleted-viability $Bitmap scoring (research:
+            // ntfs-engine-algorithms-v2 §1) ──────────────────────
+            // A DELETED non-directory file ≥ 1 KiB whose unnamed
+            // $DATA clusters ALL read as allocated in the live
+            // $Bitmap has been fully re-used since deletion — the
+            // content is gone, destroy the candidate. Partially
+            // re-used files stay (the "possibly damaged but listed"
+            // UX) with confidence scaled by the intact fraction.
+            // Small files (< 0x3FF, usually resident) and system
+            // ($-prefixed) records skip the cluster walk entirely.
+            // A cluster outside the bitmap's coverage marks the
+            // candidate unverifiable → conservative KEEP.
+            let mut destroyed = false;
+            let mut partial_confidence: Option<u8> = None;
+            if origin == NodeOrigin::Deleted
+                && !is_dir
+                && names.iter().any(|(_, n)| !n.starts_with('$'))
+                && let Some((_, size, extents, _)) =
+                    data_streams.iter().find(|(sn, _, _, _)| sn.is_none())
+                && *size >= 0x3FF
+                && !extents.is_empty()
+            {
+                if bitmap_cache.is_none() {
+                    bitmap_cache = Some(self.load_volume_bitmap());
+                }
+                if let Some(bitmap) = bitmap_cache.as_ref().and_then(Option::as_deref) {
+                    let cs = cluster.max(1);
+                    let mut total = 0u64;
+                    let mut reused = 0u64;
+                    let mut unverifiable = false;
+                    'runs: for e in extents {
+                        let first = e.offset / cs;
+                        let count = e.len / cs;
+                        for c in first..first + count {
+                            if c / 8 >= bitmap.len() as u64 {
+                                unverifiable = true;
+                                break 'runs;
+                            }
+                            total += 1;
+                            if bitmap[(c / 8) as usize] & (1 << (c % 8)) != 0 {
+                                reused += 1;
+                            }
+                        }
+                    }
+                    if !unverifiable && total > 0 && reused == total {
+                        destroyed = true; // every cluster re-allocated
+                    } else if !unverifiable && reused > 0 {
+                        let intact = total - reused;
+                        partial_confidence =
+                            Some(u8::try_from(40 + (60 * intact) / total).unwrap_or(100));
+                    }
+                }
+            }
+            if destroyed {
+                continue; // fully re-used since deletion — no content left
+            }
             for (parent, name) in names {
                 let display_name = name.clone();
                 let mut entry = FoundEntry::structured(display_name, is_dir, FsKind::Ntfs);
@@ -679,7 +802,13 @@ impl NtfsEngine {
                             timestamps: times,
                             origin,
                             extents: extents.clone(),
-                            confidence: if *compressed { 70 } else { 100 },
+                            confidence: {
+                                let base = if *compressed { 70 } else { 100 };
+                                match partial_confidence {
+                                    Some(pc) => pc.min(base),
+                                    None => base,
+                                }
+                            },
                             category_hint: None,
                             dimensions: None,
                             content_key: None,
@@ -967,6 +1096,74 @@ mod tests {
         let readme_entry = sink.0.iter().find(|e| e.name == "readme.txt").unwrap();
         assert_eq!(readme_entry.extents, vec![Extent::new(100 * 512, 1024)]);
         assert_eq!(readme_entry.size, 1024);
+    }
+
+    #[test]
+    fn qa4_deleted_viability_bitmap_scoring() {
+        // Research: ntfs-engine-algorithms-v2 §1 — a deleted file whose
+        // data-run clusters ALL read as allocated in the live $Bitmap
+        // was fully re-used since deletion: destroyed. Partially
+        // re-used: kept ("possibly damaged but listed") with confidence
+        // scaled by the intact fraction. Intact: kept at full
+        // confidence. Small (<1 KiB) and $-system files: no cluster
+        // validation at all.
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let boot = boot_sector_template();
+        ram.data[..512].copy_from_slice(&boot);
+        let root = mft_record(0x0003, 5, ".", None);
+        // All deleted, parent 5, sizes ≥ 0x3FF except small.log.
+        let gone = mft_record(0x0000, 5, "gone.log", Some(([0x11, 0x02, 50], 1024)));
+        let partial = mft_record(0x0000, 5, "partial.log", Some(([0x11, 0x02, 60], 1024)));
+        let intact = mft_record(0x0000, 5, "intact.log", Some(([0x11, 0x02, 70], 1024)));
+        let small = mft_record(0x0000, 5, "small.log", Some(([0x11, 0x01, 80], 512)));
+        let journal = mft_record(0x0000, 5, "$Journal", Some(([0x11, 0x02, 90], 1024)));
+        let mft_base = 16 * 512;
+        ram.data[mft_base..mft_base + 512].copy_from_slice(&mft_record0(16, 32));
+        ram.data[mft_base + 5 * 512..mft_base + 6 * 512].copy_from_slice(&root);
+        // Record 6 IS $Bitmap on a real volume (no $FILE_NAME → the
+        // walk skips it; the viability loader reads its $DATA). LCN
+        // 120 — runlist offsets are SIGNED-byte deltas, so fixtures
+        // must stay under 128.
+        ram.data[mft_base + 6 * 512..mft_base + 7 * 512].copy_from_slice(&mft_record0(120, 1));
+        ram.data[mft_base + 7 * 512..mft_base + 8 * 512].copy_from_slice(&gone);
+        ram.data[mft_base + 8 * 512..mft_base + 9 * 512].copy_from_slice(&partial);
+        ram.data[mft_base + 9 * 512..mft_base + 10 * 512].copy_from_slice(&intact);
+        ram.data[mft_base + 10 * 512..mft_base + 11 * 512].copy_from_slice(&small);
+        ram.data[mft_base + 11 * 512..mft_base + 12 * 512].copy_from_slice(&journal);
+        // The bitmap at LCN 120 (512 B = 4096 clusters): 50+51
+        // allocated (gone destroyed); 60 only (partial → 70);
+        // 70/71 free (intact); 80 allocated (small under the size
+        // gate regardless); 90+91 allocated ($Journal skips via the
+        // $ fast path).
+        let mut bitmap = [0u8; 512];
+        for c in [50u64, 51, 60, 80, 90, 91] {
+            bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
+        }
+        ram.data[120 * 512..120 * 512 + 512].copy_from_slice(&bitmap);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = NtfsEngine::new(dev).expect("engine");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        engine
+            .quick_scan(&mut sink, &ScanControl::new())
+            .expect("scan");
+        let find = |n: &str| sink.0.iter().find(|e| e.name == n);
+        assert!(find("gone.log").is_none(), "fully re-used → destroyed");
+        let p = find("partial.log").expect("partially re-used → kept");
+        assert_eq!(p.origin, NodeOrigin::Deleted);
+        assert_eq!(p.confidence, 70, "intact 1/2 → 40 + 60×(1/2)");
+        let i = find("intact.log").expect("intact → kept");
+        assert_eq!(i.confidence, 100);
+        let s = find("small.log").expect("under the size gate → kept");
+        assert_eq!(s.confidence, 100);
+        let j = find("$Journal").expect("system $ fast path → kept");
+        assert_eq!(j.confidence, 100);
     }
 
     /// A record whose $DATA is RESIDENT (inline content) — the
