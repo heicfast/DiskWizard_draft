@@ -41,28 +41,52 @@ the sibling suites and cross-referenced here rather than duplicated:
   (`integration.rs::vhd_end_to_end`): scan → recover → byte-compare
   against the seeded ground truth, including the deleted file.
 
-## Results — windows-latest runner (ephemeral SSD, VHD 256 MiB)
+## Results — Windows 2025 runner (windows-2025-vs2026 image, DWTEST VHD on PhysicalDrive2)
 
-Recorded from the `windows-integration` run on commit `0f2d98e`+ (the
-first run carrying the bench step; latest run link in the workflow
-history — the table below is transcribed verbatim from the
-`§5.1-10 IO backend benchmark` step log).
+Recorded verbatim from the `§5.1-10 IO backend benchmark` step of the
+`windows-integration` run on commit `d71570d` (run 39137841845, job
+`end-to-end (scan + recover)`, 2026-10-18). Device: the attached
+DWTEST VHD (256 MiB, 512 B sectors) — profiled flash-class
+(`ReadProfile { window_bytes: 8388608, queue_depth: 8 }`), span
+128 MiB per configuration.
 
 | window | QD | MiB/s | CPU s | ΔCPU/MiB | WS after (MiB) |
 |---:|---:|---:|---:|---:|---:|
-| 1024 KiB | 1 | _pending first run_ | | | |
-| 2048 KiB | 1 | | | | |
-| 2048 KiB | 2 | | | | |
-| 4096 KiB | 2 | | | | |
-| 4096 KiB | 4 | | | | |
-| 8192 KiB | 4 | | | | |
-| 8192 KiB | 8 | | | | |
-| 16384 KiB | 8 | | | | |
+| 1024 KiB | 1 | 1337 | 0.00 | 0.0000 | 9.7 |
+| 2048 KiB | 1 | 469 | 0.00 | 0.0000 | 9.7 |
+| 2048 KiB | 2 | 371 | 0.00 | 0.0000 | 9.7 |
+| 4096 KiB | 2 | 382 | 0.00 | 0.0000 | 9.7 |
+| 4096 KiB | 4 | 426 | 0.00 | 0.0000 | 9.7 |
+| 8192 KiB | 4 | 422 | 0.00 | 0.0000 | 9.7 |
+| 8192 KiB | 8 | 422 | 0.00 | 0.0000 | 9.7 |
+| 16384 KiB | 8 | 374 | 0.02 | 0.0001 | 9.7 |
 
-**Numbers land here within one CI cycle of the harness merge** — the
-session agent transcribes them from the run log (the instruction
-honesty rule: no fabricated benchmarks; the cells stay empty until a
-real run fills them).
+Final working set 9.7 MiB, lifetime peak RSS 137.7 MiB (the process
+peak includes the test harness build artifacts, not the sweep — the
+steady-state working set is flat across every configuration, which is
+the §5.1 item 7 memory-boundedness signal that matters).
+
+**Reading the numbers honestly** (the no-fabrication rule cuts both
+ways — no over-interpretation either):
+
+* The VHD is a FILE on the runner's SSD: reads traverse the runner's
+  OS file cache, not raw spindle/flash hardware. The 1024 KiB row's
+  1337 MiB/s is the warm-cache first sweep; the steady band for this
+  device is ~370–430 MiB/s, which is the runner's VHD stack's
+  ceiling, not the backend's.
+* The same run's IOCP equivalence test measured `sequential 4 MiB ×1:
+  2218 MiB/s; batched 4 MiB ×8: 1426 MiB/s` — on a cache-backed VHD
+  the deep queue ADDS overhead without device-level parallelism to
+  harvest (there is no seek to overlap). The queue-depth benefit is
+  a physical-HDD property; the correctness contract (batch ≡
+  sequential at any depth, byte-identical) is what this runner can
+  and does prove. Throughput on real HDD/NVMe media lands when the
+  tour fleet grows real-device hosts; the adaptive profiles below
+  stay inside the §5.1 bands so no retune is implied by the VHD
+  numbers.
+* CPU cost per MiB is ≤ 0.0001 s across the board — the pipeline is
+  completion-driven (IOCP), not spin-driven; queue depth 8 costs no
+  measurable CPU over queue depth 1.
 
 ## Chosen adaptive profiles (§5.1 item 5)
 

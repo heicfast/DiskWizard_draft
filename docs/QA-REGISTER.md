@@ -29,6 +29,11 @@
 | F10 | `rust-version = "1.80"` in all four manifests (owner directive: latest stable only) | Now 1.99 + edition 2024 (15a725a) |
 | F11 | VHD workflow PowerShell here-strings (indented `"@` never terminates) + no-op `"flush" \| Out-Null` + wrong libtest filter order | Fixed in 7eb0324 (array-join scripts, `Write-VolumeCache`, `-- --ignored … filters`) |
 | F12 | `read_bytes` unresolved in `recover.rs` (missing `BlockRead` import); `f64::from(u64)`/`usize::from(u32)` type errors; `device_id: &str` escaping into the `'static` worker | CI check job run 39117038665; fixed in 7eb0324 |
+| F13 | `probe_capacity(physical)` read a hallucinated `DISK_GEOMETRY_EX` layout — MediaType (12) parsed as sector size, DiskSize at +40 instead of +24; every whole-physical-drive open carried garbage geometry (volume path was correct, masking it) | The new IOCP runner test panicked `sector size 12`; fixed in 73e3d86 with the typed `read_unaligned` struct read; the iocp integration test asserts sector size + physical-path reads as the regression |
+| F14 | ext rev-1 superblock field block parsed +4 bytes off (missing `s_def_resuid/resgid` 0x50/0x52): rev_level read at 0x50, inode_size at 0x5C, compat at 0x60, incompat at 0x64, volume_name at 0x7C — real mkfs images (inode size 256) had every inode read land mid-slot → zero entries; hand-built fixtures encoded the same offsets (shared-hallucination trap) | The ext2 real-mkfs CI gate failed its first completed run; byte-verified against e2fsprogs 1.47.4 output (mkfs.ext2 + debugfs + dumpe2fs ground truth); fixed in d71570d (engine + `probe_filesystem` ext3/ext4 flag discrimination + fixture true offsets + s_journal_inum 0xE0); regressions: embedded-real-superblock byte-truth test + probe discrimination test |
+| F15 | Fuzz harness panicked on usize add-overflow (`fuzz/src/lib.rs:33`) when fuzzed structures drove an engine to request near-2^64 LBAs — the harness must reject, never abort | CI fuzz run 39137841955 (ntfs target, `libFuzzer: deadly signal`); fixed with checked u64 math + typed `ReadFailed` in 74d599a |
+| F16 | `iocp_batch` integration test raced `vhd_end_to_end` in parallel test threads — the mounted NTFS's own metadata writes ($MFT/$LogFile) legitimately changed window 0 between the sequential reference and the batch read (diverged with ZERO bad sectors; passed untouched on the next run) | Runner evidence: panicked 14:18:11 while the VHD test finished 14:18:38; fixed with the `VHD_LOCK` serialization + first-divergence-offset assert diagnostics in 74d599a |
+| F17 | Real-Core Tour silent skips: the driver skipped recovery on empty selection/destination, burned the 180 s wait, stamped `recovery-complete` anyway; the app's `beginRecovery` ALSO swallowed `start_recovery` errors (a real user would stare at "Preparing…" forever — same defect class) | Tour run 39135278286: all 33 frames captured incl. t30-recovery-complete, then `RECOVERY_OUTPUT_MISSING`; fixed in 74d599a — t99-tour-fail-<reason> loud frames + stage precondition asserts + workflow TOUR_FAIL detection + honest error summary (`Recovery Could Not Start` variant over the backend's typed error) |
 
 **Verified correct by direct evidence** (no action needed):
 `bitlocker.rs` exit codes compare on the `cast_unsigned()` view with
@@ -149,7 +154,11 @@ release).
   0f2d98e): the §5.1 item-3+5 completion pipeline** — IOCP batch
   reads + adaptive media profiles; the benchmark harness +
   `docs/benchmarks/io-backend.md` record landed with it (a003342,
-  §5.1 item 10). Soak/stress regrade at M3 close.
+  §5.1 item 10). **Session 6 update: real-runner numbers recorded**
+  (d71570d run 39137841845 — 8-profile sweep, steady ~370–430 MiB/s
+  through the runner's cache-backed VHD stack, flat 9.7 MiB working
+  set, CPU ≤ 0.0001 s/MiB; batch≡sequential byte-identity asserted
+  on-device). Soak/stress regrade at M3 close.
 - **QA-12.** 24 h soak + crash-resilience scan journal (M3 per
   CORE-PLAN).
 - **QA-13.** BitLocker raw XTS-AES stream recovery for
