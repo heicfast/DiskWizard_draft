@@ -182,7 +182,7 @@ pub async fn sdr_repair(
         let plan = dw_core::repair::plan(&dev, &d)
             .map_err(|e| format!("NOT_REPAIRABLE. {e}"))?;
         let undo = {
-            let handle = dw_win::repair::open_volume_for_repair(letter)
+            let handle = dw_win::repair::open_volume_for_repair(letter, dev.sector_size())
                 .map_err(|e| format!("WRITE_OPEN_FAILED. {e} — try running as administrator."))?;
             dw_core::repair::apply(&plan, |lba, data| handle.write_sector(lba, data))
                 .map_err(|e| format!("REPAIR_FAILED. {e}"))?
@@ -195,7 +195,7 @@ pub async fn sdr_repair(
         if !ok {
             // Roll back — a repair that doesn't verify leaves the
             // card exactly as it was (the transactional contract).
-            if let Ok(handle) = dw_win::repair::open_volume_for_repair(letter) {
+            if let Ok(handle) = dw_win::repair::open_volume_for_repair(letter, dev.sector_size()) {
                 let _ = dw_core::repair::undo(&undo, |lba, data| handle.write_sector(lba, data));
             }
             return Err("REPAIR_VERIFY_FAILED. The repair did not verify — the card was restored to its previous state. Deep-scan recovery remains available.".into());
