@@ -88,8 +88,8 @@ impl RepairHandle {
             WriteFile(
                 self.handle,
                 Some(data),
-                Some(&mut written),
-                Some(&mut ov), // synchronous handle → completes inline
+                Some(std::ptr::from_mut(&mut written)),
+                Some(std::ptr::from_mut(&mut ov)), // synchronous → inline
             )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
