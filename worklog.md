@@ -311,3 +311,15 @@ flag every irregularity with evidence.
   milestone closes.
 - Next: verify workflow greens, then the register's P0 items (the
   real-core tour job first).
+
+**Session 4 addendum (final state)**:
+- ALL FOUR WORKFLOWS GREEN on 6ca58c0 (CI incl. NSIS, VHD end-to-end,
+  MSIX, UI Screenshots) — the first fully green pipeline with the real
+  core as the default build. VHD truth evidence: `mft0 ascii = FILE0`,
+  25 files found, recovery byte-compares, 3/3 tests pass.
+- VLM verification of the tour frames (t11 scan state, t14 results,
+  t25 SMART dashboard): live counters render, recoverability chips
+  work, the free-tier SMART table renders per the research contract;
+  no AI/mascot surfaces; no layout defects.
+- QA register updated with the release-evidence snapshot (§6) and the
+  bytes_found-over-capacity flag (QA-17).

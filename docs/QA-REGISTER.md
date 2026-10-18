@@ -221,3 +221,24 @@ release).
   presents the activation dialog with typed server errors; SMART
   works free; the destination picker blocks the source volume; the
   stop-confirm copy matches the researched retention guardrails.
+
+## 6. Release-evidence snapshot (the green pipeline)
+
+On commit 6ca58c0 all four workflows are green for the first time with
+the real core wired:
+
+| Workflow | Result | Key evidence |
+|---|---|---|
+| CI (web + rust-core + windows-app-check + NSIS) | ✅ | NSIS real-core installer builds; 117 engine tests; dw-win msvc cross-check |
+| Windows Integration (VHD end-to-end) | ✅ | `mft0 ascii = FILE0` (cluster-scaled $MFT found), 25 files, recovery byte-compares, 3/3 tests |
+| MSIX Build | ✅ | Store-ready package |
+| UI Screenshots (sim tour) | ✅ | 28 named frames t00..t28 + tour-complete marker |
+
+VLM verification of the captured frames (tour artifact
+`diskwizard-ui-screenshots`): the live scan state renders real counters
+("66,615 files found (9.2 GB)" at 51%); the Disk Tools SMART dashboard
+shows the full attribute table, temperature, "Good" verdict and drive
+identity (the free-tier feature working as researched); the results page
+shows the Excellent/Good/Poor recoverability chips, category tabs and
+the preview panel. No AI/robot/mascot surfaces anywhere. No layout
+defects or placeholder text detected.
