@@ -31,6 +31,7 @@ pub mod fs;
 pub mod partition;
 pub mod raw;
 pub mod recover;
+pub mod repair;
 pub mod scan;
 pub mod session;
 pub mod tree;

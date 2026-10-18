@@ -29,5 +29,6 @@ pub mod bitlocker;
 pub mod blockdev;
 pub mod devices;
 pub mod license_plat;
+pub mod repair;
 pub mod smart;
 pub mod volume;

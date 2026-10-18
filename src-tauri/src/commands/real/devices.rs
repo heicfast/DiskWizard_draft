@@ -103,21 +103,50 @@ pub fn smart_report(device_id: String) -> Result<Value, String> {
 #[tauri::command]
 pub async fn sdr_diagnose(s: State<'_, AppState>, device_id: String) -> Result<Value, String> {
     super::license::require_licensed(&s)?;
-    // SD Card Rescue: quick sanity verdict (the deep RawFixer-lite
-    // repair pass lands in M2 per docs/CORE-PLAN.md).
+    // SD Card Rescue (the RawFixer pre-scan model): diagnose the
+    // boot region, then either restore access (backup/scan repair)
+    // or continue with file recovery (carving) when not repairable.
     #[cfg(windows)]
     {
-        let target_ok = matches!(
-            dw_win::volume::parse_device_id(&device_id),
-            Some(dw_win::volume::DeviceTarget::Volume(_))
-        );
-        if !target_ok {
+        let Some(dw_win::volume::DeviceTarget::Volume(letter)) =
+            dw_win::volume::parse_device_id(&device_id)
+        else {
             return Err("NOT_AN_SDCARD. SDR targets SD-card volumes.".into());
-        }
+        };
+        let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter)
+            .map_err(|e| format!("OPEN_FAILED. {e}"))?;
+        let d = dw_core::repair::diagnose(&dev);
+        let (repairable, fs, message) = match &d {
+            dw_core::repair::Diagnosis::Healthy(fs) => (
+                false,
+                fs.wire().to_string(),
+                "The card is already accessible — no repair needed. You can scan it directly.".into(),
+            ),
+            dw_core::repair::Diagnosis::FixableFromBackup { fs, backup_lba } => (
+                true,
+                fs.wire().to_string(),
+                format!(
+                    "The card's boot sector is damaged, but a valid backup copy was found (sector {backup_lba}). Repair can restore access without touching your files."
+                ),
+            ),
+            dw_core::repair::Diagnosis::FixableByScan { fs, source_lba } => (
+                true,
+                fs.wire().to_string(),
+                format!(
+                    "The card's boot sector is damaged, but a valid copy was found at sector {source_lba}. Repair can restore access; your files stay untouched."
+                ),
+            ),
+            dw_core::repair::Diagnosis::CarveOnly => (
+                false,
+                "unknown".into(),
+                "The card's file system is too damaged for a direct repair. File recovery via deep scanning is still available.".into(),
+            ),
+        };
         Ok(json!({
-            "restoredAccess": false,
-            "message": "Diagnostics complete. The deep repair pass arrives with the next engine update; raw-volume file recovery is available now.",
-            "fileSystemRecovered": "unknown",
+            "restoredAccess": repairable,
+            "repairable": repairable,
+            "message": message,
+            "fileSystemRecovered": fs,
         }))
     }
     #[cfg(not(windows))]
@@ -128,11 +157,71 @@ pub async fn sdr_diagnose(s: State<'_, AppState>, device_id: String) -> Result<V
 }
 
 #[tauri::command]
+pub async fn sdr_repair(
+    s: State<'_, AppState>,
+    device_id: String,
+    confirm: bool,
+) -> Result<Value, String> {
+    super::license::require_licensed(&s)?;
+    #[cfg(windows)]
+    {
+        if !confirm {
+            return Err("CONFIRM_REQUIRED. Repair writes to the card's boot sector; the user must confirm.".into());
+        }
+        let Some(dw_win::volume::DeviceTarget::Volume(letter)) =
+            dw_win::volume::parse_device_id(&device_id)
+        else {
+            return Err("NOT_AN_SDCARD. SDR repair targets SD-card volumes.".into());
+        };
+        // Diagnose read-only first; plan; then write through the
+        // repair handle (the ONLY write-enabled path — snapshot
+        // covers every overwritten sector).
+        let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter)
+            .map_err(|e| format!("OPEN_FAILED. {e}"))?;
+        let d = dw_core::repair::diagnose(&dev);
+        let plan = dw_core::repair::plan(&dev, &d)
+            .map_err(|e| format!("NOT_REPAIRABLE. {e}"))?;
+        let undo = {
+            let handle = dw_win::repair::open_volume_for_repair(letter)
+                .map_err(|e| format!("WRITE_OPEN_FAILED. {e} — try running as administrator."))?;
+            dw_core::repair::apply(&plan, |lba, data| handle.write_sector(lba, data))
+                .map_err(|e| format!("REPAIR_FAILED. {e}"))?
+        };
+        // Verify: the boot region parses now.
+        let ok = matches!(
+            dw_core::repair::diagnose(&dev),
+            dw_core::repair::Diagnosis::Healthy(_)
+        );
+        if !ok {
+            // Roll back — a repair that doesn't verify leaves the
+            // card exactly as it was (the transactional contract).
+            if let Ok(handle) = dw_win::repair::open_volume_for_repair(letter) {
+                let _ = dw_core::repair::undo(&undo, |lba, data| handle.write_sector(lba, data));
+            }
+            return Err("REPAIR_VERIFY_FAILED. The repair did not verify — the card was restored to its previous state. Deep-scan recovery remains available.".into());
+        }
+        Ok(json!({
+            "ok": true,
+            "restoredAccess": true,
+            "sectorsWritten": plan.writes.len(),
+            "description": plan.description,
+            "fs": plan.fs.wire(),
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (device_id, confirm);
+        Err("NOT_AVAILABLE. SDR repair requires Windows.".into())
+    }
+}
+
+#[tauri::command]
 pub async fn unlock_bitlocker(
     s: State<'_, AppState>,
     device_id: String,
     password: Option<String>,
     recovery_key: Option<String>,
+    bek_file: Option<String>,
 ) -> Result<Value, String> {
     let _ = &s;
     #[cfg(windows)]
@@ -149,8 +238,10 @@ pub async fn unlock_bitlocker(
             dw_win::bitlocker::Credential::RecoveryKey(key)
         } else if let Some(pw) = password {
             dw_win::bitlocker::Credential::Password(pw)
+        } else if let Some(bek) = bek_file {
+            dw_win::bitlocker::Credential::BekFile(bek)
         } else {
-            return Err("BAD_REQUEST. A password or recovery key is required.".into());
+            return Err("BAD_REQUEST. A password, recovery key, or key file is required.".into());
         };
         dw_win::bitlocker::unlock_volume(letter, &credential)?;
         if dw_win::bitlocker::volume_unlocked(letter) {
@@ -161,7 +252,7 @@ pub async fn unlock_bitlocker(
     }
     #[cfg(not(windows))]
     {
-        let _ = (device_id, password, recovery_key);
+        let _ = (device_id, password, recovery_key, bek_file);
         Err("NOT_AVAILABLE. BitLocker unlock requires Windows.".into())
     }
 }

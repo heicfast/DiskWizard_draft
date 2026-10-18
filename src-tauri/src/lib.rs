@@ -82,6 +82,7 @@ pub fn run() {
             commands::connect_demo_device,
             commands::smart_report,
             commands::sdr_diagnose,
+            commands::sdr_repair,
             commands::unlock_bitlocker,
             // Scan lifecycle
             commands::start_scan,

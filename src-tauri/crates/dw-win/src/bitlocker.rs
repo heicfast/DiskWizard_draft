@@ -62,6 +62,14 @@ pub fn unlock_volume(letter: char, credential: &Credential) -> Result<(), String
                  exit $r.ReturnValue"
             )
         }
+        // BEK file: the BitLocker module's Unlock-BitLocker takes a
+        // recovery-KEY path (the vendor's PSUnlockBitLocker surface).
+        Credential::BekFile(path) => {
+            let escaped = path.replace('\'', "''");
+            format!(
+                "Unlock-BitLocker -MountPoint '{mount}' -RecoveryKey '{escaped}' -ErrorAction Stop; exit 0"
+            )
+        }
     };
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -87,6 +95,11 @@ pub fn unlock_volume(letter: char, credential: &Credential) -> Result<(), String
 pub enum Credential {
     Password(String),
     RecoveryKey(String),
+    /// A BEK (BitLocker Encryption Key) file — the external-key
+    /// protector (the vendor's `SetProcessProtectorKeyFromBEK`
+    /// surface; we unlock through the `Unlock-BitLocker` cmdlet's
+    /// `-RecoveryKey` parameter).
+    BekFile(String),
 }
 
 /// Is the volume now accessible (mounted with a filesystem)?
