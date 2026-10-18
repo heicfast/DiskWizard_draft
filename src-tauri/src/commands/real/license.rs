@@ -19,11 +19,6 @@ use dw_license::{
 
 use super::AppState;
 
-/// Temporary operator-authorized lifetime key for pre-release acceptance
-/// testing. This intentionally applies to packaged builds until licensing
-/// rollout is complete; remove it before any public distribution.
-const TEST_LIFETIME_LICENSE_KEY: &str = "DBTESTSDEM00PR000C0DE0";
-
 /// The license manager (the DiskGenie `commands/license.rs` pattern).
 pub struct LicenseManager {
     state: RwLock<LicenseState>,
@@ -165,10 +160,6 @@ impl LicenseManager {
         if !key_shape_valid(&normalized) {
             return Err("BAD_REQUEST. The license key format is invalid.".into());
         }
-        if normalized == TEST_LIFETIME_LICENSE_KEY {
-            self.seed_test_lifetime_license();
-            return Ok(self.status_json());
-        }
         let facts = Self::device_facts()?;
         let api = LicenseApi::new(ReqwestLicense::new().map_err(String::from)?);
         let mut attempt = 0u32;
@@ -255,24 +246,6 @@ impl LicenseManager {
 
     fn persist(&self) {
         let _ = self.store.save(&self.state.read());
-    }
-
-    /// Seeds the operator-authorized pre-release lifetime key locally. This
-    /// preserves full test coverage when the activation service is unavailable.
-    fn seed_test_lifetime_license(&self) {
-        let now = self.now();
-        *self.state.write() = LicenseState {
-            license_key: TEST_LIFETIME_LICENSE_KEY.into(),
-            tier: "lifetime".into(),
-            customer_name: "Pre-release Test License".into(),
-            activated_at: now,
-            last_validated_at: now,
-            last_known_good: now,
-            token_exp: now + 86_400,
-            simulated: true,
-            ..Default::default()
-        };
-        self.persist();
     }
 
     /// The L6 gate: privileged commands refuse when unlicensed.
