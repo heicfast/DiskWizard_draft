@@ -16,6 +16,7 @@
 pub mod exfat;
 pub mod ext;
 pub mod fat;
+pub mod hfsplus;
 pub mod ntfs;
 
 use std::sync::Arc;
@@ -192,6 +193,7 @@ pub fn create_engine(kind: FsKind, dev: Arc<dyn BlockDevice>) -> CoreResult<Box<
         FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => Ok(Box::new(fat::FatEngine::new(dev)?)),
         FsKind::ExFat => Ok(Box::new(exfat::ExFatEngine::new(dev)?)),
         FsKind::Ext2 | FsKind::Ext3 | FsKind::Ext4 => Ok(Box::new(ext::ExtEngine::new(dev)?)),
+        FsKind::HfsPlus => Ok(Box::new(hfsplus::HfsPlusEngine::new(dev.as_ref())?)),
         other => Err(CoreError::Unsupported(other)),
     }
 }
