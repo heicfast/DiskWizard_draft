@@ -651,3 +651,13 @@ Gates: fmt clean; clippy `-D warnings` clean (default AND with
 `live-license-e2e`); 141 dw-core + 27 dw-license tests; 74 web tests;
 tsc clean; YAML validated; live E2E green ×2. QA-16 CLOSED with the
 run evidence (docs/QA-REGISTER.md §3).
+
+## 2026-10-18 — temporary packaged-build test license
+
+- Operator-authorized temporary override: `DB-TESTS-DEM00-PR000-C0DE0`
+  is prefilled by the activation dialog and locally grants a simulated
+  lifetime Pro posture in every build, including NSIS/MSIX. This keeps
+  full recovery-flow testing unblocked while the live activation issue is
+  investigated.
+- This is intentionally not a server activation and must be removed before
+  any public distribution or commercial release.
