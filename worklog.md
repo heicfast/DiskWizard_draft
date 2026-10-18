@@ -312,6 +312,7 @@ flag every irregularity with evidence.
 - Next: verify workflow greens, then the register's P0 items (the
   real-core tour job first).
 
+
 **Session 4 addendum (final state)**:
 - ALL FOUR WORKFLOWS GREEN on 6ca58c0 (CI incl. NSIS, VHD end-to-end,
   MSIX, UI Screenshots) — the first fully green pipeline with the real
@@ -323,3 +324,36 @@ flag every irregularity with evidence.
   no AI/mascot surfaces; no layout defects.
 - QA register updated with the release-evidence snapshot (§6) and the
   bytes_found-over-capacity flag (QA-17).
+---
+
+## Session 4 addendum — all workflows green + independent senior review
+
+**Task ID**: 4b
+**Agent**: main (Z.ai)
+
+**Work Log**:
+- The VHD truth test exposed the NTFS LCN bug via runner diagnostics
+  (boot parse perfect, MFT0 read zeros): NtfsEngine multiplied the
+  $MFT LCN by bytes_per_sector instead of cluster_size — every spc>1
+  volume (all real 4 KiB-cluster NTFS) scanned nothing. Fixed + spc=8
+  regression test. Second VHD run: 25 files, 33 nodes, present.txt
+  Existing 1 MiB, 3/3 tests PASS — then ALL FOUR workflows green on
+  6ca58c0 (CI incl. NSIS, MSIX, UI screenshots, VHD end-to-end) with
+  real release artifacts (17.5 MB windows-release).
+- Parallel-agent coordination: rebased onto their app-crate fixes
+  (incl. the ResetEvent pooled-event race and fresh recovery control
+  they caught on my code), fixed their dest_display double-move.
+- Independent senior-dev review (25+ yr storage POV) over the whole
+  I/O rewrite. Fixed now: the critical iter_attrs out-of-bounds panic
+  on damaged records (header-kind minimums 0x18/0x48 — panic=abort in
+  release made one bad record fatal), sparse-salvage zero-fill
+  (contract), ISO-BMFF 64-bit-size overflow infinite loop, 4Kn volume
+  sector-size hardcode, 4Kn NTFS sub-sector record fixups, ZIP
+  last-66KiB window, count_last seam double-count, rfind seam overlap.
+- Three engine-scale findings documented in docs/TODO.md for M2:
+  $ATTRIBUTE_LIST forking, hole-aware extents, resident recovery.
+
+**Stage Summary**:
+- Gates: fmt; clippy -D warnings clean (native + windows-msvc);
+  117 engine tests green; 4/4 workflows green on real Windows with
+  artifacts; VHD end-to-end proves the full pipeline on real NTFS.

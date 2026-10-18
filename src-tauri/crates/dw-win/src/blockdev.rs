@@ -396,7 +396,14 @@ fn probe_capacity(handle: &HANDLE, physical: bool) -> (u32, u64) {
             )
         };
         if ok.is_ok() && len > 0 {
-            return (512, len / 512);
+            // The volume's LOGICAL sector decides buffer alignment
+            // math (4Kn volumes reject 512-multiple geometry with
+            // ERROR_INVALID_PARAMETER — never hardcode 512). The
+            // alignment query is volume-aware; fall back to 512 only
+            // when both probes fail (then the buffered fallback
+            // handle still reads correctly).
+            let ss = probe_alignment(handle).max(512);
+            return (ss, len / u64::from(ss));
         }
     }
     (512, 0)
@@ -471,6 +478,11 @@ impl BlockDevice for RawHandleDevice {
             let at = offset + (i * ss) as u64;
             let piece = &mut buf[i * ss..(i + 1) * ss];
             let ok = self.read_aligned_aware(at, piece).is_ok();
+            if !ok {
+                // The trait contract: gaps read as zeros (never the
+                // previous window's stale bytes).
+                piece.fill(0);
+            }
             match (ok, bad_start) {
                 (false, None) => bad_start = Some(i * ss),
                 (true, Some(s)) => {

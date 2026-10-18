@@ -38,3 +38,30 @@ research artifacts already define them:
       tree focus management).
 - [ ] Localization framework (English-first, tr()-style extraction).
 - [ ] WinPE / bootable-media surface ("Crashed PC Rescue").
+
+## Senior-review findings for the M2 engine session (2026-10-18)
+
+Evidence-based items from the independent senior-dev review of the
+core-interface session (fixed items live in the commit history; these
+three are engine-scale work):
+
+1. **NTFS $ATTRIBUTE_LIST forking** — base records whose attributes
+   overflow into extension records (heavily fragmented / many-stream
+   files) currently emit NO data streams: the file vanishes from
+   results. Walk ATTR_ATTRIBUTE_LIST (0x20), merge extension-record
+   $DATA/$FILE_NAME into the base entry.
+2. **Hole-aware extent mapping** — sparse/compressed runlists drop
+   holes silently; recovery concatenates extents positionally so
+   content after a gap lands at the wrong file offset. Emit extents
+   with explicit file offsets (or zero-length hole markers), make
+   ExtentStream zero-fill gaps (not just the tail), fail whole-runlist
+   on implausible mid-list runs instead of skipping.
+3. **Resident-content recovery** — sub-~700-byte NTFS files (the
+   resident-marker extents) currently recover as zeros. Read the
+   record at the marker offset at export time (or inline content at
+   walk time).
+
+Also queued from the review (minor): read_bytes overflow guard +
+decode_runlist LCN-vs-max_clusters bound; carver take-clamp + sparse
+error propagation; staging-buffer reuse per chunk; records 0-3
+visibility decision; Drop-invariant comment rewording.

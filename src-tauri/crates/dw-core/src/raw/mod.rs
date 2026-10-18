@@ -309,8 +309,14 @@ impl Prober<'_> {
                 let mut from2 = 0usize;
                 while let Some(rel) = finder.find(&chunk[from2..]) {
                     let rel = from2 + rel;
-                    count += 1;
-                    last = Some(pos + rel as u64 + needle.len() as u64);
+                    // Only matches that START inside this chunk's
+                    // primary range count — the over-read tail is
+                    // rescanned by the next chunk (seam double-count
+                    // guard).
+                    if rel < take {
+                        count += 1;
+                        last = Some(pos + rel as u64 + needle.len() as u64);
+                    }
                     from2 = rel + 1;
                 }
             }
@@ -319,14 +325,15 @@ impl Prober<'_> {
         (count, last)
     }
 
-    /// Backward scan for `needle` starting at `to` (relative),
-    /// chunk-by-chunk — returns the first match found scanning
-    /// backwards (i.e. the LAST occurrence).
-    fn rfind(&self, needle: &[u8], to: u64) -> Option<u64> {
+    /// Backward scan for `needle` in [from, to) (relative),
+    /// chunk-by-chunk with a seam overlap so markers straddling chunk
+    /// boundaries are never missed — returns the first match found
+    /// scanning backwards (i.e. the LAST occurrence).
+    fn rfind_from(&self, needle: &[u8], from: u64, to: u64) -> Option<u64> {
         let mut hi = to;
-        while hi > 0 {
-            let lo = hi.saturating_sub(64 * 1024);
-            let chunk = self.read(lo, (hi - lo) as usize);
+        while hi > from {
+            let lo = hi.saturating_sub(64 * 1024).max(from);
+            let chunk = self.read(lo, (hi - lo) as usize + needle.len() - 1);
             if chunk.len() >= needle.len() {
                 let finder = memmem::Finder::new(needle);
                 let mut best = None;
@@ -363,9 +370,10 @@ impl Prober<'_> {
     fn size_zip(&self) -> Option<CarvedHit> {
         const CAP: u64 = 1024 * 1024 * 1024;
         let span = self.limit.min(CAP);
-        // The EOCD lives within the last ~66 KiB of a zip.
-        let search_to = span.max(66_000).min(span);
-        let eocd = self.rfind(b"PK\x05\x06", search_to)?;
+        // The EOCD lives within the last ~66 KiB of a zip — scan
+        // backward from the end, bounded to that window.
+        let search_from = span.saturating_sub(66_000);
+        let eocd = self.rfind_from(b"PK\x05\x06", search_from, span)?;
         let cd_size = u64::from(self.u32le(eocd + 12));
         let cd_off = u64::from(self.u32le(eocd + 16));
         if cd_off + cd_size <= eocd {
@@ -420,7 +428,7 @@ impl Prober<'_> {
     fn size_pdf(&self) -> CarvedHit {
         const CAP: u64 = 2 * 1024 * 1024 * 1024;
         let span = self.limit.min(CAP);
-        match self.rfind(b"%%EOF", span) {
+        match self.rfind_from(b"%%EOF", 0, span) {
             Some(end) => hit(end + 5, 94, Category::Documents, None),
             None => hit(span, 45, Category::Documents, None),
         }
@@ -444,7 +452,11 @@ impl Prober<'_> {
             } else {
                 size
             };
-            if box_size < 8 || pos + box_size > span {
+            // Overflow-guarded: a corrupt 64-bit size must move pos
+            // FORWARD within the span or the walk ends (a naive
+            // `pos + box_size > span` wraps in release and can loop
+            // forever with a backward-moving pos).
+            if box_size < 8 || box_size > span - pos {
                 break;
             }
             sane = true;

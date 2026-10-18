@@ -167,12 +167,24 @@ impl RawRecord {
         let usa_off = u16::from_le_bytes([data[4], data[5]]) as usize;
         let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
         let ss = sector_size as usize;
-        if usa_count == 0 || usa_off + usa_count * 2 > data.len() || !data.len().is_multiple_of(ss)
+        // 4Kn volumes: MFT records stay 1 KiB (the BPB's record size
+        // is cluster-count-based), i.e. SMALLER than one sector —
+        // such records carry no in-record fixups (USA count 1, the
+        // USN alone). Only sector-multiple records go through the
+        // fixup exchange.
+        let fixup_applicable = data.len().is_multiple_of(ss);
+        if usa_count == 0
+            || usa_off + usa_count * 2 > data.len()
+            || (fixup_applicable && usa_count > 1 && usa_off + usa_count * 2 > ss)
         {
             return Err(CoreError::Corrupt {
                 structure: "MFT fixup",
                 detail: format!("bad USA off={usa_off} count={usa_count}"),
             });
+        }
+        if !fixup_applicable {
+            // Sub-sector record (4Kn media): no fixups to apply.
+            return Ok(Self { data });
         }
         let usn = [data[usa_off], data[usa_off + 1]];
         for i in 1..usa_count {
@@ -232,10 +244,21 @@ pub fn iter_attrs(record: &[u8]) -> Vec<AttrView<'_>> {
             record[pos + 6],
             record[pos + 7],
         ]) as usize;
-        if len < 16 || pos + len > record.len() {
+        // Header-kind minimums (the senior-review bounds fix): a
+        // RESIDENT header needs ≥ 0x18 bytes (through the content
+        // offset at +0x14..0x16); a NON-RESIDENT header needs ≥ 0x48
+        // (through initialized size at +0x38..0x40). Damaged records
+        // with short headers end the walk instead of slicing past the
+        // record and aborting the process (panic = abort in release).
+        const RESIDENT_MIN: usize = 0x18;
+        const NONRESIDENT_MIN: usize = 0x48;
+        if len < RESIDENT_MIN || pos + len > record.len() {
             break;
         }
         let non_resident = record[pos + 8] != 0;
+        if non_resident && len < NONRESIDENT_MIN {
+            break;
+        }
         let name_len = record[pos + 9] as usize;
         let name_off = u16::from_le_bytes([record[pos + 10], record[pos + 11]]) as usize;
         let name = if name_len > 0 && pos + name_off + name_len * 2 <= pos + len {
@@ -265,7 +288,9 @@ pub fn iter_attrs(record: &[u8]) -> Vec<AttrView<'_>> {
             });
             (
                 None,
-                (pos + run_off <= pos + len).then(|| &record[pos + run_off..pos + len]),
+                // The runlist starts at/after the header end (0x40).
+                (run_off >= 0x40 && pos + run_off <= pos + len)
+                    .then(|| &record[pos + run_off..pos + len]),
                 real.max(alloc.min(real)),
                 init,
                 comp,
