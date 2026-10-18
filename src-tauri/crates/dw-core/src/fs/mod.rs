@@ -14,6 +14,7 @@
 //! host (images built by the test suite itself).
 
 pub mod exfat;
+pub mod ext;
 pub mod fat;
 pub mod ntfs;
 
@@ -138,11 +139,21 @@ pub fn probe_filesystem(dev: &dyn BlockDevice) -> CoreResult<FsKind> {
         if &sector[0x36..0x3E] == b"FAT   " {
             return Ok(FsKind::Fat12);
         }
-        // ext: superblock at 1024, magic 0xEF53 at +56.
+        // ext: superblock at 1024, magic 0xEF53 at +56; the
+        // feature flags discriminate ext2/3/4 (compat journal →
+        // ext3, incompat extents → ext4).
         if dev.capacity_bytes() >= 1176 {
-            let sb = dev.read_struct_at::<70>(1024)?;
+            let sb = dev.read_struct_at::<110>(1024)?;
             if sb[56..58] == [0x53, 0xEF] {
-                return Ok(FsKind::Ext4);
+                let compat = u32::from_le_bytes([sb[0x60], sb[0x61], sb[0x62], sb[0x63]]);
+                let incompat = u32::from_le_bytes([sb[0x64], sb[0x65], sb[0x66], sb[0x67]]);
+                if incompat & 0x40 != 0 {
+                    return Ok(FsKind::Ext4);
+                }
+                if compat & 0x4 != 0 {
+                    return Ok(FsKind::Ext3);
+                }
+                return Ok(FsKind::Ext2);
             }
         }
         // HFS+: volume header at 1024.
@@ -180,6 +191,7 @@ pub fn create_engine(kind: FsKind, dev: Arc<dyn BlockDevice>) -> CoreResult<Box<
         FsKind::Ntfs | FsKind::Ntfs5 => Ok(Box::new(ntfs::NtfsEngine::new(dev)?)),
         FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => Ok(Box::new(fat::FatEngine::new(dev)?)),
         FsKind::ExFat => Ok(Box::new(exfat::ExFatEngine::new(dev)?)),
+        FsKind::Ext2 | FsKind::Ext3 | FsKind::Ext4 => Ok(Box::new(ext::ExtEngine::new(dev)?)),
         other => Err(CoreError::Unsupported(other)),
     }
 }
