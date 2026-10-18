@@ -217,3 +217,85 @@ fn smart_reports_on_disk0() {
         }
     }
 }
+
+/// §5.1 items 3+5 — the IOCP batch pipeline on REAL hardware: batched
+/// reads at the device's adaptive queue depth must return
+/// byte-identical content to the sequential path, and the media-class
+/// probe must resolve a profile. Also prints a small QD-1 vs QD-N
+/// throughput observation (informational — runner hardware varies).
+#[test]
+#[ignore = "windows-only"]
+fn iocp_batch_matches_sequential_on_real_disk() {
+    use dw_core::blockdev::{AlignedBuf, BatchRead};
+
+    // Prefer the test VHD's physical drive; fall back to disk 0.
+    let index = match find_test_volume() {
+        Some(letter) => {
+            let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter)
+                .expect("open the DWTEST volume");
+            dev.device_number().expect("volume device number").0
+        }
+        None => 0,
+    };
+    let dev = dw_win::blockdev::RawHandleDevice::open_physical(index).expect("open drive");
+    let profile = dev.read_profile();
+    println!("media profile: {profile:?} on PhysicalDrive{index}");
+
+    let ss = u64::from(dev.sector_size());
+    let window = profile.window_bytes.min(4 * 1024 * 1024); // keep CI fast
+    let depth = profile.queue_depth.clamp(2, 8);
+    let total = window * depth * 2; // two full batches
+    let total = total.min(usize::try_from(dev.total_sectors() * ss / 2).unwrap_or(total));
+
+    // Sequential reference.
+    let mut seq = AlignedBuf::zeroed(total, dev.preferred_read_alignment());
+    let t0 = std::time::Instant::now();
+    let bad_seq = dev
+        .read_sectors_sparse(0, &mut seq)
+        .expect("sequential read");
+    let seq_elapsed = t0.elapsed();
+    assert!(
+        bad_seq.is_empty(),
+        "healthy runner disk must read clean: {bad_seq:?}"
+    );
+
+    // Batched pipeline at the adaptive depth.
+    let mut bufs: Vec<AlignedBuf> = (0..depth)
+        .map(|_| AlignedBuf::zeroed(window, dev.preferred_read_alignment()))
+        .collect();
+    let mut batch: Vec<BatchRead<'_>> = bufs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, b)| BatchRead {
+            start_lba: ((i * window) as u64) / ss,
+            buf: &mut b[..window],
+        })
+        .collect();
+    let t1 = std::time::Instant::now();
+    let results = dev
+        .read_sectors_sparse_batch(&mut batch)
+        .expect("batched read");
+    let batch_elapsed = t1.elapsed();
+    for (i, bad) in results.iter().enumerate() {
+        assert!(bad.is_empty(), "window {i} must read clean: {bad:?}");
+    }
+
+    // Byte-identical: batch window i covers the same bytes as seq.
+    for (i, b) in bufs.iter().enumerate() {
+        assert_eq!(
+            &b[..window],
+            &seq[i * window..(i + 1) * window],
+            "batch window {i} diverges from the sequential read"
+        );
+    }
+
+    // Informational throughput (not asserted — shared-runner noise).
+    #[allow(clippy::cast_precision_loss)] // display-only MiB/s
+    {
+        let seq_mbs = total as f64 / seq_elapsed.as_secs_f64() / (1024.0 * 1024.0);
+        let batch_mbs = (window * depth) as f64 / batch_elapsed.as_secs_f64() / (1024.0 * 1024.0);
+        println!(
+            "sequential {window}B x1: {seq_mbs:.0} MiB/s; batched {window}B x{depth}: {batch_mbs:.0} MiB/s"
+        );
+    }
+}

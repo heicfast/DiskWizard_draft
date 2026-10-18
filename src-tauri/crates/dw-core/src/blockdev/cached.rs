@@ -230,6 +230,10 @@ impl BlockDevice for CachedDevice {
     fn preferred_read_alignment(&self) -> u32 {
         self.parent.preferred_read_alignment()
     }
+
+    fn read_profile(&self) -> super::ReadProfile {
+        self.parent.read_profile()
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +301,12 @@ mod tests {
             let abs = (10 * 512) + i as u64;
             assert_eq!(b, (abs % 251) as u8, "byte {i}");
         }
+    }
+
+    #[test]
+    fn profile_delegates_to_parent() {
+        let ram = pattern_ram();
+        let cached = CachedDevice::new(Arc::clone(&ram) as Arc<dyn BlockDevice>);
+        assert_eq!(cached.read_profile(), ram.read_profile());
     }
 }

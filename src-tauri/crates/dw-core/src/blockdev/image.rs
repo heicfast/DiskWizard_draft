@@ -172,6 +172,18 @@ impl BlockDevice for ImageFile {
             self.label, self.total_sectors, self.sector_size
         )
     }
+
+    /// Image files read through one serialized seek+read handle, so
+    /// queue depth stays 1; the OS page cache makes 4 MiB windows the
+    /// throughput sweet spot for image scans (§5.1 item 5 — the
+    /// bands allow 4–16 MiB for flash-backed stores; a file on the
+    /// host cache behaves flash-like).
+    fn read_profile(&self) -> super::ReadProfile {
+        super::ReadProfile {
+            window_bytes: 4 * 1024 * 1024,
+            queue_depth: 1,
+        }
+    }
 }
 
 #[cfg(test)]

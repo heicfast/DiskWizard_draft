@@ -76,10 +76,106 @@ pub trait BlockDevice: Send + Sync {
         self.sector_size().max(1)
     }
 
+    /// The device's adaptive bulk-read profile (ADR-1 rev3 §5.1
+    /// item 5): how wide each carve window should be and how many
+    /// windows to keep in flight. HDD-class devices prefer modest
+    /// sequential windows at low queue depth (1–4 MiB, QD 1–2);
+    /// flash (SSD/NVMe) thrives on wide windows and deep queues
+    /// (4–16 MiB, QD 4–16). The default is the conservative
+    /// unknown-media profile: 1 MiB windows, one at a time.
+    #[must_use]
+    fn read_profile(&self) -> ReadProfile {
+        ReadProfile::DEFAULT
+    }
+
+    /// Sparse-read a batch of windows, possibly concurrently (§5.1
+    /// item 3: the completion-based pipeline — one submission set,
+    /// completions harvested as they land). Semantics per window are
+    /// exactly [`BlockDevice::read_sectors_sparse`]: readable bytes
+    /// land in `buf`, unreadable sub-ranges zero-fill and report
+    /// themselves as `(offset_in_buf, len)` pairs. Implementations
+    /// that cannot pipeline fall back to the sequential default —
+    /// results must be IDENTICAL either way (callers may not depend
+    /// on completion order).
+    ///
+    /// # Errors
+    /// Programming errors propagate (a bad buffer length); media
+    /// damage never does — it reports through the bad-range lists.
+    fn read_sectors_sparse_batch(
+        &self,
+        batch: &mut [BatchRead<'_>],
+    ) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+        let mut out = Vec::with_capacity(batch.len());
+        for r in batch {
+            out.push(self.read_sectors_sparse(r.start_lba, r.buf)?);
+        }
+        Ok(out)
+    }
+
     /// Device identity for logs/diagnostics (model/serial/path).
     fn describe(&self) -> String {
         String::new()
     }
+}
+
+/// Adaptive bulk-read profile (§5.1 item 5).
+///
+/// Values are hints: the carver clamps `window_bytes` to
+/// `[256 KiB, 16 MiB]`, `queue_depth` to `[1, 16]`, and bounds the
+/// total window-buffer budget, so a hostile/corrupt probe can never
+/// request pathological I/O shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadProfile {
+    /// Bulk read window in bytes (a sector multiple).
+    pub window_bytes: usize,
+    /// Concurrent in-flight windows (queue depth).
+    pub queue_depth: usize,
+}
+
+impl ReadProfile {
+    /// The conservative unknown-media profile (1 MiB, QD 1).
+    pub const DEFAULT: Self = Self {
+        window_bytes: 1024 * 1024,
+        queue_depth: 1,
+    };
+
+    /// HDD-class profile: sequential-spindle-friendly (§5.1: 1–4 MiB,
+    /// QD 1–2; benchmarked at 2 MiB × QD 2 — `docs/benchmarks/
+    /// io-backend.md`).
+    pub const HDD: Self = Self {
+        window_bytes: 2 * 1024 * 1024,
+        queue_depth: 2,
+    };
+
+    /// Flash profile (SSD/NVMe): wide windows, deep queue (§5.1:
+    /// 4–16 MiB, QD 4–16; benchmarked at 8 MiB × QD 8).
+    pub const SSD: Self = Self {
+        window_bytes: 8 * 1024 * 1024,
+        queue_depth: 8,
+    };
+
+    /// Clamp into the documented bands (defensive against bad probes).
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            window_bytes: self.window_bytes.clamp(256 * 1024, 16 * 1024 * 1024),
+            queue_depth: self.queue_depth.clamp(1, 16),
+        }
+    }
+}
+
+impl Default for ReadProfile {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// One window of a batched sparse read.
+pub struct BatchRead<'a> {
+    /// Absolute starting LBA.
+    pub start_lba: u64,
+    /// Destination buffer (length must be a sector multiple).
+    pub buf: &'a mut [u8],
 }
 
 /// Blanket byte-range helpers every engine uses.

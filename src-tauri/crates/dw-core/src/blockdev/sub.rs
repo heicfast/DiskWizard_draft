@@ -101,6 +101,13 @@ impl BlockDevice for SubDevice {
         self.parent.preferred_read_alignment()
     }
 
+    /// The region inherits the parent media's profile (§5.1 item 5):
+    /// a partition slice on an SSD gets the SSD window/depth exactly
+    /// as if it were opened directly.
+    fn read_profile(&self) -> super::ReadProfile {
+        self.parent.read_profile()
+    }
+
     fn describe(&self) -> String {
         format!(
             "{}@{}+{}x{}",

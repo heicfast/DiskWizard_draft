@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use memchr::memmem;
 
-use crate::blockdev::{AlignedBuf, BlockDevice, BlockRead};
+use crate::blockdev::{AlignedBuf, BatchRead, BlockDevice, BlockRead};
 use crate::error::CoreResult;
 use crate::fs::{ScanControl, ScanSink, ScanStats};
 use std::collections::HashSet;
@@ -45,10 +45,10 @@ fn content_hash(prefix: &[u8], length: u64) -> u64 {
 
 pub use signatures::{Signature, SignatureId, signature_set};
 
-/// Carve window: 8 MiB — the sweet spot for sequential HDD throughput
-/// (multiple MiB per request, scheduler-friendly) without pinning
-/// excessive memory.
-const CARVE_WINDOW: usize = 8 * 1024 * 1024;
+/// Total carve window-buffer budget: `queue_depth × window_bytes`
+/// never exceeds this (16 × 4 MiB worst case) — the pipelined sweep
+/// stays memory-bounded on every profile (§5.1 items 5+7).
+const MAX_WINDOW_BUDGET: usize = 64 * 1024 * 1024;
 
 /// Window overlap: 64 KiB re-scanned per advance so signatures
 /// straddling a window boundary are never missed (the longest magic
@@ -83,11 +83,16 @@ impl RawCarver {
 
     /// Carve `[start_byte, end_byte)` (the deep phase's sweep).
     ///
-    /// Reads go through [`BlockDevice::read_sectors_sparse`] in
-    /// aligned multi-megabyte windows: media damage degrades to
-    /// per-sector salvage inside the platform layer and shows up here
-    /// as zeroed bad ranges whose hits are skipped — the sweep itself
-    /// never stalls on a dying disk.
+    /// The pipelined sweep (§5.1 items 3+5): the device's adaptive
+    /// profile decides the window width and how many windows ride in
+    /// one [`BlockDevice::read_sectors_sparse_batch`] — one at a time
+    /// on unknown/HDD-class media, up to 16 in flight on flash. Media
+    /// damage degrades to per-sector salvage inside the platform layer
+    /// and shows up here as zeroed bad ranges whose hits are skipped —
+    /// the sweep itself never stalls on a dying disk. Completion order
+    /// inside a batch is irrelevant: windows are processed in offset
+    /// order with the same emitted-position set as the sequential
+    /// sweep, so results are byte-identical at every queue depth.
     ///
     /// # Errors
     /// [`CoreError::Cancelled`] through the control token.
@@ -113,112 +118,184 @@ impl RawCarver {
             .map(|(i, s)| {
                 // Finder borrows the signature magic (all 'static).
                 let f = memmem::Finder::new(s.magic);
-                // SAFETY-less: transmute-free lifetime extension is not
-                // needed — the signature table is owned by `sigs` for
-                // the whole carve. We keep the borrow tied to `sigs`
-                // via the raw reference in the tuple.
                 (i, s, f)
             })
             .collect();
-        let window = CARVE_WINDOW.min(usize::try_from(end - cursor).unwrap_or(usize::MAX).max(1));
-        let mut buf = AlignedBuf::zeroed(window, self.dev.preferred_read_alignment());
+        // Adaptive geometry (§5.1 item 5): the profile's bands are
+        // clamped, then the window shrinks to the remaining span, then
+        // the depth shrinks to the buffer budget. Ram fixtures and
+        // tiny volumes end at single-window batches — identical to
+        // the sequential sweep.
+        let prof = self.dev.read_profile().clamped();
+        let span = usize::try_from(end - cursor).unwrap_or(usize::MAX).max(1);
+        let window = prof.window_bytes.min(span).max(ss as usize);
+        let depth = prof
+            .queue_depth
+            .min((MAX_WINDOW_BUDGET / window).max(1))
+            .max(1);
+        let mut bufs: Vec<AlignedBuf> = (0..depth)
+            .map(|_| AlignedBuf::zeroed(window, self.dev.preferred_read_alignment()))
+            .collect();
         // Positions already emitted this carve (absolute): "first
         // signature wins a position" — while the SAME signature keeps
         // scanning for further hits (one file per signature PER
         // WINDOW was the old break bug).
         let mut emitted: HashSet<u64> = HashSet::new();
-        while cursor < end {
+        'batches: while cursor < end {
             ctrl.checkpoint()?;
-            let want = (end - cursor).min(window as u64);
-            // Sector-multiple read length (trait contract), ≥1 sector.
-            let take = (want as usize).next_multiple_of(ss as usize).min(window);
-            let take = take.max(ss as usize).min(window);
-            let take = (take as u64).min(end - cursor) as usize;
-            let take = take.max(ss as usize);
-            let bad = self
-                .dev
-                .read_sectors_sparse(cursor / ss, &mut buf[..take])
-                .unwrap_or_default();
-            // New-hit region: everything except the overlap tail (the
-            // final window scans fully — there is no next window).
-            let scan_end = if cursor + (take as u64) < end {
-                take.saturating_sub(CARVE_OVERLAP)
-            } else {
-                take
-            };
-            let hay = &buf[..scan_end];
-            for (_, sig, finder) in &finders {
-                let mut from = 0usize;
-                while let Some(rel) = finder.find(&hay[from..]) {
-                    let rel = from + rel;
-                    from = rel + 1;
-                    // File start relative to the window (magic sits at
-                    // sig.offset inside the file).
-                    if rel < sig.offset {
-                        continue;
-                    }
-                    let file_rel = rel - sig.offset;
-                    // Skip hits landing in bad (zero-filled) ranges.
-                    let magic_end = rel + sig.magic.len();
-                    if bad
-                        .iter()
-                        .any(|&(o, l)| rel < (o + l) as usize && magic_end > o as usize)
-                    {
-                        continue;
-                    }
-                    let abs = cursor + file_rel as u64;
-                    if emitted.contains(&abs) {
-                        continue; // a earlier signature already won here
-                    }
-                    if let Some(mut h) = self.validate_hit(sig, abs, end) {
-                        h.category = sig.category;
-                        if h.length >= sig.min_size {
-                            let name = format!("{}_{abs:08X}{}", sig.name_prefix, sig.ext);
-                            let mut entry = FoundEntry::structured(name, false, FsKind::Raw);
-                            entry.parent_hint = None; // carved → lost branches
-                            entry.origin = if sig.named_by_content {
-                                NodeOrigin::LostName
-                            } else {
-                                NodeOrigin::LostPath
-                            };
-                            entry.size = h.length;
-                            entry.extents = vec![Extent::new(abs, h.length.min(end - abs))];
-                            entry.confidence = h.confidence;
-                            entry.category_hint = Some(h.category);
-                            entry.dimensions = h.dimensions;
-                            // Same-content key from the window bytes
-                            // (duplicate copies of one file share
-                            // their prefix; the tree marks repeats as
-                            // Version — the essential-mode dedup).
-                            let hash_len = (h.length as usize)
-                                .min(4096)
-                                .min(hay.len().saturating_sub(file_rel));
-                            if hash_len > 0 {
-                                entry.content_key = Some(content_hash(
-                                    &hay[file_rel..file_rel + hash_len],
-                                    h.length,
-                                ));
-                            }
-                            entry.source = FsKind::Raw;
-                            stats.entries += 1;
-                            stats.bytes += entry.size;
-                            emitted.insert(abs);
-                            sink.on_entry(entry); // keep scanning —
-                            // further hits of this signature and every
-                            // other one still surface.
-                        }
-                    }
+            // Plan this batch: consecutive windows chained by the
+            // overlap advance — exactly the sequential sweep's math,
+            // submitted together.
+            let mut plan: Vec<(u64, usize)> = Vec::with_capacity(depth);
+            let mut c = cursor;
+            while plan.len() < depth && c < end {
+                let want = (end - c).min(window as u64);
+                // Sector-multiple read length (trait contract), ≥1 sector.
+                let take = (want as usize).next_multiple_of(ss as usize).min(window);
+                let take = take.max(ss as usize).min(window);
+                let take = (take as u64).min(end - c) as usize;
+                let take = take.max(ss as usize);
+                plan.push((c, take));
+                if c + take as u64 >= end {
+                    break; // the final window is in this batch
                 }
+                let advance = (take - CARVE_OVERLAP.min(take / 2)).max(1);
+                c += advance as u64;
             }
-            sink.on_progress(cursor + take as u64 - start_byte, end - start_byte);
-            if cursor + take as u64 >= end {
-                break;
+            // Pipeline the batch: `depth` windows in flight at once on
+            // IOCP-class devices; the sequential default elsewhere.
+            let mut batch: Vec<BatchRead<'_>> = plan
+                .iter()
+                .zip(bufs.iter_mut())
+                .map(|(&(off, take), b)| BatchRead {
+                    start_lba: off / ss,
+                    buf: &mut b[..take],
+                })
+                .collect();
+            let results = self.dev.read_sectors_sparse_batch(&mut batch)?;
+            drop(batch); // release the buffer borrows before scanning
+            // Process in OFFSET order (callers may not depend on the
+            // completion order the device chose).
+            for (i, &(off, take)) in plan.iter().enumerate() {
+                ctrl.checkpoint()?;
+                let is_last = off + take as u64 >= end;
+                self.scan_window(
+                    sink,
+                    &bufs[i][..take],
+                    &results[i],
+                    off,
+                    is_last,
+                    end,
+                    &finders,
+                    &mut emitted,
+                    &mut stats,
+                );
+                sink.on_progress(off + take as u64 - start_byte, end - start_byte);
             }
-            let advance = (take - CARVE_OVERLAP.min(take / 2)).max(1);
-            cursor += advance as u64;
+            let (last_off, last_take) = *plan.last().expect("plan has a window");
+            if last_off + last_take as u64 >= end {
+                break 'batches;
+            }
+            let advance = (last_take - CARVE_OVERLAP.min(last_take / 2)).max(1);
+            cursor = last_off + advance as u64;
         }
         sink.on_progress(end - start_byte, end - start_byte);
         Ok(stats)
+    }
+
+    /// Scan one FILLED carve window: signature hunt over the new-hit
+    /// region (everything but the overlap tail — the final window
+    /// scans fully), grammar validation, entry emission. Extracted
+    /// from the sequential loop so the batched pipeline reuses the
+    /// exact per-window semantics.
+    #[allow(clippy::too_many_arguments)] // one window-scan state pass
+    fn scan_window(
+        &self,
+        sink: &mut dyn ScanSink,
+        buf: &[u8],
+        bad: &[(u64, u64)],
+        window_start: u64,
+        is_last: bool,
+        end: u64,
+        finders: &[(usize, &Signature, memmem::Finder<'static>)],
+        emitted: &mut HashSet<u64>,
+        stats: &mut ScanStats,
+    ) {
+        let take = buf.len();
+        // New-hit region: everything except the overlap tail (the
+        // final window scans fully — there is no next window).
+        let scan_end = if is_last {
+            take
+        } else {
+            take.saturating_sub(CARVE_OVERLAP)
+        };
+        let hay = &buf[..scan_end];
+        for (_, sig, finder) in finders {
+            let mut from = 0usize;
+            while let Some(rel) = finder.find(&hay[from..]) {
+                let rel = from + rel;
+                from = rel + 1;
+                // File start relative to the window (magic sits at
+                // sig.offset inside the file).
+                if rel < sig.offset {
+                    continue;
+                }
+                let file_rel = rel - sig.offset;
+                // Skip hits landing in bad (zero-filled) ranges.
+                let magic_end = rel + sig.magic.len();
+                if bad
+                    .iter()
+                    .any(|&(o, l)| rel < (o + l) as usize && magic_end > o as usize)
+                {
+                    continue;
+                }
+                let abs = window_start + file_rel as u64;
+                if emitted.contains(&abs) {
+                    continue; // an earlier signature already won here
+                }
+                if let Some(mut h) = self.validate_hit(sig, abs, end) {
+                    h.category = sig.category;
+                    if h.length >= sig.min_size {
+                        let name = format!("{}_{abs:08X}{}", sig.name_prefix, sig.ext);
+                        let mut entry = FoundEntry::structured(name, false, FsKind::Raw);
+                        entry.parent_hint = None; // carved → lost branches
+                        entry.origin = if sig.named_by_content {
+                            NodeOrigin::LostName
+                        } else {
+                            NodeOrigin::LostPath
+                        };
+                        entry.size = h.length;
+                        entry.extents = vec![Extent::new(abs, h.length.min(end - abs))];
+                        entry.confidence = h.confidence;
+                        entry.category_hint = Some(h.category);
+                        entry.dimensions = h.dimensions;
+                        // Same-content key from the DEVICE bytes —
+                        // deterministic regardless of window geometry
+                        // (hashing window-relative bytes would make
+                        // the key depend on where window boundaries
+                        // fell). One bounded 4 KiB read per EMITTED
+                        // candidate, never per raw hit; duplicate
+                        // copies of one file share their true on-disk
+                        // prefix and the tree marks repeats as
+                        // Version — the essential-mode dedup.
+                        let want = (h.length as usize).min(4096);
+                        if want > 0 {
+                            let mut prefix = vec![0u8; want];
+                            if self.dev.read_bytes(abs, &mut prefix).is_ok() {
+                                entry.content_key = Some(content_hash(&prefix, h.length));
+                            }
+                        }
+                        entry.source = FsKind::Raw;
+                        stats.entries += 1;
+                        stats.bytes += entry.size;
+                        emitted.insert(abs);
+                        sink.on_entry(entry); // keep scanning —
+                        // further hits of this signature and every
+                        // other one still surface.
+                    }
+                }
+            }
+        }
     }
 
     /// Validate a signature hit: apply the format grammar and derive
@@ -953,5 +1030,204 @@ mod tests {
         ram.bad_lba = Some(10);
         let (stats, _) = carve_ram(ram, 512 * 64);
         assert_eq!(stats.entries, 0);
+    }
+
+    // ── §5.1 items 3+5: the pipelined batch sweep ─────────────────
+
+    /// Test double: a profile-forced device whose batches complete in
+    /// REVERSE order — proving the carver's results never depend on
+    /// completion ordering (the IOCP contract) — and which records
+    /// the batch sizes it served.
+    struct BatchingRam {
+        ram: Arc<RamDevice>,
+        profile: crate::blockdev::ReadProfile,
+        batches: parking_lot::Mutex<Vec<usize>>,
+    }
+
+    impl BlockDevice for BatchingRam {
+        fn sector_size(&self) -> u32 {
+            self.ram.sector_size()
+        }
+        fn total_sectors(&self) -> u64 {
+            self.ram.total_sectors()
+        }
+        fn read_sectors(&self, start_lba: u64, buf: &mut [u8]) -> CoreResult<()> {
+            self.ram.read_sectors(start_lba, buf)
+        }
+        fn read_profile(&self) -> crate::blockdev::ReadProfile {
+            self.profile
+        }
+        fn read_sectors_sparse_batch(
+            &self,
+            batch: &mut [crate::blockdev::BatchRead<'_>],
+        ) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+            self.batches.lock().push(batch.len());
+            // Complete in REVERSE submission order (the adversarial
+            // completion schedule) while results stay indexed by
+            // SUBMISSION position.
+            let mut out: Vec<Vec<(u64, u64)>> = Vec::with_capacity(batch.len());
+            out.resize_with(batch.len(), Vec::new);
+            for i in (0..batch.len()).rev() {
+                let r = &mut batch[i];
+                out[i] = self.ram.read_sectors_sparse(r.start_lba, r.buf)?;
+            }
+            Ok(out)
+        }
+    }
+
+    /// A deterministic PNG corpus at varied offsets (several land
+    /// across window boundaries).
+    fn png_corpus(size: usize) -> RamDevice {
+        let mut ram = RamDevice::new(size, 512);
+        let img = small_png();
+        // Offsets chosen to straddle 128 KiB window boundaries: the
+        // forced-profile run uses 128 KiB windows × depth 4.
+        let mut at = 0usize;
+        let step = 96 * 1024;
+        while at + img.len() < size {
+            ram.data[at..at + img.len()].copy_from_slice(&img);
+            at += step;
+        }
+        ram
+    }
+
+    fn small_png() -> Vec<u8> {
+        let mut img = Vec::new();
+        img.extend_from_slice(b"\x89PNG\r\n\x1A\n");
+        img.extend_from_slice(&[0u8; 300]);
+        img.extend_from_slice(b"IEND");
+        img.extend_from_slice(&[0u8; 4]);
+        img
+    }
+
+    fn entry_signature_set(entries: &[FoundEntry]) -> Vec<(String, u64, u64, Option<u64>)> {
+        let mut v: Vec<(String, u64, u64, Option<u64>)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.name.clone(),
+                    e.extents.first().map_or(0, |x| x.offset),
+                    e.size,
+                    e.content_key,
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn batched_carve_matches_sequential_exactly() {
+        // The §5.1 item-3 contract: pipelined reads (any queue depth,
+        // any completion order) produce BYTE-IDENTICAL carve results
+        // — same names, extents, sizes, content keys.
+        let size = 512 * 8192; // 4 MiB
+        let ram = Arc::new(png_corpus(size));
+
+        // Sequential reference (default profile: 1 MiB window, QD 1).
+        let seq_dev: Arc<dyn BlockDevice> = Arc::clone(&ram) as Arc<dyn BlockDevice>;
+        let mut sink = Collector(Vec::new());
+        RawCarver::new(seq_dev)
+            .carve(&mut sink, &ScanControl::new(), 0, size as u64)
+            .expect("sequential carve");
+        let seq = entry_signature_set(&sink.0);
+        assert!(
+            seq.len() >= 5,
+            "corpus must span multiple windows, got {}",
+            seq.len()
+        );
+
+        // Pipelined run: 128 KiB windows, depth 4, reversed completions.
+        let batch_dev = BatchingRam {
+            ram: Arc::clone(&ram),
+            profile: crate::blockdev::ReadProfile {
+                window_bytes: 128 * 1024,
+                queue_depth: 4,
+            },
+            batches: parking_lot::Mutex::new(Vec::new()),
+        };
+        let mut sink2 = Collector(Vec::new());
+        RawCarver::new(Arc::new(batch_dev) as Arc<dyn BlockDevice>)
+            .carve(&mut sink2, &ScanControl::new(), 0, size as u64)
+            .expect("batched carve");
+        let batched = entry_signature_set(&sink2.0);
+
+        assert_eq!(seq, batched, "queue depth must not change carve results");
+    }
+
+    #[test]
+    fn batched_carve_uses_multi_window_batches() {
+        // The pipeline actually SUBMITS multi-window batches (the
+        // depth-4 profile must never degrade to one window at a time).
+        let size = 512 * 8192;
+        let ram = Arc::new(png_corpus(size));
+        let batch_dev = Arc::new(BatchingRam {
+            ram,
+            profile: crate::blockdev::ReadProfile {
+                window_bytes: 128 * 1024,
+                queue_depth: 4,
+            },
+            batches: parking_lot::Mutex::new(Vec::new()),
+        });
+        let mut sink = Collector(Vec::new());
+        RawCarver::new(Arc::clone(&batch_dev) as Arc<dyn BlockDevice>)
+            .carve(&mut sink, &ScanControl::new(), 0, size as u64)
+            .expect("carve");
+        let batches = batch_dev.batches.lock().clone();
+        assert!(
+            batches.iter().any(|b| *b > 1),
+            "multi-window batches must be submitted: {batches:?}"
+        );
+        assert!(
+            batches.iter().all(|b| *b <= 4),
+            "depth is an upper bound: {batches:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_signatures_carve_exactly_once_under_batching() {
+        // Images landing exactly on intra-batch window boundaries are
+        // carved exactly once (the overlap re-scan + emitted set).
+        let size = 512 * 2048; // 1 MiB → 8 × 128 KiB windows, 2 batches
+        let mut ram = RamDevice::new(size, 512);
+        let img = small_png();
+        // Place one image so its signature sits at a 128 KiB boundary
+        // and another straddling the next boundary.
+        let b1 = 128 * 1024;
+        let b2 = 2 * 128 * 1024;
+        ram.data[b1..b1 + img.len()].copy_from_slice(&img);
+        ram.data[b2 - 64..b2 - 64 + img.len()].copy_from_slice(&img);
+        let batch_dev = BatchingRam {
+            ram: Arc::new(ram),
+            profile: crate::blockdev::ReadProfile {
+                window_bytes: 128 * 1024,
+                queue_depth: 4,
+            },
+            batches: parking_lot::Mutex::new(Vec::new()),
+        };
+        let mut sink = Collector(Vec::new());
+        RawCarver::new(Arc::new(batch_dev) as Arc<dyn BlockDevice>)
+            .carve(&mut sink, &ScanControl::new(), 0, size as u64)
+            .expect("carve");
+        assert_eq!(sink.0.len(), 2, "each boundary image exactly once");
+    }
+
+    #[test]
+    fn profile_bands_clamp() {
+        // Hostile probes can't request pathological I/O shapes.
+        let p = crate::blockdev::ReadProfile {
+            window_bytes: 1,
+            queue_depth: 999,
+        }
+        .clamped();
+        assert_eq!(p.window_bytes, 256 * 1024);
+        assert_eq!(p.queue_depth, 16);
+        let p = crate::blockdev::ReadProfile {
+            window_bytes: 1024 * 1024 * 1024,
+            queue_depth: 0,
+        }
+        .clamped();
+        assert_eq!(p.window_bytes, 16 * 1024 * 1024);
+        assert_eq!(p.queue_depth, 1);
     }
 }

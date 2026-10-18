@@ -28,22 +28,26 @@
 
 use std::sync::Arc;
 
-use dw_core::blockdev::{AlignedBuf, BlockDevice, check_buf};
+use dw_core::blockdev::{AlignedBuf, BatchRead, BlockDevice, ReadProfile, check_buf};
 use dw_core::error::{CoreError, CoreResult};
 
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    BusTypeNvme, CreateFileW, FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    ReadFile,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::IO::{
+    CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatus, OVERLAPPED,
+};
 use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO,
-    IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
-    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR, STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY,
-    StorageAccessAlignmentProperty,
+    DEVICE_SEEK_PENALTY_DESCRIPTOR, DEVICE_TRIM_DESCRIPTOR, DISK_GEOMETRY_EX,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR, STORAGE_DEVICE_DESCRIPTOR,
+    STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY, StorageAccessAlignmentProperty,
+    StorageDeviceProperty, StorageDeviceSeekPenaltyProperty, StorageDeviceTrimProperty,
 };
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent};
 
@@ -58,6 +62,14 @@ const RAW_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHAR
 /// Staging chunk cap for unaligned buffers (1 MiB — bounds memory for
 /// arbitrarily large unaligned requests).
 const STAGE_CHUNK: usize = 1024 * 1024;
+
+/// Batched-read completion timeout: a healthy ≤16 MiB window completes
+/// in seconds even on dying USB media; when the harvest stalls this
+/// long, the window is CANCELLED (`CancelIoEx`) and its completion
+/// packet (ERROR_OPERATION_ABORTED) arrives like any other failure —
+/// the slot then degrades to per-sector salvage. No infinite waits,
+/// no buffer races with in-flight reads.
+const IOCP_HARVEST_TIMEOUT_MS: u32 = 120_000;
 
 /// ERROR_IO_PENDING (WIN32_ERROR 997) in its HRESULT view — the
 /// normal "read queued" state windows-rs surfaces as `Err`.
@@ -75,9 +87,15 @@ pub struct RawHandleDevice {
     no_buffering: bool,
     /// Required buffer ADDRESS alignment (logical sector, ≥ 512).
     alignment: u32,
+    /// The media-class adaptive profile (§5.1 item 5) — probed at
+    /// open from bus type / seek penalty / TRIM support.
+    profile: ReadProfile,
     /// Recycled manual-reset events for overlapped waits (kernel
     /// objects are too costly to create per read).
     events: Mutex<Vec<HANDLE>>,
+    /// The lazily created completion port batching carve windows
+    /// (§5.1 item 3). One port per handle; created on first batch.
+    iocp: Mutex<Option<HANDLE>>,
 }
 
 // SAFETY: the HANDLE is used only through positioned OVERLAPPED reads
@@ -172,6 +190,7 @@ impl RawHandleDevice {
         };
         let (sector_size, total_sectors) = probe_capacity(&handle, physical);
         let alignment = probe_alignment(&handle).max(sector_size).max(512);
+        let profile = probe_media_class(&handle).profile();
         Ok(Self {
             handle,
             sector_size,
@@ -179,7 +198,9 @@ impl RawHandleDevice {
             label: label.to_string(),
             no_buffering,
             alignment,
+            profile,
             events: Mutex::new(Vec::new()),
+            iocp: Mutex::new(None),
         })
     }
 
@@ -330,14 +351,262 @@ impl RawHandleDevice {
         }
         Ok((num.DeviceNumber, num.PartitionNumber))
     }
+
+    /// Per-sector salvage over a range the bulk read could not satisfy:
+    /// ONE attempt per sector (never a retry storm), readable sectors
+    /// land in `buf`, dead sectors zero-fill, contiguous dead byte
+    /// ranges are reported `(offset_in_buf, len)`.
+    fn salvage_range(&self, offset: u64, buf: &mut [u8]) -> Vec<(u64, u64)> {
+        let ss = self.sector_size as usize;
+        let mut bad: Vec<(u64, u64)> = Vec::new();
+        let mut bad_start: Option<usize> = None;
+        for i in 0..(buf.len() / ss) {
+            let at = offset + (i * ss) as u64;
+            let piece = &mut buf[i * ss..(i + 1) * ss];
+            let ok = self.read_aligned_aware(at, piece).is_ok();
+            if !ok {
+                // The trait contract: gaps read as zeros (never the
+                // previous window's stale bytes).
+                piece.fill(0);
+            }
+            match (ok, bad_start) {
+                (false, None) => bad_start = Some(i * ss),
+                (true, Some(s)) => {
+                    bad.push((s as u64, (i * ss - s) as u64));
+                    bad_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = bad_start {
+            bad.push((s as u64, (buf.len() - s) as u64));
+        }
+        bad
+    }
+
+    /// The (lazily created) completion port for batched reads. The
+    /// device handle is associated once; every subsequent batch
+    /// submits positioned overlapped reads and harvests completions
+    /// from this port (§5.1 item 3).
+    ///
+    /// # Errors
+    /// [`CoreError::Other`] when the port cannot be created.
+    fn iocp(&self) -> CoreResult<HANDLE> {
+        let mut guard = self.iocp.lock();
+        if let Some(h) = *guard {
+            return Ok(h);
+        }
+        // SAFETY: the handle is owned and opened OVERLAPPED; we pass
+        // no existing port (fresh association), key 0 (slot identity
+        // rides in the OVERLAPPED pointer), and let the system pick
+        // the concurrency (one harvesting thread per batch anyway).
+        let port = unsafe { CreateIoCompletionPort(self.handle, None, 0, 0) }
+            .map_err(|e| CoreError::Other(format!("CreateIoCompletionPort: {e}")))?;
+        *guard = Some(port);
+        Ok(port)
+    }
+
+    /// The IOCP pipeline (§5.1 item 3): submit every window as one
+    /// positioned overlapped read, then harvest completions from the
+    /// port as they land — queue depth = `batch.len()`, no shared file
+    /// pointer, no worker-per-read. Short completions and failures
+    /// degrade through [`RawHandleDevice::salvage_range`] exactly like
+    /// the sequential path, so results are IDENTICAL at any depth.
+    fn iocp_batch(&self, batch: &mut [BatchRead<'_>]) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+        let port = self.iocp()?;
+        let ss = u64::from(self.sector_size);
+        let mut slots: Vec<BatchSlot> = Vec::with_capacity(batch.len());
+        // ── submit ──────────────────────────────────────────────────
+        for r in batch.iter_mut() {
+            let offset = r.start_lba * ss;
+            let mut slot = BatchSlot {
+                ov: Box::new(OVERLAPPED {
+                    // The union's Offset/OffsetHigh arm is the documented
+                    // way to carry a 64-bit file position.
+                    Anonymous: windows::Win32::System::IO::OVERLAPPED_0 {
+                        Anonymous: windows::Win32::System::IO::OVERLAPPED_0_0 {
+                            Offset: u32::try_from(offset & 0xFFFF_FFFF).unwrap_or(u32::MAX),
+                            OffsetHigh: u32::try_from(offset >> 32).unwrap_or(u32::MAX),
+                        },
+                    },
+                    // Null event: completions post to the port.
+                    hEvent: HANDLE::default(),
+                    ..Default::default()
+                }),
+                len: r.buf.len(),
+                done: 0,
+                status: SlotStatus::Pending,
+            };
+            // SAFETY: the handle is owned, opened OVERLAPPED and
+            // associated with `port`; the buffer slice is exclusively
+            // borrowed for the whole call; the OVERLAPPED is boxed
+            // (stable address) and untouched until its packet is
+            // harvested below. Unique buffer + unique OVERLAPPED per
+            // request — the IOCP multi-read contract.
+            let queued = unsafe {
+                ReadFile(
+                    self.handle,
+                    Some(&mut *r.buf),
+                    None,
+                    Some(std::ptr::from_mut(&mut *slot.ov)),
+                )
+            };
+            match queued {
+                // Synchronous completion on an associated handle STILL
+                // queues a completion packet — wait for it (freeing
+                // the OVERLAPPED before harvest would be UB).
+                Ok(()) => {}
+                Err(e) if e.code() == ERROR_IO_PENDING_HR => {}
+                // Submission-time failure: no packet will arrive.
+                Err(_) => {
+                    slot.status = SlotStatus::Rejected;
+                }
+            }
+            slots.push(slot);
+        }
+        // ── harvest ─────────────────────────────────────────────
+        self.harvest_completions(port, &mut slots);
+        // ── settle: identical semantics to the sequential path ──
+        Ok(self.settle_batch(batch, &slots, ss))
+    }
+
+    /// Drain the port until every Pending slot completed (or was
+    /// cancelled after [`IOCP_HARVEST_TIMEOUT_MS`]). Cancelled reads
+    /// deliver ERROR_OPERATION_ABORTED packets, so the loop always
+    /// terminates and no buffer is touched after we return.
+    fn harvest_completions(&self, port: HANDLE, slots: &mut [BatchSlot]) {
+        let mut pending = slots
+            .iter()
+            .filter(|s| matches!(s.status, SlotStatus::Pending))
+            .count();
+        while pending > 0 {
+            let mut bytes = 0u32;
+            let mut key = 0usize;
+            let mut pov: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: port is owned; all out-params are stack locals.
+            let harvested = unsafe {
+                GetQueuedCompletionStatus(
+                    port,
+                    std::ptr::from_mut(&mut bytes),
+                    std::ptr::from_mut(&mut key),
+                    std::ptr::from_mut(&mut pov),
+                    IOCP_HARVEST_TIMEOUT_MS,
+                )
+            };
+            if pov.is_null() {
+                // Timeout / port-level failure: cancel every still-
+                // pending read; each cancellation delivers its own
+                // packet (ERROR_OPERATION_ABORTED), keeping the
+                // harvest loop total and the buffers race-free.
+                for slot in slots.iter_mut() {
+                    if matches!(slot.status, SlotStatus::Pending) {
+                        // SAFETY: the OVERLAPPED belongs to a live
+                        // in-flight read on our owned handle.
+                        let _ =
+                            unsafe { CancelIoEx(self.handle, Some(std::ptr::from_ref(&*slot.ov))) };
+                    }
+                }
+                continue;
+            }
+            // Map the completed OVERLAPPED back to its slot (depth ≤16:
+            // a linear scan beats an index header).
+            let slot = slots
+                .iter_mut()
+                .find(|s| std::ptr::from_ref(&*s.ov) == pov)
+                .expect("completion for an unknown OVERLAPPED");
+            if matches!(slot.status, SlotStatus::Pending) {
+                pending -= 1;
+                match harvested {
+                    Ok(()) => {
+                        slot.done = bytes;
+                        slot.status = SlotStatus::Complete;
+                    }
+                    Err(_) => {
+                        slot.status = SlotStatus::Failed;
+                    }
+                }
+            }
+            // Duplicate/stale packets (already-complete slots) are
+            // dropped — a slot completes exactly once.
+        }
+    }
+
+    /// Post-harvest window settlement: full completions pass
+    /// clean, short tails salvage their remainder, rejected/
+    /// failed windows salvage whole-range — exactly the
+    /// sequential path's semantics.
+    fn settle_batch(
+        &self,
+        batch: &mut [BatchRead<'_>],
+        slots: &[BatchSlot],
+        ss: u64,
+    ) -> Vec<Vec<(u64, u64)>> {
+        let mut out: Vec<Vec<(u64, u64)>> = Vec::with_capacity(batch.len());
+        for (i, r) in batch.iter_mut().enumerate() {
+            let slot = &slots[i];
+            let offset = r.start_lba * ss;
+            match slot.status {
+                SlotStatus::Complete if slot.done as usize == slot.len => {
+                    out.push(Vec::new());
+                }
+                SlotStatus::Complete => {
+                    // Short completion (device tail): salvage just the
+                    // remainder, keeping the already-transferred head.
+                    let done = slot.done as usize;
+                    let mut bad = self.salvage_range(offset + done as u64, &mut r.buf[done..]);
+                    for b in &mut bad {
+                        b.0 += done as u64;
+                    }
+                    out.push(bad);
+                }
+                SlotStatus::Rejected | SlotStatus::Failed => {
+                    // The buffer content is undefined — full-range
+                    // salvage (one attempt per sector, zero-fill gaps).
+                    out.push(self.salvage_range(offset, r.buf));
+                }
+                SlotStatus::Pending => unreachable!("harvest loop drains every pending slot"),
+            }
+        }
+        out
+    }
+}
+
+/// One batched window in flight.
+struct BatchSlot {
+    /// Boxed → the OVERLAPPED address is stable for the kernel to
+    /// complete into; the box lives until the packet is harvested.
+    ov: Box<OVERLAPPED>,
+    /// Window byte length (for short-completion detection).
+    len: usize,
+    /// Bytes transferred on success.
+    done: u32,
+    /// Submission/completion bookkeeping.
+    status: SlotStatus,
+}
+
+enum SlotStatus {
+    /// Queued or synchronously completed — a completion packet IS
+    /// coming (associated handles queue packets even when the
+    /// ReadFile call completed inline).
+    Pending,
+    /// Submission-time failure (no packet will arrive).
+    Rejected,
+    /// Harvested: bytes in `done`.
+    Complete,
+    /// Harvested or cancelled with a failure.
+    Failed,
 }
 
 impl Drop for RawHandleDevice {
     fn drop(&mut self) {
-        // SAFETY: we own the handle and every pooled event; drop runs
-        // exactly once and no reads are in flight (borrow discipline:
-        // read paths hold &self only while alive).
+        // SAFETY: we own the handle, the completion port and every
+        // pooled event; drop runs exactly once and no reads are in
+        // flight (borrow discipline: read paths hold &self only while
+        // alive).
         unsafe {
+            if let Some(port) = *self.iocp.lock() {
+                let _ = CloseHandle(port);
+            }
             let _ = CloseHandle(self.handle);
             for ev in self.events.lock().drain(..) {
                 let _ = CloseHandle(ev);
@@ -439,6 +708,122 @@ fn probe_alignment(handle: &HANDLE) -> u32 {
     }
 }
 
+/// The media class driving the adaptive I/O profile (§5.1 item 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaClass {
+    /// Flash-backed (SSD/NVMe): parallelism pays — wide windows,
+    /// deep queues (4–16 MiB, QD 4–16).
+    Flash,
+    /// Rotational or unknown: sequential-friendly — modest windows,
+    /// shallow queues (1–4 MiB, QD 1–2). The safe default for USB
+    /// enclosures and probes that fail.
+    Rotational,
+}
+
+impl MediaClass {
+    /// The §5.1 profile for this class (values benchmarked in
+    /// `docs/benchmarks/io-backend.md`).
+    #[must_use]
+    pub fn profile(self) -> ReadProfile {
+        match self {
+            Self::Flash => ReadProfile::SSD,
+            Self::Rotational => ReadProfile::HDD,
+        }
+    }
+}
+
+/// Classify the media behind a raw handle. Evidence, in order:
+///
+/// 1. `StorageDeviceProperty` → `BusType` (NVMe is always flash).
+/// 2. `StorageDeviceSeekPenaltyProperty` → `IncursSeekPenalty == FALSE`
+///    (the documented Win7+ flash signal; works through most USB
+///    bridges).
+/// 3. `StorageDeviceTrimProperty` → `TrimEnabled` (TRIM-capable
+///    media is flash).
+///
+/// Anything inconclusive → [`MediaClass::Rotational`] (a QD-2
+/// sequential sweep is never harmful; a deep queue on a 5400-rpm
+/// drive would thrash).
+fn probe_media_class(handle: &HANDLE) -> MediaClass {
+    // 1) Bus type.
+    let mut query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
+        AdditionalParameters: [0; 1],
+    };
+    let mut desc_buf = vec![0u8; std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() + 1024];
+    // SAFETY: handle is owned; the oversized buffer covers the
+    // descriptor plus its variable-length tail (BusType is inline).
+    let ok = unsafe {
+        DeviceIoControl(
+            *handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(std::ptr::from_mut(&mut query).cast()),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some(desc_buf.as_mut_ptr().cast()),
+            win_len(desc_buf.len()),
+            None,
+            None,
+        )
+    };
+    if ok.is_ok() && desc_buf.len() >= std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
+        // STORAGE_DEVICE_DESCRIPTOR.BusType is an inline DWORD enum at
+        // offset 28 (ABI-stable layout; the struct is variable-length
+        // so we read the fixed head from the raw buffer).
+        let bt = u32::from_le_bytes([desc_buf[28], desc_buf[29], desc_buf[30], desc_buf[31]]);
+        if bt == BusTypeNvme.0 as u32 {
+            return MediaClass::Flash;
+        }
+    }
+    // 2) Seek penalty (the documented Win7+ flash signal).
+    let mut query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceSeekPenaltyProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
+        AdditionalParameters: [0; 1],
+    };
+    let mut penalty = DEVICE_SEEK_PENALTY_DESCRIPTOR::default();
+    // SAFETY: handle is owned; documented query/descriptor exchange.
+    let ok = unsafe {
+        DeviceIoControl(
+            *handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(std::ptr::from_mut(&mut query).cast()),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some(std::ptr::from_mut(&mut penalty).cast()),
+            win_len(std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>()),
+            None,
+            None,
+        )
+    };
+    if ok.is_ok() && !penalty.IncursSeekPenalty {
+        return MediaClass::Flash;
+    }
+    // 3) TRIM support.
+    let mut query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceTrimProperty,
+        QueryType: windows::Win32::System::Ioctl::PropertyStandardQuery,
+        AdditionalParameters: [0; 1],
+    };
+    let mut trim = DEVICE_TRIM_DESCRIPTOR::default();
+    // SAFETY: handle is owned; documented query/descriptor exchange.
+    let ok = unsafe {
+        DeviceIoControl(
+            *handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(std::ptr::from_mut(&mut query).cast()),
+            win_len(std::mem::size_of::<STORAGE_PROPERTY_QUERY>()),
+            Some(std::ptr::from_mut(&mut trim).cast()),
+            win_len(std::mem::size_of::<DEVICE_TRIM_DESCRIPTOR>()),
+            None,
+            None,
+        )
+    };
+    if ok.is_ok() && trim.TrimEnabled {
+        return MediaClass::Flash;
+    }
+    MediaClass::Rotational
+}
+
 impl BlockDevice for RawHandleDevice {
     fn sector_size(&self) -> u32 {
         self.sector_size
@@ -464,42 +849,52 @@ impl BlockDevice for RawHandleDevice {
         if let Some(e) = check_buf(buf, self.sector_size) {
             return Err(e);
         }
-        let ss = self.sector_size as usize;
-        let offset = start_lba * ss as u64;
+        let offset = start_lba * u64::from(self.sector_size);
         if self.read_aligned_aware(offset, buf).is_ok() {
             return Ok(Vec::new());
         }
-        // Degrade to per-sector salvage. Sparse reads are bulk
-        // (carving windows are aligned), so the unaligned-staging
-        // path below is rare; per-sector staging is still bounded.
-        let mut bad: Vec<(u64, u64)> = Vec::new();
-        let mut bad_start: Option<usize> = None;
-        for i in 0..(buf.len() / ss) {
-            let at = offset + (i * ss) as u64;
-            let piece = &mut buf[i * ss..(i + 1) * ss];
-            let ok = self.read_aligned_aware(at, piece).is_ok();
-            if !ok {
-                // The trait contract: gaps read as zeros (never the
-                // previous window's stale bytes).
-                piece.fill(0);
-            }
-            match (ok, bad_start) {
-                (false, None) => bad_start = Some(i * ss),
-                (true, Some(s)) => {
-                    bad.push((s as u64, (i * ss - s) as u64));
-                    bad_start = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(s) = bad_start {
-            bad.push((s as u64, (buf.len() - s) as u64));
-        }
-        Ok(bad)
+        Ok(self.salvage_range(offset, buf))
     }
 
     fn preferred_read_alignment(&self) -> u32 {
         self.alignment
+    }
+
+    /// §5.1 item 5: the media-class profile probed at open (NVMe bus /
+    /// no seek penalty / TRIM → flash; otherwise the conservative HDD
+    /// profile — an unknown USB enclosure can be either, and QD 1–2
+    /// sequential is always safe).
+    fn read_profile(&self) -> ReadProfile {
+        self.profile
+    }
+
+    /// §5.1 item 3: the completion-based batch pipeline. Windows of a
+    /// batch submit as concurrent positioned overlapped reads on the
+    /// IOCP-associated handle and complete out of order; failures and
+    /// short tails degrade per-sector exactly like the sequential
+    /// path. Unaligned buffers or single-window batches take the
+    /// sequential route (identical semantics, no port needed).
+    fn read_sectors_sparse_batch(
+        &self,
+        batch: &mut [BatchRead<'_>],
+    ) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fast = batch.iter().all(|r| {
+            !self.no_buffering || (r.buf.as_ptr() as usize).is_multiple_of(self.alignment as usize)
+        }) && batch
+            .iter()
+            .all(|r| r.buf.len().is_multiple_of(self.sector_size as usize));
+        if fast && batch.len() > 1 {
+            return self.iocp_batch(batch);
+        }
+        // Sequential fallback (staging handles unaligned buffers).
+        let mut out = Vec::with_capacity(batch.len());
+        for r in batch {
+            out.push(self.read_sectors_sparse(r.start_lba, r.buf)?);
+        }
+        Ok(out)
     }
 
     fn describe(&self) -> String {
