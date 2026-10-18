@@ -147,8 +147,12 @@ pub fn probe_filesystem(dev: &dyn BlockDevice) -> CoreResult<FsKind> {
         if dev.capacity_bytes() >= 1176 {
             let sb = dev.read_struct_at::<110>(1024)?;
             if sb[56..58] == [0x53, 0xEF] {
-                let compat = u32::from_le_bytes([sb[0x60], sb[0x61], sb[0x62], sb[0x63]]);
-                let incompat = u32::from_le_bytes([sb[0x64], sb[0x65], sb[0x66], sb[0x67]]);
+                // Kernel `ext4_super_block`: s_feature_compat 0x5C,
+                // s_feature_incompat 0x60 (byte-verified against real
+                // mkfs output; the ext2 CI fixture gate caught the old
+                // swapped 0x60/0x64 reads, which mislabeled ext3).
+                let compat = u32::from_le_bytes([sb[0x5C], sb[0x5D], sb[0x5E], sb[0x5F]]);
+                let incompat = u32::from_le_bytes([sb[0x60], sb[0x61], sb[0x62], sb[0x63]]);
                 if incompat & 0x40 != 0 {
                     return Ok(FsKind::Ext4);
                 }
@@ -198,5 +202,50 @@ pub fn create_engine(kind: FsKind, dev: Arc<dyn BlockDevice>) -> CoreResult<Box<
         FsKind::HfsPlus => Ok(Box::new(hfsplus::HfsPlusEngine::new(dev.as_ref())?)),
         FsKind::Refs => Ok(Box::new(refs::RefsEngine::new(dev.as_ref())?)),
         other => Err(CoreError::Unsupported(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::RamDevice;
+
+    /// A true-layout (kernel `ext4_super_block` offsets) superblock
+    /// at byte 1024 on an otherwise-zero device — the probe path
+    /// (magic + compat/incompat discrimination).
+    fn ext_device(compat: u32, incompat: u32) -> RamDevice {
+        let mut ram = RamDevice::new(2 * 1024 * 1024, 512);
+        let sb = &mut ram.data[1024..2048];
+        sb[0x00..0x04].copy_from_slice(&4096u32.to_le_bytes()); // inodes
+        sb[0x04..0x08].copy_from_slice(&2048u32.to_le_bytes()); // blocks
+        sb[0x14..0x18].copy_from_slice(&1u32.to_le_bytes()); // first_data_block
+        sb[0x18..0x1C].copy_from_slice(&0u32.to_le_bytes()); // log_block_size
+        sb[0x20..0x24].copy_from_slice(&8192u32.to_le_bytes()); // blocks/group
+        sb[0x28..0x2C].copy_from_slice(&2048u32.to_le_bytes()); // inodes/group
+        sb[0x38..0x3A].copy_from_slice(&0xEF53u16.to_le_bytes()); // magic
+        sb[0x4C..0x50].copy_from_slice(&1u32.to_le_bytes()); // rev level
+        sb[0x58..0x5A].copy_from_slice(&256u16.to_le_bytes()); // inode size
+        sb[0x5C..0x60].copy_from_slice(&compat.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(&incompat.to_le_bytes());
+        ram
+    }
+
+    /// The ext2 CI fixture gate caught the old swapped feature-flag
+    /// reads (compat at 0x60, incompat at 0x64): ext3 volumes were
+    /// mislabeled ext2 (journal flag read from the wrong field) and
+    /// ext4 detection depended on the ro-compat bits happening to
+    /// include 0x40. True offsets: compat 0x5C, incompat 0x60.
+    #[test]
+    fn ext_probe_discriminates_true_layout() {
+        // Real mkfs.ext2 shape: compat ext_attr|resize|dir_index,
+        // incompat filetype.
+        let ext2 = ext_device(0x38, 0x02);
+        assert_eq!(probe_filesystem(&ext2).unwrap(), FsKind::Ext2);
+        // ext3 = ext2 + HAS_JOURNAL in compat.
+        let ext3 = ext_device(0x38 | 0x4, 0x02);
+        assert_eq!(probe_filesystem(&ext3).unwrap(), FsKind::Ext3);
+        // ext4 = EXTENTS in incompat.
+        let ext4 = ext_device(0x38, 0x02 | 0x40);
+        assert_eq!(probe_filesystem(&ext4).unwrap(), FsKind::Ext4);
     }
 }
