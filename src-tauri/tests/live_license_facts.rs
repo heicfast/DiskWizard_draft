@@ -220,13 +220,17 @@ fn real_device_fingerprint_is_deterministic_and_round_trips() {
         Some("x86_64"),
         "arch on the windows runner"
     );
-    for fact in [&facts_a.cpu_brand, &facts_a.hostname] {
-        if let Some(s) = fact {
-            assert!(
-                !s.chars().any(|c| c.is_control()),
-                "facts must be control-char clean before the wire: {s:?}"
-            );
-        }
+    for fact in [
+        facts_a.cpu_brand.as_deref(),
+        Some(facts_a.hostname.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(
+            !fact.chars().any(|c| c.is_control()),
+            "facts must be control-char clean before the wire: {fact:?}"
+        );
     }
     if let Some(brand) = &facts_a.cpu_brand {
         assert!(!brand.contains("  "), "brand spaces collapsed: {brand:?}");
