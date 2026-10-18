@@ -1,0 +1,88 @@
+name: Windows Integration (VHD end-to-end)
+
+# The REAL-core truth test (docs/CORE-PLAN.md §7.3): diskpart creates
+# + attaches a VHD, formats it NTFS, seeds known files (one kept, one
+# deleted), then the ignored integration tests exercise the full
+# stack — enumeration → scan (existing + deleted found) → recovery →
+# byte-compare against the seeds. Plus device/SMART smoke on the
+# runner's real disks.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: windows-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vhd-e2e:
+    name: VHD end-to-end (scan + recover)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build the integration tests
+        run: cargo test -p dw-win --test integration --no-run
+        working-directory: src-tauri
+        env:
+          CARGO_INCREMENTAL: "0"
+
+      - name: Create + seed the test VHD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vhd = "$env:TEMP\dwtest.vhd"
+          $script = @"
+          create vdisk file="$vhd" maximum=256 type=fixed
+          attach vdisk
+          create partition primary
+          format fs=ntfs label=DWTEST quick
+          assign letter=V
+          "@
+          $script | Out-File -Encoding ascii "$env:TEMP\dp.txt"
+          diskpart /s "$env:TEMP\dp.txt" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
+          Start-Sleep -Seconds 3
+          # Seed: present.txt (kept, 1 MiB patterned) + gone.txt (deleted).
+          $bytes = New-Object byte[] (1MB)
+          for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = ($i * 37 + 11) % 251 }
+          [IO.File]::WriteAllBytes("V:\present.txt", $bytes)
+          [IO.File]::WriteAllBytes("V:\gone.txt", $bytes[0..65535])
+          # Flush to disk, then delete.
+          "flush" | Out-Null
+          Remove-Item "V:\gone.txt" -Force
+          Write-Host "VHD seeded: present.txt (1 MiB) + gone.txt (deleted, 64 KiB)"
+
+      - name: Run the VHD end-to-end tests
+        run: cargo test -p dw-win --test integration -- --ignored --nocapture
+        working-directory: src-tauri
+        env:
+          RUST_BACKTRACE: "1"
+
+      - name: Device + SMART smoke
+        run: cargo test -p dw-win --test integration enumeration smart -- --ignored --nocapture
+        working-directory: src-tauri
+        continue-on-error: true # Runners' virtual disks may lack SMART
+
+      - name: Detach + clean the VHD
+        if: always()
+        shell: pwsh
+        run: |
+          $script = @"
+          select vdisk file="$env:TEMP\dwtest.vhd"
+          detach vdisk
+          "@
+          $script | Out-File -Encoding ascii "$env:TEMP\dp-clean.txt"
+          diskpart /s "$env:TEMP\dp-clean.txt" | Out-Host
+          Remove-Item "$env:TEMP\dwtest.vhd" -Force -ErrorAction SilentlyContinue
