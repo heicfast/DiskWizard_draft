@@ -20,14 +20,12 @@
 
 ## B. Open UI gaps (ordered)
 
-1. **UI-GAP-1 (QA-8, §5.1 item 8) — live-scan consistency disclosure.**
-   Research: mounted/system volumes should be VSS-snapshotted OR the UI
-   must disclose live-scan consistency limits. No VSS code exists; the
-   results header must show a notice when the source volume is
-   mounted+writable ("Live scan: files changed during the scan may not
-   be captured"). Core side: expose `sourceVolumeLive` on the scan
-   report. **This session: core field queued; the notice copy goes to
-   the UI agents.**
+1. **UI-GAP-1 (QA-8, §5.1 item 8) — live-scan consistency disclosure.
+   CLOSED (session 5):** the core now computes `source_volume_live`
+   (mounted-volume targets) and carries it on `scan-done`; the results
+   header renders the live-scan note (`.dw-live-scan-note`); both mocks
+   emit the flag for tour coverage. VSS snapshots remain an M3 option —
+   the disclosure arm of §5.1-8 is satisfied.
 2. **UI-GAP-2 — destination dialog source-row hard state.** The dialog
    shows an `isSource` flag; make the row disabled + "Cannot save to
    original partition" copy (research's hard-block wording). Backend

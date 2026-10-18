@@ -387,7 +387,7 @@ fn source_volume_live(device_id: &str) -> bool {
     {
         matches!(
             dw_win::volume::parse_device_id(device_id),
-            Ok(dw_win::volume::DeviceTarget::Volume(_))
+            Some(dw_win::volume::DeviceTarget::Volume(_))
         )
     }
     #[cfg(not(windows))]
