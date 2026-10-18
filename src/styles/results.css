@@ -1625,3 +1625,11 @@
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* QA-8 (§5.1-8 disclosure): the live-scan consistency note in the
+ * results header — a mounted-volume scan is honest about its limits
+ * (no VSS snapshot; files changed mid-scan may be missed). */
+.dw-live-scan-note {
+  opacity: 0.75;
+  font-weight: 400;
+}

@@ -271,7 +271,13 @@ impl ScanController {
         self.ctrl.checkpoint()?;
         self.emit(obs, 1.0);
         // (Classification ran incrementally; counters finalize here.)
+        // QA-17: the LOGICAL byte total can exceed the scanned device's
+        // capacity (sparse NTFS metafiles like $LogFile/$MFT growth, plus
+        // overlapping carved extents before the merge absorb). The stat
+        // fed to the UI's "X found" summary is clamped to the physical
+        // truth — per-file sizes stay honest, only the aggregate is capped.
         let (files, bytes) = tree.totals();
+        let bytes = clamp_report_bytes(bytes, self.dev.capacity_bytes());
 
         // ── DONE ───────────────────────────────────────────────────
         self.phase = Phase::Done;
@@ -300,6 +306,8 @@ impl ScanController {
         self.phase = Phase::Stopped;
         obs.on_phase(self.phase);
         let (files, bytes) = tree.totals();
+        // QA-17 (same clamp as the Done path — stopped scans report too).
+        let bytes = clamp_report_bytes(bytes, self.dev.capacity_bytes());
         (
             tree,
             ScanReport {
@@ -311,6 +319,15 @@ impl ScanController {
             },
         )
     }
+}
+
+/// QA-17: report bytes never exceed the scanned device's capacity.
+/// Sparse metafiles ($LogFile logical size, $MFT growth) and pre-merge
+/// carved overlaps can push the LOGICAL sum past physical reality; the
+/// aggregate stat stays honest by clamping to capacity (VHD-run
+/// evidence: bytes_found 546,825,304 on a 267 MB volume).
+fn clamp_report_bytes(logical_total: u64, capacity: u64) -> u64 {
+    logical_total.min(capacity)
 }
 
 /// The bridge: engine sink → tree ingest + live stats + progress.
@@ -594,6 +611,27 @@ mod tests {
         e[0x1C..0x20].copy_from_slice(&100u32.to_le_bytes());
         ram.data[root..root + 32].copy_from_slice(&e);
         ram
+    }
+
+    #[test]
+    fn qa17_report_bytes_never_exceed_capacity() {
+        // The regression test for the VHD-run evidence (bytes_found
+        // 546,825,304 on a 267 MB volume): the aggregate stat clamps to
+        // the scanned device's physical capacity no matter how large the
+        // LOGICAL total (sparse metafiles, pre-merge carved overlaps).
+        assert_eq!(clamp_report_bytes(546_825_304, 267_000_000), 267_000_000);
+        assert_eq!(clamp_report_bytes(1_000, u64::MAX), 1_000);
+        assert_eq!(clamp_report_bytes(0, 0), 0);
+        // And through the real pipeline: the FAT fixture's logical total
+        // is far below capacity, so the clamp must be a no-op there.
+        let ram = fat_image_with_file();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut obs = Recorder(Vec::new(), Vec::new());
+        let (_tree, report) = run_scan(dev, "Test (F:)", &mut obs).expect("scan");
+        assert!(
+            report.bytes_found <= 512 * 8192,
+            "aggregate bytes stay within the device capacity"
+        );
     }
 
     #[test]

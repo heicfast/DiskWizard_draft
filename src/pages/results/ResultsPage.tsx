@@ -150,6 +150,11 @@ export function ResultsPage() {
               ) : doneInfo ? (
                 <>
                   Scan completed in {formatDuration(doneInfo.durationSec)} · {formatCountFull(doneInfo.stats.filesFound)} files ({formatBytes(doneInfo.stats.bytesFound)})
+                  {doneInfo.sourceVolumeLive ? (
+                    <span className="dw-live-scan-note" title="Live scan — the source volume was mounted while scanning">
+                      {" "}· Live scan: files changed during the scan may not be captured
+                    </span>
+                  ) : null}
                 </>
               ) : (
                 <>Browsing saved results</>

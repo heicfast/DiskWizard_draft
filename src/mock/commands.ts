@@ -323,6 +323,9 @@ function finishScan(r: ScanRun): void {
     targetName: r.device.name,
     stats: r.stats,
     durationSec: Math.round(r.phaseElapsedBase + (Date.now() / 1000 - r.phaseStart)),
+    // QA-8 parity: the sim's synthetic devices are mounted-volume
+    // analogs — the live-scan notice renders in sim tours too.
+    sourceVolumeLive: true,
   });
 }
 
@@ -587,6 +590,7 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
           stats: run.stats,
           stopped: true,
           durationSec: Math.round(run.phaseElapsedBase),
+          sourceVolumeLive: true,
         });
       }
       return { ok: true };

@@ -297,6 +297,9 @@ impl MockState {
                     "targetName": self.device_name,
                     "stats": { "filesFound": self.files_found, "bytesFound": self.bytes_found },
                     "durationSec": (self.elapsed_base + in_phase / 1000.0).round() as u64,
+                    // QA-8 parity: sim devices are mounted-volume analogs
+                    // (the live-scan notice renders in sim tours too).
+                    "sourceVolumeLive": true,
                 });
                 return Some(("scan-done", payload));
             }

@@ -17,6 +17,10 @@ export interface ScanDoneInfo {
   stats: { filesFound: number; bytesFound: number };
   durationSec: number;
   stopped?: boolean;
+  /** QA-8 (§5.1-8 disclosure): the source volume was mounted while
+   * scanned — live-scan consistency limits apply (files changed during
+   * the scan may not be captured). True for mounted-volume targets. */
+  sourceVolumeLive?: boolean;
 }
 
 interface ScanState {

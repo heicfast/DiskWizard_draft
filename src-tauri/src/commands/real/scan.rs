@@ -294,6 +294,11 @@ fn start_scan_common(
     let generation = s.scan.begin(device_id, &display_name);
     // Keep the worker's control in the managed state.
     let control = s.scan.control.lock().clone();
+    // QA-8 (§5.1 item 8 disclosure): a mounted-volume target means a
+    // LIVE scan — the UI must disclose consistency limits (no VSS
+    // snapshot). Computed here (the worker only owns the device
+    // handle, not the target id's mount semantics).
+    let source_volume_live = source_volume_live(device_id);
     // Hoist the borrowed id into an owned String — the worker thread
     // requires 'static captures (device_id: &str cannot escape).
     let device_id = device_id.to_string();
@@ -347,6 +352,7 @@ fn start_scan_common(
                             "stats": { "filesFound": files, "bytesFound": bytes },
                             "durationSec": report.duration_sec,
                             "stopped": report.stopped,
+                            "sourceVolumeLive": source_volume_live,
                         }),
                     );
                 }
@@ -368,6 +374,27 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
+}
+
+/// QA-8: true when the scan target is a MOUNTED volume (drive-letter
+/// handle) — the scan ran live on a writable filesystem, so the results
+/// header must disclose the consistency limits (files changed during
+/// the scan may not be captured; §5.1 item 8's "or clearly disclose"
+/// arm). Partition-slice and whole-disk targets are raw reads of
+/// unmounted regions — not live.
+fn source_volume_live(device_id: &str) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(
+            dw_win::volume::parse_device_id(device_id),
+            Ok(dw_win::volume::DeviceTarget::Volume(_))
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device_id;
+        false
+    }
 }
 
 #[tauri::command]
