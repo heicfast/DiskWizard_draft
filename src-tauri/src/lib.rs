@@ -1,18 +1,16 @@
 //! DiskWizard `Tauri` app entry.
 //!
-//! This session ships the UI with a SIMULATED core (the owner's
-//! "second mock"): every IPC command is implemented against realistic
-//! synthetic data that mirrors the reverse-engineered architecture —
-//! device inventory, the quick→deep→organize scan phase machine with
-//! progressive result filling, recovery sessions, the recovery funnel,
-//! cloud drives, disk health (free tier) and the licensing gates.
-//! When the production Rust core lands it replaces [`commands::mock`]
-//! without touching the command surface or the frontend contract.
+//! The REAL core build (default): every IPC command routes to the
+//! production engine (dw-core scan/recover/session + dw-win devices/
+//! SMART/BitLocker + the DiskGenie-architecture dw-license client).
+//! `sim` builds swap the identical surface to the development mock
+//! (tour/CI-screenshot determinism) — the release pipelines never
+//! enable it (docs/CORE-PLAN.md §6).
 //!
-//! Window: opens MAXIMIZED (owner requirement) at a 1440×880 logical
-//! default with an 1180×760 floor; frameless with the Overlay titlebar
-//! style (the React TitleBar paints the chrome). The process launches
-//! elevated — build.rs embeds requireAdministrator (raw-disk access).
+//! Window: opens MAXIMIZED at a 1440×880 logical default with an
+//! 1180×760 floor; frameless with the Overlay titlebar style. The
+//! process launches elevated — build.rs embeds requireAdministrator
+//! (raw-disk access).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -67,44 +65,46 @@ fn fit_and_show(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(commands::shared_state())
         .invoke_handler(tauri::generate_handler![
             // Devices & health
-            commands::mock::list_devices,
-            commands::mock::refresh_devices,
-            commands::mock::connect_demo_device,
-            commands::mock::smart_report,
-            commands::mock::sdr_diagnose,
-            commands::mock::unlock_bitlocker,
+            commands::list_devices,
+            commands::refresh_devices,
+            commands::connect_demo_device,
+            commands::smart_report,
+            commands::sdr_diagnose,
+            commands::unlock_bitlocker,
             // Scan lifecycle
-            commands::mock::start_scan,
-            commands::mock::start_folder_scan,
-            commands::mock::start_disk_image_scan,
-            commands::mock::start_cloud_scan,
-            commands::mock::pause_scan,
-            commands::mock::resume_scan,
-            commands::mock::stop_scan,
-            commands::mock::get_scan_progress,
-            commands::mock::get_scan_results,
+            commands::start_scan,
+            commands::start_folder_scan,
+            commands::start_disk_image_scan,
+            commands::start_cloud_scan,
+            commands::pause_scan,
+            commands::resume_scan,
+            commands::stop_scan,
+            commands::get_scan_progress,
+            commands::get_scan_results,
             // Sessions
-            commands::mock::list_sessions,
-            commands::mock::resume_session,
+            commands::list_sessions,
+            commands::resume_session,
             // Recovery funnel
-            commands::mock::list_recover_destinations,
-            commands::mock::start_recovery,
+            commands::list_recover_destinations,
+            commands::start_recovery,
+            commands::preview_file,
             // Cloud
-            commands::mock::list_cloud_drives,
-            commands::mock::cloud_sign_in,
+            commands::list_cloud_drives,
+            commands::cloud_sign_in,
             // Licensing
-            commands::mock::license_status,
-            commands::mock::activate_license,
-            commands::mock::deactivate_license,
-            commands::mock::validate_now,
-            commands::mock::license_sim_set,
+            commands::license_status,
+            commands::activate_license,
+            commands::deactivate_license,
+            commands::validate_now,
+            commands::license_sim_set,
             // Settings
-            commands::mock::get_settings,
-            commands::mock::set_settings,
+            commands::get_settings,
+            commands::set_settings,
             // Dev hooks
-            commands::mock::get_dev_hooks,
+            commands::get_dev_hooks,
         ])
         .setup(|app| {
             commands::bootstrap(app.handle());

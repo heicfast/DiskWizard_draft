@@ -40,6 +40,35 @@ jobs:
       - name: Unit tests
         run: npm test -- --run
 
+  rust-core:
+    name: Rust core (fmt + clippy + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: "Gate: cargo fmt --check (engine crates)"
+        run: cargo fmt --all -- --check
+        working-directory: src-tauri
+
+      - name: "Gate: clippy -D warnings (engine crates)"
+        run: cargo clippy -p dw-core -p dw-license --all-targets -- -D warnings
+        working-directory: src-tauri
+
+      - name: "Gate: engine tests (dw-core + dw-license)"
+        run: cargo test -p dw-core -p dw-license
+        working-directory: src-tauri
+
   windows-nsis:
     name: Windows NSIS bundle (real build)
     runs-on: windows-latest

@@ -116,11 +116,22 @@ impl ScanController {
     /// Build for a device (any `BlockDevice`; wrapped in the cache).
     #[must_use]
     pub fn new(dev: Arc<dyn BlockDevice>, root_name: &str) -> Self {
+        Self::with_control(dev, root_name, ScanControl::new())
+    }
+
+    /// Build with an EXTERNAL control token (the app layer's managed
+    /// pause/stop handle — the run respects it).
+    #[must_use]
+    pub fn with_control(
+        dev: Arc<dyn BlockDevice>,
+        root_name: &str,
+        ctrl: ScanControl,
+    ) -> Self {
         let sectors = dev.total_sectors();
         Self {
             dev: Arc::new(CachedDevice::new(dev)),
             root_name: root_name.to_string(),
-            ctrl: ScanControl::new(),
+            ctrl,
             started: Instant::now(),
             files: 0,
             bytes: 0,

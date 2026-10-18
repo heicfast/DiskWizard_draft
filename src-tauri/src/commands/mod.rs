@@ -1,18 +1,31 @@
-//! The IPC command surface (mock-core session).
-//!
-//! Registers every command the frontend knows via the standard
-//! `generate_handler!` table; the implementations live in [`mock`]
-//! against realistic synthetic data that mirrors the reverse-engineered
-//! architecture. When the production engine lands, this module
-//! re-points the same commands at the real core — the frontend
-//! contract (`src/lib/ipc.ts` + `src/types.ts`) is frozen.
+//! The command layer — feature-routed between the REAL core
+//! (default; `docs/CORE-PLAN.md` §6) and the development simulation
+//! (`sim` feature: the session-1/2 mock, identical behavior, NEVER in
+//! release builds — the ui-screenshots workflow opts in explicitly).
+
+#[cfg(feature = "sim")]
 pub mod mock;
 
-use tauri::{AppHandle, Manager};
+#[cfg(feature = "sim")]
+pub use mock::*;
 
-/// Manage the mock-core state on the app + spawn the background
-/// ticker (scan-progress / scan-done / recover-* events).
-pub fn bootstrap(app: &AppHandle) {
-    app.manage(mock::shared_state());
+#[cfg(not(feature = "sim"))]
+mod real;
+
+#[cfg(not(feature = "sim"))]
+pub use real::{
+    devices::*, license::*, recover::*, scan::*, session::*, settings::*,
+};
+
+/// Bootstrap: start whatever background machinery the active build
+/// needs (the scan ticker for sim; nothing for the real core — its
+/// threads spawn per scan).
+pub fn bootstrap(app: &tauri::AppHandle) {
+    #[cfg(feature = "sim")]
     mock::spawn_scan_ticker(app.clone());
+    #[cfg(not(feature = "sim"))]
+    {
+        // Real-core licensing: launch the 24 h revalidation scheduler.
+        real::license::spawn_scheduler(app.clone());
+    }
 }

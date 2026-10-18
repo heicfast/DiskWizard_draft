@@ -47,8 +47,8 @@ jobs:
       - name: npm ci
         run: npm ci --no-audit --no-fund
 
-      - name: Build the app (release exe, no installer)
-        run: npx tauri build --no-bundle
+      - name: Build the app (release exe, sim core, no installer)
+        run: npx tauri build --no-bundle -- --features sim
         env:
           CARGO_INCREMENTAL: "0"
 
