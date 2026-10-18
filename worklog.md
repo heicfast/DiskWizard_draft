@@ -357,3 +357,53 @@ flag every irregularity with evidence.
 - Gates: fmt; clippy -D warnings clean (native + windows-msvc);
   117 engine tests green; 4/4 workflows green on real Windows with
   artifacts; VHD end-to-end proves the full pipeline on real NTFS.
+---
+## Session 5 (2026-10-18) — the engine-completion batch
+
+**Mission**: close the Section 6.3 filesystem matrix (ext2/3/4,
+HFS+/HFSX, ReFS were empty directories), the ~65%
+duplicate/nonessential filter, the SDR production flow, and the
+BitLocker BEK credential — all evidence-grounded per the research
+repository.
+
+**Landed** (commits dc291fa → 90c27e4):
+- `fs/ext`: superblock validation (FUN_180004710 gates, byte-exact),
+  32/64-byte GDT, extents + indirect resolution, BOTH kernel
+  deletion shapes for deleted names, orphan inode sweep. 11 tests.
+- `fs/hfsplus`: TN1150 volume-header gate ("H+"/"HX", 512-align,
+  version<17, fork clamps), catalog B-tree leaf-chain walk, cnid
+  path reconstruction, data+resource forks, extents-overflow
+  resolution, orphaned-cnid sweep. 5 tests.
+- `fs/refs`: DBR gate (RefsDbrImpl byte-exact), SUPB/CHKP/MSB+
+  page census with the block-reference family, checkpoint
+  newest-generation selection. Honest boundary: MSB tree records
+  are RTTI-level evidence only — no fabricated parsers; carving
+  covers content; M3 plan documented. 9 tests.
+- Dedup contract: FoundEntry.content_key (FNV-1a prefix hash,
+  carver-computed from the window buffer), same-region carved
+  absorb, content-repeat → Version origin (essential mode hides
+  client-side — no wire change).
+- **Critical carver fix**: the post-emit `break` capped carving at
+  ONE file per signature per 8 MiB window — an 8 MiB photo-heavy
+  region yielded one image. Emitted-position set + regression test.
+- `dw-core/repair.rs` (RawFixer model): boot diagnosis (FAT/exFAT/
+  NTFS + geometry gates, FS-specific backups, exFAT CRC32 checksum
+  gate), FixFromDBR/FixByScanSector plans with CopySectors undo
+  snapshots, apply/undo through a caller writer. 6 tests.
+- `dw-win/repair.rs`: the only write-enabled handle (GENERIC
+  READ|WRITE, OVERLAPPED positioned writes, sector-size aware,
+  flush-on-drop). `sdr_diagnose` real diagnosis; `sdr_repair`
+  confirm-gated, verify-or-rollback. BEK-file BitLocker unlock.
+- `TODO/phase-2-advanced-repair.md` (the §6.4 full spec),
+  `docs/reviews/phase4-engines-multi-pov.md` (6 POV passes).
+
+**State**: 125 dw-core tests green; clippy -D warnings clean;
+CI green through 90c27e4 (one Windows-compile break on the repair
+path was caught by the VHD job and fixed: raw constants +
+OVERLAPPED writes + 4Kn sector-size awareness).
+
+**Deferred register** (docs/TODO.md, each with evidence trail):
+ext4 journal reanimation, HFS+ journal replay, ReFS MSB tree
+enumeration (needs a real-ReFS fixture reversed on the runner),
+ext name↔content association, the prior M2 NTFS items
+($ATTRIBUTE_LIST, hole-aware extents, resident recovery).
