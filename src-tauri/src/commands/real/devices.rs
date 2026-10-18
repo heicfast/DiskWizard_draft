@@ -166,7 +166,10 @@ pub async fn sdr_repair(
     #[cfg(windows)]
     {
         if !confirm {
-            return Err("CONFIRM_REQUIRED. Repair writes to the card's boot sector; the user must confirm.".into());
+            return Err(
+                "CONFIRM_REQUIRED. Repair writes to the card's boot sector; the user must confirm."
+                    .into(),
+            );
         }
         let Some(dw_win::volume::DeviceTarget::Volume(letter)) =
             dw_win::volume::parse_device_id(&device_id)
@@ -179,8 +182,7 @@ pub async fn sdr_repair(
         let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter)
             .map_err(|e| format!("OPEN_FAILED. {e}"))?;
         let d = dw_core::repair::diagnose(&dev);
-        let plan = dw_core::repair::plan(&dev, &d)
-            .map_err(|e| format!("NOT_REPAIRABLE. {e}"))?;
+        let plan = dw_core::repair::plan(&dev, &d).map_err(|e| format!("NOT_REPAIRABLE. {e}"))?;
         let undo = {
             let handle = dw_win::repair::open_volume_for_repair(letter, dev.sector_size())
                 .map_err(|e| format!("WRITE_OPEN_FAILED. {e} — try running as administrator."))?;
