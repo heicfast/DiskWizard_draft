@@ -1,0 +1,37 @@
+[package]
+name = "dw-win"
+version = "0.1.0"
+description = "DiskWizard Windows platform layer — raw IO block devices, device/volume enumeration, SMART, BitLocker, licensing providers."
+edition = "2021"
+rust-version = "1.80"
+publish = false
+
+[dependencies]
+dw-core = { path = "../dw-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Power",
+    "Win32_System_WindowsProgramming",
+] }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = "allow"
+doc_markdown = "allow"

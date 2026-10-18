@@ -1,0 +1,35 @@
+[package]
+name = "dw-license"
+version = "0.1.0"
+description = "DiskWizard licensing client — Ed25519 entitlement tokens, HMAC-signed requests, posture state machine (the DiskGenie architecture)."
+edition = "2021"
+rust-version = "1.80"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = "3"
+hmac = "0.13"
+sha2 = "0.11"
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "blocking",
+    "json",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = "allow"
+doc_markdown = "allow"
+# Protocol plumbing: crypto helpers are self-evident.
+missing_errors_doc = "allow"
+items_after_statements = "allow"
+redundant_closure_for_method_calls = "allow"

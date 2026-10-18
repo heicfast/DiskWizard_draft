@@ -6,6 +6,18 @@ authors = ["DiskWizard"]
 edition = "2021"
 rust-version = "1.80"
 
+# The Tauri app crate is also the Cargo workspace root (the DiskGenie
+# D10 pattern): `crates/` holds the engine layers so they build and
+# unit-test on ANY host without linking a WebView shell —
+#   dw-core    platform-independent recovery engine (no OS deps)
+#   dw-win     Windows platform layer (raw IO, enumeration, SMART, FVE)
+#   dw-license the DiskGenie-architecture licensing client
+# `dw-win` is only wired on Windows targets; the app crate itself stays
+# cross-compilable for core-side CI.
+[workspace]
+members = ["crates/dw-core", "crates/dw-license", "crates/dw-win"]
+resolver = "2"
+
 [lib]
 # The `_lib` suffix is necessary so the lib name stays unique and does
 # not conflict with the bin name (Windows name clash, rust issue 8519).
@@ -16,18 +28,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+dw-core = { path = "crates/dw-core" }
+dw-license = { path = "crates/dw-license" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+dw-win = { path = "crates/dw-win" }
 
 [features]
-# CI simulation for the UI-screenshots workflow: seeds/flips a
-# simulated activated license so the full tour (incl. the Pro status
-# card and the Activation Gate) can be captured in production-real
-# builds. NEVER enabled in NSIS/MSIX/production builds.
-ci-license-sim = []
+default = []
+# The development simulation core (the session-1/2 mock): registered in
+# place of the real engine for tour/CI-screenshot builds. NEVER enabled
+# in NSIS/MSIX/production builds — the ui-screenshots workflow passes
+# `--features sim` explicitly.
+sim = []
 
 [lints.rust]
 unsafe_code = "warn"
@@ -47,4 +66,3 @@ codegen-units = 1
 lto = "fat"
 opt-level = 3
 panic = "abort"
-strip = true
