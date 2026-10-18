@@ -53,18 +53,24 @@ release).
 ### P0 — release-truth gaps
 
 - **QA-1. The ui-screenshots tour still validates only the SIM core.
-  RESOLVED IN CODE (session 5c); completing run pending.**
-  `real-core-tour.yml` now builds WITHOUT sim (only the narrow
-  `ci-tour` license-seed feature — DiskGenie's refusal-arm pattern),
-  seeds a VHD (kept 1 MiB + deleted 64 KiB deterministic patterns),
-  walks the REAL funnel through the UI (dual-mode TourDriver: live
-  device row → gate → seeded Pro → real scan → results → REAL recovery
-  funnel with new recovery-* frames), asserts key frame names, then
-  byte-compares BOTH seeds against the recovered output. First runs
-  were cancelled mid-flight by the concurrent agent-push churn (the
-  concurrency group cancels in-progress runs — 6 cancellations); the
-  run on the quiet repo completes it. `workflow_dispatch` re-runs on
-  demand. The flag closes when a completing run posts green.
+  RESOLVED — FIRST GREEN RUN POSTED (session 6, commit aa82d57,
+  2026-10-18).** The road there was the point: the tour caught F17
+  (silent skips + swallowed recovery errors, 74d599a) and F18 (the
+  `"C:"`-letter mkdir bug, 604ee3d) on its first completing runs —
+  both fixed with catching regressions, the second named by the
+  t99-tour-fail instrumentation on its very first flight. The green
+  run's verbatim evidence (job log, Real-Core Tour on aa82d57):
+  33/33 frames incl. the full recovery funnel, `recovery root:
+  C:\DiskWizard Recovered 1792339399`,
+  `present.txt: 1 MiB byte-identical to the seed`,
+  `gone.txt: 64 KiB byte-identical to the seed (DELETED file
+  recovered)` — the release app on a real Windows runner, scanning a
+  real NTFS VHD through the real core, recovering through the real
+  destination picker, both seeds byte-compared. All six workflows
+  green on the same SHA for the first time (CI incl. the new
+  `--tests` gate, Fuzz all-ten-targets with dictionary, Windows
+  Integration VHD end-to-end + IOCP + bench, MSIX, UI Screenshots,
+  Real-Core Tour).
 
 - **QA-2. Preview payload size cap vs the research contract. OPEN
   (owner call — OQ-5).** The real `preview_file` caps at 16 MiB input
@@ -242,8 +248,20 @@ release).
 
 ## 6. Release-evidence snapshot (the green pipeline)
 
-On commit 6ca58c0 all four workflows are green for the first time with
-the real core wired:
+**Current state (session 6, commit aa82d57, 2026-10-18): all SIX
+workflows green on the same SHA** — the first full-sweep green
+including the release-truth surfaces:
+
+| Workflow | Result | Key evidence |
+|---|---|---|
+| CI (web + rust-core + windows-app-check incl. `--tests` + NSIS) | ✅ | 141 dw-core + 27 dw-license engine tests; 73 web tests; the ext2 real-mkfs gate green; dw-win msvc cross-check + test-code gate |
+| Fuzz (10 targets, dictionary, artifacts on crash) | ✅ | First green run after the F15 harness fix + the five hostile-media guards (ntfs/fat/exfat/read_bytes/GPT); 90 s/target push gate |
+| Windows Integration (VHD end-to-end) | ✅ | 4/4 tests: VHD scan+recover byte-truth, enumeration, SMART, IOCP batch≡sequential equivalence + the §5.1-10 bench record |
+| MSIX Build | ✅ | Store-ready package |
+| UI Screenshots (sim tour) | ✅ | Full frame set + tour-complete marker |
+| **Real-Core Tour (release-truth)** | ✅ | **First green run ever**: 33/33 frames, REAL recovery through the release app, `present.txt` 1 MiB + deleted `gone.txt` 64 KiB both byte-identical to the seeds |
+
+Historic marker — the first four-workflow green (6ca58c0, session 5):
 
 | Workflow | Result | Key evidence |
 |---|---|---|

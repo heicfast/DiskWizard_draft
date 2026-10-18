@@ -566,3 +566,15 @@ suite, IOCP test, real-core tour), and sync the registers.
   chosen, recovery command invoked — every prior silent-skip suspect
   eliminated. With the mkdir fixed, the tour's byte-truth leg is the
   remaining witness.
+
+### Session 6 final — ALL SIX WORKFLOWS GREEN (aa82d57)
+
+The Real-Core Tour posted its first green run ever — QA-1 closed with
+release-truth evidence (present.txt 1 MiB + the DELETED gone.txt
+64 KiB both byte-identical through the release app's real recovery
+funnel). The Fuzz suite posted its first green run (all ten targets,
+dictionary, five hostile-media guards each with its catching
+regression). CI (with the new --tests app-crate gate), Windows
+Integration, MSIX, and UI Screenshots green on the same SHA. The
+register (QA-1 + §6 snapshot), session report, and this worklog are
+synced to the evidence.
