@@ -45,7 +45,7 @@ use windows::Win32::System::Ioctl::{
     STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR, STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY,
     StorageAccessAlignmentProperty,
 };
-use windows::Win32::System::Threading::CreateEventW;
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent};
 
 use crate::win_len;
 
@@ -187,7 +187,16 @@ impl RawHandleDevice {
     /// pool is empty).
     fn checkout_event(&self) -> CoreResult<PooledEvent<'_>> {
         let event = match self.events.lock().pop() {
-            Some(ev) => Ok(ev),
+            Some(ev) => {
+                // Reset BEFORE reuse: manual-reset events stay signaled
+                // after completion, and the OVERLAPPED contract requires
+                // a non-signaled event when the read begins — a stale
+                // signal makes GetOverlappedResult return before the
+                // IO completes (partial reads / ERROR_IO_INCOMPLETE).
+                // SAFETY: pooled private events are valid handles.
+                let _ = unsafe { ResetEvent(ev) };
+                Ok(ev)
+            }
             None => {
                 // SAFETY: no name → private event; manual-reset per the
                 // overlapped-read contract.

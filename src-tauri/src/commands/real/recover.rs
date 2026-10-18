@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
-use dw_core::blockdev::BlockDevice;
+use dw_core::blockdev::{BlockDevice, BlockRead};
+use dw_core::fs::ScanControl;
 use dw_core::recover::{DestWriter, build_queue, run_recovery};
 use dw_core::tree::TreeNode;
 
@@ -168,11 +169,13 @@ pub fn start_recovery(
     std::thread::Builder::new()
         .name("dw-recover".to_string())
         .spawn(move || {
-            let state: State<'_, AppState> = app.state();
             let mut dest = FsDest {
                 root: dest_root.clone(),
             };
-            let ctrl = state.scan.control.lock().clone();
+            // A FRESH control token for the recovery run — reusing the
+            // scan's token would inherit a previous stop (a cancelled
+            // scan control would abort this recovery instantly).
+            let ctrl = ScanControl::new();
             let total_files = queue.len() as u64;
             let total_bytes: u64 = queue.iter().map(|i| i.node.size).sum();
             let app2 = app.clone();

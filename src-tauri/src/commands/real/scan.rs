@@ -129,12 +129,12 @@ impl ProgressObserver for EventObserver {
         self.last_emit = Instant::now();
         self.last_percent = p.percent;
         // Refresh the poll slots (single managed state write).
-        if let Some(state) = self.app.try_state::<crate::AppState>() {
-            *state.scan.progress.lock() = Some(p.clone());
+        if let Some(state) = self.app.try_state::<AppState>() {
+            *state.scan.progress.lock() = Some(*p);
             *state.scan.searching.lock() = searching_label(p, &self.target_name);
         }
         let rate = if p.percent > 0.0 {
-            (f64::from(p.elapsed_sec) * (100.0 - p.percent) / p.percent).ceil() as u64
+            (p.elapsed_sec as f64 * (100.0 - p.percent) / p.percent).ceil() as u64
         } else {
             60
         };
@@ -243,7 +243,7 @@ fn partition_extent(disk: &Arc<dyn BlockDevice>, part_no: u32) -> Option<(u64, u
     if u16::from_le_bytes([sector0[510], sector0[511]]) != 0xAA55 {
         return None;
     }
-    let slot = usize::from(part_no.clamp(1, 4) - 1);
+    let slot = (part_no.clamp(1, 4) - 1) as usize;
     let entry = &sector0[0x1BE + slot * 16..0x1BE + slot * 16 + 16];
     let ptype = entry[4];
     if ptype == 0x00 || ptype == 0x05 || ptype == 0x0F || ptype == 0xEE {
@@ -294,6 +294,9 @@ fn start_scan_common(
     let generation = s.scan.begin(device_id, &display_name);
     // Keep the worker's control in the managed state.
     let control = s.scan.control.lock().clone();
+    // Hoist the borrowed id into an owned String — the worker thread
+    // requires 'static captures (device_id: &str cannot escape).
+    let device_id = device_id.to_string();
     let app = app.clone();
     std::thread::Builder::new()
         .name(format!("dw-scan-{generation}"))
@@ -481,7 +484,7 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
         ),
     };
     let remaining = if percent > 0.0 && percent < 100.0 {
-        ((f64::from(elapsed) * (100.0 - percent) / percent).ceil() as u64).max(1)
+        ((elapsed as f64 * (100.0 - percent) / percent).ceil() as u64).max(1)
     } else if percent >= 100.0 {
         0
     } else {

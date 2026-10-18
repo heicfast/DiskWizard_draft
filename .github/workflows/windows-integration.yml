@@ -43,14 +43,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $vhd = "$env:TEMP\dwtest.vhd"
-          $script = @"
-          create vdisk file="$vhd" maximum=256 type=fixed
-          attach vdisk
-          create partition primary
-          format fs=ntfs label=DWTEST quick
-          assign letter=V
-          "@
-          $script | Out-File -Encoding ascii "$env:TEMP\dp.txt"
+          # NOTE: no PowerShell here-strings — the closing `"@` must sit
+          # at column 0 for PowerShell but a column-0 line breaks the
+          # YAML block scalar (the session-2 lesson); array-join instead.
+          $script = @(
+            'create vdisk file="' + $vhd + '" maximum=256 type=fixed'
+            'attach vdisk'
+            'create partition primary'
+            'format fs=ntfs label=DWTEST quick'
+            'assign letter=V'
+          ) -join "`r`n"
+          Set-Content -Path "$env:TEMP\dp.txt" -Value $script -Encoding ascii
           diskpart /s "$env:TEMP\dp.txt" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
           Start-Sleep -Seconds 3
@@ -59,8 +62,9 @@ jobs:
           for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = ($i * 37 + 11) % 251 }
           [IO.File]::WriteAllBytes("V:\present.txt", $bytes)
           [IO.File]::WriteAllBytes("V:\gone.txt", $bytes[0..65535])
-          # Flush to disk, then delete.
-          "flush" | Out-Null
+          # Force the data onto the platter (real flush, not a sleep).
+          Write-VolumeCache -DriveLetter V
+          Start-Sleep -Seconds 1
           Remove-Item "V:\gone.txt" -Force
           Write-Host "VHD seeded: present.txt (1 MiB) + gone.txt (deleted, 64 KiB)"
 
@@ -71,7 +75,7 @@ jobs:
           RUST_BACKTRACE: "1"
 
       - name: Device + SMART smoke
-        run: cargo test -p dw-win --test integration enumeration smart -- --ignored --nocapture
+        run: cargo test -p dw-win --test integration -- --ignored --nocapture enumeration_reports_devices smart_reports_on_disk0
         working-directory: src-tauri
         continue-on-error: true # Runners' virtual disks may lack SMART
 
@@ -79,11 +83,13 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $script = @"
-          select vdisk file="$env:TEMP\dwtest.vhd"
-          detach vdisk
-          "@
-          $script | Out-File -Encoding ascii "$env:TEMP\dp-clean.txt"
+          $vhd = "$env:TEMP\dwtest.vhd"
+          # No here-strings (the session-2 lesson): array-join instead.
+          $script = @(
+            'select vdisk file="' + $vhd + '"'
+            'detach vdisk'
+          ) -join "`r`n"
+          Set-Content -Path "$env:TEMP\dp-clean.txt" -Value $script -Encoding ascii
           # The volume can take a moment to settle after the test
           # process exits; retry the detach, and never fail the
           # workflow from cleanup (the results already decided it).
@@ -94,5 +100,5 @@ jobs:
             Start-Sleep -Seconds 5
           }
           if (-not $ok) { Write-Host "detach retried out — removing the file anyway" }
-          Remove-Item "$env:TEMP\dwtest.vhd" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$vhd" -Force -ErrorAction SilentlyContinue
           exit 0

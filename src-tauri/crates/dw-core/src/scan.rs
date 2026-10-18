@@ -59,7 +59,7 @@ impl Phase {
 
 /// A progress snapshot (the frozen `ScanProgress` payload minus the
 /// app-layer display fields).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct Progress {
     pub phase: Phase,
     /// 0..100 aggregate (quick maps 0-38, deep 38-100).
@@ -559,7 +559,7 @@ mod tests {
     struct Recorder(Vec<Progress>, Vec<Phase>);
     impl ProgressObserver for Recorder {
         fn on_progress(&mut self, p: &Progress) {
-            self.0.push(p.clone());
+            self.0.push(*p);
         }
         fn on_phase(&mut self, p: Phase) {
             self.1.push(p);

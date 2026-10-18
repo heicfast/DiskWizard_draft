@@ -150,7 +150,13 @@ fn vhd_end_to_end() {
     let present = nodes
         .iter()
         .find(|n| n.name.contains("present"))
-        .expect("present.txt found by the scan");
+        .unwrap_or_else(|| {
+            panic!(
+                "present.txt found by the scan ({} nodes, fs={:?})",
+                nodes.len(),
+                report.fs
+            )
+        });
     assert_eq!(present.origin, NodeOrigin::Existing);
     let gone = nodes
         .iter()
