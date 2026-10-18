@@ -96,12 +96,57 @@ fn vhd_end_to_end() {
         panic!("DWTEST volume not found — attach the VHD first (see the workflow)");
     };
     let dev = dw_win::blockdev::RawHandleDevice::open_volume(letter).expect("open the test volume");
+    eprintln!(
+        "diag: dev {} sectors, ss {}, align {}",
+        dev.total_sectors(),
+        dev.sector_size(),
+        dev.preferred_read_alignment()
+    );
+    // Boot-sector diagnostics (the engine's view of the volume).
+    {
+        use dw_core::blockdev::BlockRead;
+        let sector = dev.read_struct_at::<512>(0).expect("boot sector read");
+        eprintln!("diag: boot[0..16] = {:02X?}", &sector[..16]);
+        match dw_core::fs::ntfs::NtfsBoot::parse(&sector) {
+            Ok(b) => eprintln!(
+                "diag: NTFS boot ok: bps={} spc={} mft_lba={} rec_size={} total={}",
+                b.bytes_per_sector,
+                b.sectors_per_cluster,
+                b.mft_lba,
+                b.mft_record_size,
+                b.total_sectors
+            ),
+            Err(e) => eprintln!("diag: NTFS boot parse FAILED: {e}"),
+        }
+        // MFT record 0 raw view.
+        if let Ok(b) = dw_core::fs::ntfs::NtfsBoot::parse(&sector) {
+            let mft_off = b.mft_lba * u64::from(b.bytes_per_sector);
+            let mut head = [0u8; 64];
+            if let Err(e) = dev.read_bytes(mft_off, &mut head) {
+                eprintln!("diag: mft read err {e}");
+            }
+            eprintln!("diag: mft0 head = {head:02X?}");
+            eprintln!("diag: mft0 ascii = {}", String::from_utf8_lossy(&head[..8]));
+        }
+    }
     let display = format!("DWTEST ({letter}:)");
     let mut obs = Quiet;
-    let (tree, _report) = run_scan(Arc::new(dev), &display, &mut obs).expect("scan");
+    let (tree, report) = run_scan(Arc::new(dev), &display, &mut obs).expect("scan");
+    eprintln!("diag: report = {report:?}");
 
     // The workflow seeds: present.txt (kept), gone.txt (deleted).
     let nodes = tree.nodes();
+    eprintln!("diag: node count = {}", nodes.len());
+    for n in nodes.iter().take(30) {
+        eprintln!(
+            "diag: node '{}' dir={} origin={:?} size={} extents={}",
+            n.name,
+            n.is_dir,
+            n.origin,
+            n.size,
+            n.extents.len()
+        );
+    }
     let present = nodes
         .iter()
         .find(|n| n.name.contains("present"))

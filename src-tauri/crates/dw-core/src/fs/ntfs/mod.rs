@@ -106,16 +106,14 @@ impl NtfsBoot {
                 detail: format!("implausible MFT record size {mft_record_size}"),
             });
         }
-        let total32 = u32::from_le_bytes([sector[0x28], sector[0x29], sector[0x2A], sector[0x2B]]);
-        let total = if total32 > 0 {
-            u64::from(total32)
-        } else {
-            u64::from_le_bytes({
-                let mut b = [0u8; 8];
-                b.copy_from_slice(&sector[0x38..0x40]);
-                b
-            })
-        };
+        // Total sectors: the 64-bit field at 0x28 (the classic BPB
+        // u32-at-0x20 area is unused in NTFS; 0x38 is $MFTMirr LCN —
+        // NEVER a total-size fallback).
+        let total = u64::from_le_bytes({
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&sector[0x28..0x30]);
+            b
+        });
         let serial = u64::from_le_bytes({
             let mut b = [0u8; 8];
             b.copy_from_slice(&sector[0x48..0x50]);
