@@ -635,13 +635,19 @@ fn probe_capacity(handle: &HANDLE, physical: bool) -> (u32, u64) {
             )
         };
         if ok.is_ok() {
-            // DISK_GEOMETRY_EX: DISK_GEOMETRY (40 bytes; sector size
-            // at offset 8) then LARGE_INTEGER DiskSize at 40. Layout
-            // offsets are ABI-stable.
-            let bytes: [u8; 8] = geo_out[40..48].try_into().unwrap_or([0; 8]);
-            let disk_size = u64::from_le_bytes(bytes);
-            let ss: [u8; 4] = geo_out[8..12].try_into().unwrap_or([0x00, 0x02, 0, 0]);
-            let ss = u32::from_le_bytes(ss);
+            // The TYPED fixed-head read (the raw-offset read this
+            // replaces was a hallucinated layout — it read MediaType
+            // (FixedMedia = 12) as the sector size and garbage as
+            // DiskSize; the Windows-runner IOCP test caught sector
+            // size "12" on the VHD drive). repr(C):
+            // Geometry{Cylinders,MediaType,TracksPerCylinder,
+            // SectorsPerTrack,BytesPerSector} then DiskSize:i64; the
+            // variable tail stays unread.
+            // SAFETY: the buffer is at least the struct's documented
+            // size; read_unaligned copies the fixed head out.
+            let geo = unsafe { geo_out.as_ptr().cast::<DISK_GEOMETRY_EX>().read_unaligned() };
+            let disk_size = u64::try_from(geo.DiskSize).unwrap_or(0);
+            let ss = geo.Geometry.BytesPerSector;
             let ss = if ss == 0 { 512 } else { ss };
             if disk_size > 0 {
                 return (ss, disk_size / u64::from(ss));
