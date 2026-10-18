@@ -494,3 +494,55 @@ the parallel engine agent's pushes.
 - Next: tour green confirmation + register updates; HFS+ fixture
   (hfsprogs) + ReFS runner leg; QA-4 $Bitmap scoring; QA-6 65% proof;
   the M3 IOCP push.
+
+## Session 6 (2026-10-18) — context recovery + the runner-caught defect cycle + §5.1 evidence closure
+
+**Task ID**: 6
+**Agent**: main (Z.ai) — core/QA continuation session
+**Task**: Recover from the session crash per §16, then close the
+§5.1 evidence trail (bench numbers), fix every workflow failure the
+runners exposed on the new QA surfaces (ext2 real-mkfs gate, fuzz
+suite, IOCP test, real-core tour), and sync the registers.
+
+**Work Log**:
+- §16 recovery: verified both pre-crash commits (88b2b43 fuzz suite,
+  73e3d86 geometry fix) had pushed; tree clean; the QA-register edit
+  the crash interrupted landed inside those commits.
+- 73e3d86 first-full-run failures diagnosed from runner logs:
+  CI ❌ ext2 real-mkfs gate, Fuzz ❌ harness abort, Windows
+  Integration ❌ iocp divergence, Real-Core Tour ❌ (never-green).
+- **ext2 offsets (F14)**: built e2fsprogs 1.47.4 user-local,
+  reproduced the CI fixture byte-exact, proved the rev-1 superblock
+  block was parsed +4 off (missing resuid/resgid 0x50/0x52) —
+  inode_size landed on compat flags, so real mkfs (inode 256) read
+  every inode mid-slot → zero entries. Fixed engine + probe flag
+  discrimination (ext3 was mislabeled ext2) + the fixture's own
+  offsets (s_journal_inum 0xD8→0xE0). Regressions: embedded
+  real-superblock byte-truth test + probe discrimination. d71570d.
+- **fuzz harness (F15)**: FuzzRam::read_sectors usize add-overflow
+  on absurd LBAs → checked u64 math + typed ReadFailed. 74d599a.
+- **IOCP test race (F16)**: evidence-timed — the iocp test's
+  sequential reference raced vhd_end_to_end's volume writes (parallel
+  test threads, $MFT/$LogFile updates changed window 0 mid-compare
+  with zero bad sectors). VHD_LOCK serialization + divergence-offset
+  assert. 74d599a.
+- **tour honesty (F17)**: the driver silently skipped recovery on
+  empty selection/destination and stamped recovery-complete anyway;
+  the app's beginRecovery ALSO swallowed start_recovery errors (a
+  real-user "Preparing… forever" defect). t99-tour-fail-<reason>
+  loud frames + stage asserts + workflow TOUR_FAIL detection + the
+  honest error-summary variant. 74d599a.
+- **§5.1-10 closed**: transcribed the real-runner bench table from
+  d71570d run 39137841845 into docs/benchmarks/io-backend.md (8
+  profiles, ~370-430 MiB/s through the cache-backed VHD stack, flat
+  9.7 MiB WS, CPU ≤ 0.0001 s/MiB, batch≡sequential byte-identity).
+- QA register: F13-F17 appended with runner evidence; QA-11 updated
+  with the recorded numbers. ee53823.
+
+**Stage Summary**:
+- d71570d: CI/Integration/MSIX/Screenshots green; 74d599a rerunning
+  the fuzz + integration + tour surfaces (fixes in flight).
+- The QA surfaces built this cycle each caught a real defect on
+  their first completed run — the shared-hallucination trap (F14)
+  is the standing lesson: fixtures must come from REAL formatters,
+  not hand-built mirrors of the parser.
