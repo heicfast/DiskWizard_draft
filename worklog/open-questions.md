@@ -108,3 +108,22 @@ honest rather than performative. Any file that becomes governing for
 code written in this session is promoted to FULL before implementation.
 
 **Status**: ADOPTED (2026-10-18, session 5).
+
+## OQ-7 — npm "latest stable" vs the donor-tested React stack
+
+**Ambiguity**: MASTER_PROMPT §13 demands the latest stable npm release
+at time of use; the UI pins React 18.3 / vite 6 / TS 5.6 / zustand 4 /
+framer-motion 11 — the exact stack the DiskGenie donor ships and its
+component set is tested against. React 19 / vite 7 / zustand 5 /
+framer-motion 12 are current stable majors.
+
+**Decision**: hold the donor-tested stack through release hardening
+(churning the UI major versions mid-tour-validation risks the QA-1
+release-truth loop); ticket the consolidated upgrade (React 19 +
+framer-motion 12 + types + vite 7 + zustand 5 in ONE pass, gated by the
+full tour + screenshot workflows). Rust crates — where core correctness
+lives — are held strictly to latest-stable (verified live 2026-10-18,
+docs/dependencies.md).
+
+**Status**: ADOPTED (2026-10-18, session 5) — recorded in
+docs/dependencies.md with the upgrade ticket.
