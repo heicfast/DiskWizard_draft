@@ -5,7 +5,7 @@
  * UI-facing contract: progressive fill, category roll-ups, path
  * formatting, the stat scaling.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEVICES, GB, makeRng, SDR_DEVICE } from "../data";
 import { generateResults } from "../files";
 import type { StorageDevice } from "../../types";
@@ -14,9 +14,15 @@ const USB_F = DEVICES.externalDevices.find((d) => d.id === "usb-F") as StorageDe
 
 describe("generateResults — determinism", () => {
   it("produces byte-identical snapshots for the same device + generation", () => {
+    // Pin the wall clock: generateResults stamps file times from
+    // Date.now(), and a second boundary between the two calls made
+    // this test flake (CI caught it).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T12:00:00Z"));
     const a = generateResults(USB_F, 1);
     const b = generateResults(USB_F, 1);
     expect(a).toEqual(b);
+    vi.useRealTimers();
   });
 
   it("varies by generation (a rescan presents a fresh tree)", () => {
