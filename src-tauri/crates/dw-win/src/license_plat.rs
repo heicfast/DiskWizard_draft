@@ -34,11 +34,10 @@ impl HwIdProvider for WinHwId {
     }
 
     fn system_drive_serial(&self) -> Result<u32, String> {
-        let sys_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        let root = format!(
-            "{}\\",
-            sys_dir.chars().next().unwrap_or('C').to_ascii_uppercase()
-        );
+        // The donor's derivation (platform/win/license.rs:227): the
+        // `SystemDrive` env var ("C:"), falling back to the literal.
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let root = format!("{drive}\\");
         let root_w: Vec<u16> = root.encode_utf16().chain([0]).collect();
         let mut serial = 0u32;
         // SAFETY: root_w is NUL-terminated; serial is the documented
@@ -53,10 +52,12 @@ impl HwIdProvider for WinHwId {
                 None,
             )
         };
-        if ok.is_ok() {
-            Ok(serial)
-        } else {
-            Err("volume serial unreadable".into())
+        match ok {
+            Ok(()) => Ok(serial),
+            // Carry the HRESULT — "unreadable" alone gave the live E2E
+            // nothing to diagnose with (the runner-caught defect class:
+            // the first real-Windows flight of this path failed).
+            Err(e) => Err(format!("volume serial unreadable: {e}")),
         }
     }
 
