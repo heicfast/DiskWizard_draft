@@ -18,6 +18,7 @@ pub mod ext;
 pub mod fat;
 pub mod hfsplus;
 pub mod ntfs;
+pub mod refs;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,8 +186,9 @@ pub fn probe_filesystem(dev: &dyn BlockDevice) -> CoreResult<FsKind> {
 /// matching engine for a probed kind on the given device.
 ///
 /// # Errors
-/// [`CoreError::Unsupported`] when the kind has no engine yet
-/// (ReFS/ext/HFS+ land in M2 — the registry grows monotonically).
+/// [`CoreError::Unsupported`] when the kind has no engine (every
+/// Section 6.3 filesystem now has one; the registry grows
+/// monotonically).
 pub fn create_engine(kind: FsKind, dev: Arc<dyn BlockDevice>) -> CoreResult<Box<dyn ScanEngine>> {
     match kind {
         FsKind::Ntfs | FsKind::Ntfs5 => Ok(Box::new(ntfs::NtfsEngine::new(dev)?)),
@@ -194,6 +196,7 @@ pub fn create_engine(kind: FsKind, dev: Arc<dyn BlockDevice>) -> CoreResult<Box<
         FsKind::ExFat => Ok(Box::new(exfat::ExFatEngine::new(dev)?)),
         FsKind::Ext2 | FsKind::Ext3 | FsKind::Ext4 => Ok(Box::new(ext::ExtEngine::new(dev)?)),
         FsKind::HfsPlus => Ok(Box::new(hfsplus::HfsPlusEngine::new(dev.as_ref())?)),
+        FsKind::Refs => Ok(Box::new(refs::RefsEngine::new(dev.as_ref())?)),
         other => Err(CoreError::Unsupported(other)),
     }
 }
