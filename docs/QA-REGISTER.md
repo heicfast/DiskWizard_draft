@@ -135,6 +135,16 @@ release).
   0xC2/0xBE + sensor arrays). Flag: expand the table + unit tests per
   drive family once real-drive telemetry exists from CI.
 
+- **QA-17. Scan `bytes_found` can exceed volume capacity.** The
+  passing VHD run reports `bytes_found: 546,825,304` on a
+  267 MB volume — logical sizes of sparse metafiles ($LogFile, $MFT
+  growth) and possibly overlapping carve extents sum past physical
+  capacity. The recovery itself byte-compares correctly (the test
+  proves it), but the stat feeds the UI's "X found" summary. Fix:
+  report `min(logical, extents-sum)` or clamp per-node sizes to the
+  device capacity at tree-build time, and dedupe carve overlaps at
+  merge. Evidence: VHD run on fc4e23a (`diag: report` line).
+
 ### P2 — hardening / next phase (per plan, not defects)
 
 - **QA-11.** Parallel read pipeline (IOCP worker pool) — ADR-1 rev2
