@@ -127,3 +127,16 @@ docs/dependencies.md).
 
 **Status**: ADOPTED (2026-10-18, session 5) — recorded in
 docs/dependencies.md with the upgrade ticket.
+
+## OQ-8 — packaged-build pre-release test license
+
+**Owner decision (2026-10-18): APPROVED, STRICT.** The operator explicitly
+authorized `DB-TESTS-DEM00-PR000-C0DE0` in packaged release builds as a
+temporary local lifetime unlock, so acceptance testing is not blocked by the
+live activation investigation. The prior removal is reverted in `ea2543e`.
+
+**Removal condition**: remove this public test key before the first public or
+commercial distribution. It is a deliberate development business exception,
+not proof that the live activation issue is resolved.
+
+**Status**: ADOPTED by explicit owner instruction.
