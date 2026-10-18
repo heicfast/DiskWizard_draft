@@ -93,18 +93,16 @@ impl DestWriter for FsDest {
 /// (volume handles that fail to open, non-Windows, etc.).
 #[cfg(windows)]
 fn source_disk_index(id: &str) -> Option<u32> {
-    dw_win::volume::parse_device_id(id)
-        .ok()
-        .and_then(|t| match t {
-            dw_win::volume::DeviceTarget::WholeDisk(n)
-            | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
-            | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
-            dw_win::volume::DeviceTarget::Volume(l) => {
-                dw_win::blockdev::RawHandleDevice::open_volume(l)
-                    .ok()
-                    .and_then(|d| d.device_number().ok().map(|(n, _)| n))
-            }
-        })
+    dw_win::volume::parse_device_id(id).and_then(|t| match t {
+        dw_win::volume::DeviceTarget::WholeDisk(n)
+        | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
+        | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
+        dw_win::volume::DeviceTarget::Volume(l) => {
+            dw_win::blockdev::RawHandleDevice::open_volume(l)
+                .ok()
+                .and_then(|d| d.device_number().ok().map(|(n, _)| n))
+        }
+    })
 }
 
 #[tauri::command]
