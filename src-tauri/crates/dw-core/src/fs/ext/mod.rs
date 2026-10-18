@@ -669,7 +669,15 @@ impl ExtEngine {
             return Ok(());
         }
         ctrl.checkpoint()?;
-        named.insert(ino);
+        // The cycle/explosion guard (the FAT fuzz target's 11-second
+        // lesson): a directory inode reachable by two paths — or wired
+        // into itself — re-walks once per PATH without this check
+        // (2^depth walks). One inode, one walk; the orphan sweep's
+        // `named` bookkeeping is unchanged (the inode is in the set
+        // either way).
+        if !named.insert(ino) {
+            return Ok(());
+        }
         let data = self.read_dir_data(inode);
         for (child_ino, name, deleted) in Self::parse_dirents(&data, self.sb.inodes_count) {
             let child_path = if path.is_empty() {

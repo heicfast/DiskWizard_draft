@@ -397,11 +397,25 @@ impl FatEngine {
         ctrl: &ScanControl,
         stats: &mut ScanStats,
         depth: usize,
+        visited: &mut HashSet<u32>,
     ) -> CoreResult<()> {
         if depth > 32 {
             return Ok(()); // pathological depth guard
         }
         ctrl.checkpoint()?;
+        // The GLOBAL directory-cluster set: a fuzzed FAT can wire
+        // directory entries into each other, and without this set the
+        // same cluster re-walks once per PATH — 2^depth walks of the
+        // same bytes (the fat fuzz target's 11-second timeout on a
+        // 514-byte input). One cluster, one walk: identical results,
+        // linear cost. It also de-duplicates legitimately-reachable-
+        // twice directories (their entries emitted once, not twice).
+        if let Some(c) = cluster
+            && c >= 2
+            && !visited.insert(c)
+        {
+            return Ok(());
+        }
         let data = match (cluster, root_region) {
             (Some(c), _) if c >= 2 => self.read_dir_data(c),
             (None, Some((off, len))) => {
@@ -449,6 +463,7 @@ impl FatEngine {
                     ctrl,
                     stats,
                     depth + 1,
+                    visited,
                 )?;
             }
         }
@@ -463,6 +478,7 @@ impl ScanEngine for FatEngine {
 
     fn quick_scan(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
+        let mut visited = HashSet::new();
         if self.boot.variant == FsKind::Fat32 {
             self.walk_dir(
                 Some(self.boot.root_cluster),
@@ -472,6 +488,7 @@ impl ScanEngine for FatEngine {
                 ctrl,
                 &mut stats,
                 0,
+                &mut visited,
             )
         } else {
             let len = u64::from(self.boot.root_entry_count) * 32;
@@ -483,6 +500,7 @@ impl ScanEngine for FatEngine {
                 ctrl,
                 &mut stats,
                 0,
+                &mut visited,
             )
         }?;
         Ok(stats)

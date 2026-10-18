@@ -384,12 +384,21 @@ impl ExFatEngine {
         depth: usize,
         needed_len: u64,
         no_fat_chain: bool,
+        visited: &mut HashSet<u32>,
     ) -> CoreResult<()> {
         if depth > 32 {
             return Ok(());
         }
         ctrl.checkpoint()?;
         if cluster < 2 {
+            return Ok(());
+        }
+        // The GLOBAL directory-cluster set — the same cycle/explosion
+        // guard the FAT engine got (its fuzz target hit an 11-second
+        // timeout on a 514-byte input from exactly this pattern: a
+        // directory wired into itself re-walks once per PATH, 2^depth
+        // times). One cluster, one walk, linear cost.
+        if !visited.insert(cluster) {
             return Ok(());
         }
         let data = self.read_dir_data(cluster, needed_len, no_fat_chain);
@@ -441,6 +450,7 @@ impl ExFatEngine {
                     depth + 1,
                     e.data_len,
                     e.no_fat_chain,
+                    visited,
                 )?;
             }
         }
@@ -455,6 +465,7 @@ impl ScanEngine for ExFatEngine {
 
     fn quick_scan(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
+        let mut visited = HashSet::new();
         // The root has no stream dentry: unknown length → FAT-only
         // chain (needed_len = 0).
         self.walk_dir(
@@ -466,6 +477,7 @@ impl ScanEngine for ExFatEngine {
             0,
             0,
             false,
+            &mut visited,
         )?;
         Ok(stats)
     }
