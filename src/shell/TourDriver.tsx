@@ -4,15 +4,17 @@
  * every page, phase and dialog state with a per-step dwell so
  * screenshot passes capture every state of the REAL app without
  * interactive automation. It stamps `DiskWizard · tNN-name` into the
- * document title — the harness polls the title and shoots exactly one
- * named frame per step.
+ * title — document.title in the browser, the NATIVE window title in
+ * the packaged build (Tauri 2 does not auto-sync document.title, so
+ * the driver calls the window API itself) — the harness polls the
+ * native title and shoots exactly one named frame per step.
  */
 import { useEffect } from "react";
 import { useViewStore } from "../state/view";
 import { useScanStore } from "../state/scan";
 import { useResultsStore } from "../state/results";
 import { useDevicesStore } from "../state/devices";
-import { invoke } from "../lib/ipc";
+import { invoke, isTauri } from "../lib/ipc";
 import type { DevHooks } from "../types";
 
 const DWELL_MS = 2_800;
@@ -23,9 +25,32 @@ interface Step {
   dwell?: number;
 }
 
+/** Stamp the sync signal into BOTH title channels: document.title
+ * (browser-dev, where agent-browser polls it) and the native window
+ * title via the Tauri window API (packaged builds — WebView2 does not
+ * propagate document.title on its own; the donor's own artifacts show
+ * its harness silently falling back to cadence capture for exactly
+ * this reason). Fire-and-forget: the harness polls, it never blocks
+ * the tour. */
 function tourTitle(i: number, name: string) {
   const slug = name.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
-  document.title = `DiskWizard · t${String(i).padStart(2, "0")}-${slug}`;
+  const title = `DiskWizard · t${String(i).padStart(2, "0")}-${slug}`;
+  document.title = title;
+  if (isTauri()) {
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
+      .catch(() => undefined);
+  }
+}
+
+/** The end marker goes through the same dual channel. */
+function tourEndTitle() {
+  document.title = "DiskWizard · tour-complete";
+  if (isTauri()) {
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().setTitle("DiskWizard · tour-complete"))
+      .catch(() => undefined);
+  }
 }
 
 export function TourDriver() {
@@ -125,6 +150,6 @@ async function runTour(_hooks: DevHooks): Promise<void> {
   }
 
   // End marker — the harness knows the tour is over.
-  document.title = "DiskWizard · tour-complete";
+  tourEndTitle();
   (window as unknown as Record<string, unknown>).__DW_TOUR_STATE__ = { step: -1, name: "complete" };
 }
