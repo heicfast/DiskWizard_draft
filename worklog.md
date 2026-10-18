@@ -251,3 +251,63 @@ rebuild the raw-IO layer accordingly.
 - Next: verify CI green incl. the VHD end-to-end on the real Windows
   runner (the v2 raw-IO layer is what it exercises), then multi-POV
   review + M2 engines (ext2/3, HFS+, ReFS) per CORE-PLAN.
+
+---
+
+## Session 4 — QA/reconciliation: CI recovery alongside the parallel core agent
+
+**Task ID**: 4
+**Agent**: main (Z.ai) — QA/verification + interface session
+**Task**: Recover context after the session stop; make all four
+workflows green; reconcile with the parallel core agent's pushes;
+close the P0 core-interface UI gaps; run the independent QA pass and
+flag every irregularity with evidence.
+
+**Work Log**:
+- Context recovery: re-cloned all four repos, re-read the research
+  corpus (three full digests: engines/MOM/partition/SaveScan, UIUX,
+  licensing/config/disk-health/workflows), verified Rust 1.99.1 +
+  all crate pins against crates.io (ed25519-dalek 3.0.0, hmac 0.13,
+  sha2 0.11, reqwest 0.13.5, windows 0.62.2 — all latest stable).
+- Diagnosed the four failing workflows from CI logs: windows-rs
+  0.62 API-path drift in dw-win, the missing dw-win→dw-license dep,
+  `rust-version = 1.80`, app-crate errors — then discovered the
+  parallel core agent pushing the same fixes mid-session and switched
+  to reconciliation mode (5 rebases, zero lost work).
+- Independent contributions that landed:
+  - 7eb0324: the six residual app-crate compile fixes on top of the
+    core agent's ADR-1 rev2 (AppState resolution, cast hygiene, the
+    device_id 'static hoist, BlockRead import, FRESH ScanControl for
+    recovery — inheriting the scan's cancelled token would abort
+    recovery after any stop), the pooled-event ResetEvent fix (the
+    OVERLAPPED stale-signal contract), and the VHD workflow's
+    here-string elimination + Write-VolumeCache flush + libtest
+    filter order.
+  - The VHD failure post-mortems (empty-scan): the diagnostics +
+    root-cause chain for volume-target dispatch (probe before
+    partition table — fixed by the core agent in parallel) and the
+    NTFS $MFT LCN/cluster-size addressing (the mft0-zeros evidence
+    that pinned it).
+  - ae6e737: the P0 UI wiring from todo-uiux/CORE-INTERFACE-GAPS.md —
+    start_recovery nodeIds, real preview_file rendering (images/text/
+    PDF with honest decode-or-fallback, no mode sniffing — sim tours
+    keep their curated visuals), and session rows calling
+    resume_session + landing on results.
+- QA pass: wrote docs/QA-REGISTER.md — 12 verified-fixed items with
+  evidence, 16 open flags (P0: real-core CI tour, preview caps vs the
+  100 MB research contract, missing ext/HFS+/ReFS engines; P1:
+  $Bitmap viability scoring, exFAT chain re-derivation tests, the
+  65%-reduction end-to-end proof, .rsf record-3 context, VSS
+  disclosure, SDR stub, SMART threshold coverage; deployment: the
+  license server E2E), plus the instruction-compliance audit table
+  and multi-POV verdicts.
+
+**Stage Summary**:
+- Gates at push: fmt clean, clippy -D warnings clean (engine crates
+  native + dw-win windows-msvc cross-check), 117 engine tests, web
+  tsc/tests/build clean.
+- The four workflows were re-run on the pushed HEAD; the VHD
+  end-to-end is the release truth test and must be green before this
+  milestone closes.
+- Next: verify workflow greens, then the register's P0 items (the
+  real-core tour job first).
