@@ -74,6 +74,12 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
 
+      - name: §5.1-10 IO backend benchmark (recorded into docs/benchmarks/io-backend.md)
+        run: cargo test -p dw-win --test io_bench -- --ignored --nocapture
+        working-directory: src-tauri
+        env:
+          RUST_BACKTRACE: "1"
+
       - name: Device + SMART smoke
         run: cargo test -p dw-win --test integration -- --ignored --nocapture enumeration_reports_devices smart_reports_on_disk0
         working-directory: src-tauri
