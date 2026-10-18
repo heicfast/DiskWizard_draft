@@ -128,6 +128,15 @@ jobs:
         run: cargo check --workspace --target x86_64-pc-windows-msvc
         working-directory: src-tauri
 
+      # The real-core tour's mkdir bug exposed this blind spot: plain
+      # `check` skips #[cfg(test)] code, and the app crate's tests were
+      # compiled nowhere. This gate keeps test code rotting-in-plain-
+      # sight impossible (the same discipline the engine crates always
+      # had via `cargo test` on ubuntu).
+      - name: "Gate: cargo check --tests (test code compiles)"
+        run: cargo check --workspace --target x86_64-pc-windows-msvc --tests
+        working-directory: src-tauri
+
       - name: "Gate: clippy -D warnings (engine crates, full client)"
         run: cargo clippy -p dw-core -p dw-license -p dw-win --target x86_64-pc-windows-msvc -- -D warnings
         working-directory: src-tauri

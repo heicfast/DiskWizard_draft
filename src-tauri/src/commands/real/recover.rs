@@ -305,12 +305,19 @@ fn resolve_destination(
             return Err("NO_DESTINATION. No writable volume found.".into());
         }
         let (letter, display) = chosen.expect("chosen is Some here (none returned above)");
+        // The inventory formats letters as "C:" (dw-win devices.rs) —
+        // normalize before path math. The real-core tour's t99 catch
+        // fired here: "C::\\DiskWizard Recovered …" → Windows
+        // ERROR_INVALID_NAME on mkdir (the mock layer's bare letters
+        // masked it; only the REAL inventory shape hits this).
+        let letter = letter.trim_end_matches(':');
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let root = std::path::PathBuf::from(format!("{letter}:\\DiskWizard Recovered {stamp}"));
-        std::fs::create_dir_all(&root).map_err(|e| format!("mkdir destination: {e}"))?;
+        std::fs::create_dir_all(&root)
+            .map_err(|e| format!("DESTINATION_MKDIR_FAILED {root:?}: {e}"))?;
         Ok((root, display))
     }
     #[cfg(not(windows))]
@@ -422,5 +429,35 @@ fn mime_for(name: &str) -> &'static str {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    //! The real-core tour's t99 catch (609daae): the inventory letters
+    //! are "C:"-formatted, and the destination path math appended
+    //! another ":\" → "C::\DiskWizard Recovered …" → ERROR_INVALID_NAME
+    //! on mkdir. resolve_destination picks its letter from the REAL
+    //! inventory, so running it on a Windows host with live volumes
+    //! reproduces exactly the tour's environment and asserts the
+    //! produced path is legal and created.
+
+    #[test]
+    fn destination_path_is_legal_and_created() {
+        let (root, _display) =
+            super::resolve_destination(None, None).expect("resolve on the test host");
+        let s = root.to_string_lossy();
+        assert!(
+            !s.contains("::"),
+            "double-colon path {s:?} — the tour's ERROR_INVALID_NAME bug"
+        );
+        assert!(s.contains(":\\"), "absolute drive path {s:?}");
+        assert!(
+            s.contains("DiskWizard Recovered"),
+            "the stamped folder name {s:?}"
+        );
+        assert!(root.exists(), "the destination was actually created");
+        // Clean up the stamped folder (leave nothing behind).
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
