@@ -179,6 +179,9 @@ pub fn start_recovery(
             let total_files = queue.len() as u64;
             let total_bytes: u64 = queue.iter().map(|i| i.node.size).sum();
             let app2 = app.clone();
+            // The progress closure owns its copy; the done handler
+            // keeps the original (both carry the display name).
+            let dest_for_progress = dest_display.clone();
             let result = run_recovery(&*dev, &queue, &mut dest, &ctrl, move |p| {
                 let _ = &app2;
                 let payload = json!({
@@ -189,7 +192,7 @@ pub fn start_recovery(
                     "totalBytes": p.total_bytes,
                     "doneBytes": p.done_bytes,
                     "currentFile": p.current_file,
-                    "destination": dest_display,
+                    "destination": dest_for_progress,
                     "enableRepair": enable,
                     "repairedFiles": 0,
                     "finished": false,
