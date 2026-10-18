@@ -8,6 +8,8 @@ import { create } from "zustand";
 import { invoke, listen } from "../lib/ipc";
 import type { ScanProgress } from "../types";
 import { EV_SCAN_DONE, EV_SCAN_PROGRESS } from "../types";
+import { useResultsStore } from "./results";
+import { useViewStore } from "./view";
 
 export interface ScanDoneInfo {
   generation: number;
@@ -28,6 +30,9 @@ interface ScanState {
   startFolder: (label: string) => Promise<boolean>;
   startDiskImage: (imagePath: string) => Promise<boolean>;
   startCloud: (driveId: string) => Promise<boolean>;
+  /** Resume a saved .rsf session by id (CORE-INTERFACE-GAPS P0-3):
+   * the core adopts the tree and reports {generation, deviceName}. */
+  resumeSession: (sessionId: string) => Promise<boolean>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => Promise<void>;
@@ -83,6 +88,26 @@ export const useScanStore = create<ScanState>((set) => ({
     try {
       const r = await invoke<{ generation: number }>("start_cloud_scan", { driveId });
       set({ generation: r.generation, starting: false });
+      return true;
+    } catch (e) {
+      set({ starting: false, error: String(e) });
+      return false;
+    }
+  },
+
+  resumeSession: async (sessionId) => {
+    set({ starting: true, error: null, done: null, progress: null });
+    try {
+      const r = await invoke<{ generation: number; deviceName: string }>(
+        "resume_session",
+        { sessionId },
+      );
+      set({ generation: r.generation, starting: false });
+      // The real core adopts the loaded tree under the generation it
+      // returns — pull the snapshot and land on the results page (the
+      // mocks stream a continuation and the page shows live progress).
+      await useResultsStore.getState().load(r.generation).catch(() => undefined);
+      useViewStore.getState().setPage("results");
       return true;
     } catch (e) {
       set({ starting: false, error: String(e) });

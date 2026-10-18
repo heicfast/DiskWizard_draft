@@ -198,6 +198,10 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
     } });
     await invoke("start_recovery", {
       generation: get().snapshot?.generation ?? 0,
+      // The actual selection: the real core resolves every recovery
+      // from these node ids (CORE-INTERFACE-GAPS.md P0-1). fileCount/
+      // bytes stay as legacy fields for the dev mock.
+      nodeIds,
       fileCount: nodeIds.length,
       bytes,
       destinationName: dest?.name ?? "Destination",

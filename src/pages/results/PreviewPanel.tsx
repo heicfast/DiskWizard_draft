@@ -4,15 +4,18 @@
  * path · status), the recovery-chances gauge (the CCheckNodeThread
  * grading visualized) and the Recover CTA.
  *
- * Image previews: a curated set of realistic sample photos (bundled
- * in src/assets/previews) maps onto matching mock filenames; every
- * other image renders the procedural sakura-art fallback. Documents
- * show page-structured summaries; media shows duration-style meta;
- * unknown formats show the honest not-previewable state.
+ * Real-core previews (CORE-INTERFACE-GAPS.md P0-2): files ≤ 16 MB
+ * fetch their leading bytes via `preview_file` and render inline
+ * (images as data URLs, text decoded, PDFs embedded). The render is
+ * honest — when the bytes don't decode (damaged/truncated recoveries,
+ * synthetic sim payloads) the visual falls back to the curated
+ * samples/procedural art exactly like the browser-dev mock, so no
+ * mode sniffing is needed and no broken frame ever shows.
  */
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { EyeIcon } from "lucide-react";
 import { formatBytes, formatDateTime } from "../../lib/format";
+import { invoke } from "../../lib/ipc";
 import { useResultsStore } from "../../state/results";
 import type { FileNode } from "../../types";
 import { CategoryIcon, categoryTone } from "./categoryIcon";
@@ -29,12 +32,72 @@ const PHOTO_MAP: { match: (name: string) => boolean; src: string }[] = [
   { match: (n) => /mountain|hike|tokyo|beach/i.test(n), src: mountainPhoto },
 ];
 
+/** The core caps preview payloads at 2 MB per call (files ≤ 16 MB). */
+const PREVIEW_MAX_BYTES = 2_000_000;
+const PREVIEW_SIZE_CEILING = 16 * 1024 * 1024;
+
+type RealPreview = { mime: string; data: string };
+
+/** Base64 → binary string (display only). */
+function decodeB64(data: string): string {
+  try {
+    return atob(data);
+  } catch {
+    return "";
+  }
+}
+
+/** Is this decodable as human text (≥ 90% printable in the head)? */
+function looksLikeText(s: string): boolean {
+  const head = s.slice(0, 2000);
+  if (head.length === 0) return false;
+  let printable = 0;
+  for (const ch of head) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (ch === "\n" || ch === "\t" || ch === "\r" || (c >= 32 && c <= 126) || c > 159) printable++;
+  }
+  return printable / head.length >= 0.9;
+}
+
 export function PreviewPanel() {
   const previewId = useResultsStore((s) => s.previewId);
   const snapshot = useResultsStore((s) => s.snapshot);
   const selectedIds = useResultsStore((s) => s.selectedIds);
   const openDestination = useResultsStore((s) => s.openDestination);
   const node = previewId !== null ? snapshot?.nodes[previewId] ?? null : null;
+
+  // Real-core preview bytes (P0-2): fetch on selection; null while
+  // pending and after failures — the fallback art IS the failure UX.
+  const [real, setReal] = useState<RealPreview | null>(null);
+  const [imgDecodeFailed, setImgDecodeFailed] = useState(false);
+  const nodeId = node?.id ?? null;
+  const generation = snapshot?.generation ?? 0;
+  useEffect(() => {
+    setReal(null);
+    setImgDecodeFailed(false);
+    if (nodeId === null || generation === 0) return;
+    const n = snapshot?.nodes[nodeId];
+    if (!n || n.isDir || n.size > PREVIEW_SIZE_CEILING) return;
+    let alive = true;
+    invoke<RealPreview & { size: number }>("preview_file", {
+      generation,
+      nodeId,
+      maxBytes: PREVIEW_MAX_BYTES,
+    })
+      .then((r) => {
+        if (alive) setReal({ mime: r.mime, data: r.data });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [nodeId, generation, snapshot]);
+
+  const realText = useMemo(() => {
+    if (!real || !real.mime.startsWith("text/")) return null;
+    const decoded = decodeB64(real.data);
+    return looksLikeText(decoded) ? decoded.slice(0, 4000) : null;
+  }, [real]);
 
   const selectedBytes = useMemo(() => {
     if (!snapshot) return 0;
@@ -62,13 +125,27 @@ export function PreviewPanel() {
   }
 
   const isPhoto = node.category === "images";
+  const realImage =
+    real && real.mime.startsWith("image/") && !imgDecodeFailed
+      ? `data:${real.mime};base64,${real.data}`
+      : null;
   const photo = isPhoto ? PHOTO_MAP.find((p) => p.match(node.name))?.src : undefined;
 
   return (
     <aside className="dw-preview-panel dw-scroll" aria-label="Preview">
       <div className="dw-preview-stage">
         {isPhoto ? (
-          <PhotoStage node={node} src={photo} />
+          <PhotoStage node={node} src={realImage ?? photo} onImgError={() => setImgDecodeFailed(true)} />
+        ) : realText !== null ? (
+          <figure className="dw-preview-doc">
+            <pre className="dw-preview-text dw-scroll">{realText}</pre>
+            <figcaption className="dw-preview-doc-cap">First {formatBytes(Math.min(real?.data.length ?? 0, PREVIEW_MAX_BYTES))} of the recovered bytes.</figcaption>
+          </figure>
+        ) : real && real.mime === "application/pdf" ? (
+          <figure className="dw-preview-doc">
+            <embed className="dw-preview-pdf" type="application/pdf" src={`data:application/pdf;base64,${real.data}`} />
+            <figcaption className="dw-preview-doc-cap">Inline PDF preview (leading bytes).</figcaption>
+          </figure>
         ) : (
           <DocStage node={node} />
         )}
@@ -145,11 +222,11 @@ export function PreviewPanel() {
   );
 }
 
-function PhotoStage({ node, src }: { node: FileNode; src?: string }) {
+function PhotoStage({ node, src, onImgError }: { node: FileNode; src?: string; onImgError?: () => void }) {
   return (
     <figure className="dw-preview-photo">
       {src ? (
-        <img src={src} alt={node.name} draggable={false} />
+        <img src={src} alt={node.name} draggable={false} onError={onImgError} />
       ) : (
         <SakuraArt />
       )}

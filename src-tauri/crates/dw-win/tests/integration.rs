@@ -120,7 +120,7 @@ fn vhd_end_to_end() {
         }
         // MFT record 0 raw view.
         if let Ok(b) = dw_core::fs::ntfs::NtfsBoot::parse(&sector) {
-            let mft_off = b.mft_lba * u64::from(b.bytes_per_sector);
+            let mft_off = b.mft_lba * b.cluster_size();
             let mut head = [0u8; 64];
             if let Err(e) = dev.read_bytes(mft_off, &mut head) {
                 eprintln!("diag: mft read err {e}");

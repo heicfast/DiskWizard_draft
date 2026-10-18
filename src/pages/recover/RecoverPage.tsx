@@ -195,14 +195,17 @@ function QuickCard({
 /* ── Sessions ────────────────────────────────────────────────────────── */
 
 function SessionRow({ session }: { session: { id: string; targetName: string; status: string; filesFound: number; bytesFound: number; startedAt: number } }) {
-  const resume = useScanStore((s) => s.start);
+  // The real core's resume_session loads the .rsf and adopts the tree
+  // under a fresh generation (CORE-INTERFACE-GAPS P0-3); the mocks
+  // answer the same call with a simulated continuation.
+  const resumeSession = useScanStore((s) => s.resumeSession);
   const completed = session.status === "completed";
   const paused = session.status === "paused";
   return (
     <button
       type="button"
       className="dw-session-row"
-      onClick={() => void resume(session.id)}
+      onClick={() => void resumeSession(session.id)}
       title={completed ? `Open ${session.targetName} results` : `Resume ${session.targetName} scan`}
     >
       <span className={`dw-session-status ${completed ? "is-done" : paused ? "is-paused" : ""}`}>

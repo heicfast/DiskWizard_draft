@@ -844,6 +844,31 @@
   text-align: center;
 }
 
+/* Real-core preview renderings (CORE-INTERFACE-GAPS.md P0-2). */
+.dw-preview-text {
+  width: 100%;
+  margin: 0;
+  max-height: 220px;
+  padding: 12px 14px;
+  border-radius: var(--radius-s);
+  background: var(--card);
+  border: 1px solid var(--divider);
+  font-family: var(--font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dw-preview-pdf {
+  width: 100%;
+  height: 240px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-s);
+  background: var(--card);
+}
+
 .dw-preview-meta {
   display: flex;
   flex-direction: column;
