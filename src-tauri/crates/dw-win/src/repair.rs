@@ -72,9 +72,17 @@ impl RepairHandle {
         let off: u64 = lba
             .checked_mul(u64::from(self.sector_size))
             .ok_or_else(|| std::io::Error::other("lba overflow"))?;
-        let mut ov = OVERLAPPED::default();
-        ov.Offset = (off & 0xFFFF_FFFF) as u32;
-        ov.OffsetHigh = (off >> 32) as u32;
+        // The union's Offset/OffsetHigh arm (the blockdev pattern —
+        // windows-rs 0.62 hides them inside the anonymous union).
+        let mut ov = OVERLAPPED {
+            Anonymous: windows::Win32::System::IO::OVERLAPPED_0 {
+                Anonymous: windows::Win32::System::IO::OVERLAPPED_0_0 {
+                    Offset: u32::try_from(off & 0xFFFF_FFFF).unwrap_or(u32::MAX),
+                    OffsetHigh: u32::try_from(off >> 32).unwrap_or(u32::MAX),
+                },
+            },
+            ..Default::default()
+        };
         let mut written = 0u32;
         unsafe {
             WriteFile(
