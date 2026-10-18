@@ -725,7 +725,7 @@ mod tests {
         ram.data[..512].copy_from_slice(&s);
         // Cluster n → byte (heap_off + n − 2) × 512.
         let cluster_off = |n: u32| (heap_off + n - 2) as usize * 512;
-        let mut set_fat = |ram: &mut RamDevice, n: u32, v: u32| {
+        let set_fat = |ram: &mut RamDevice, n: u32, v: u32| {
             let off = 512 + n as usize * 4;
             ram.data[off..off + 4].copy_from_slice(&v.to_le_bytes());
         };
