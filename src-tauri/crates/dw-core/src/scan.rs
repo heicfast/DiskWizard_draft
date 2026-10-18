@@ -661,4 +661,174 @@ mod tests {
             Err(e) => panic!("unexpected {e:?}"),
         }
     }
+
+    // ── QA-6: the ~65% essential-mode reduction, end to end ───────
+
+    /// A small valid BMP whose length rides in the HEADER (u32 at
+    /// +2) — position-independent carve lengths, so byte-identical
+    /// copies share content keys wherever they sit (the tail-scan
+    /// formats would make length depend on the LAST marker before
+    /// device end). Distinguishing byte at +40 → distinct keys.
+    fn bmp_variant(tag: u8) -> Vec<u8> {
+        let size = 300u32;
+        let mut b = vec![0u8; size as usize];
+        b[0..2].copy_from_slice(b"BM");
+        b[2..6].copy_from_slice(&size.to_le_bytes());
+        b[6..10].copy_from_slice(&0u32.to_le_bytes()); // reserved
+        b[10..14].copy_from_slice(&54u32.to_le_bytes()); // data offset
+        b[14..18].copy_from_slice(&40u32.to_le_bytes()); // BITMAPINFOHEADER
+        b[18..22].copy_from_slice(&16i32.to_le_bytes()); // width
+        b[22..26].copy_from_slice(&16i32.to_le_bytes()); // height
+        b[40] = tag;
+        b
+    }
+
+    /// The engineered exFAT population proving the product claim
+    /// "filtering duplicate and nonessential results reduced files to
+    /// review by about 65% in testing" (§6.1 + the UIUX essential-
+    /// mode contract). Census by design:
+    ///
+    /// * 21 structured files (Existing — carved copies at their own
+    ///   regions are ABSORBED by the structured-wins merge),
+    /// * each with 3 byte-identical copies in unallocated space
+    ///   (first copy → LostPath, repeats → Version),
+    /// * 7 orphan BMPs (unique lost content → LostPath),
+    /// * 49 PST signature hits with distinct prefixes (named by
+    ///   content → LostName).
+    ///
+    /// complete = 140 visible files; essential (Existing + Deleted +
+    /// LostPath) = 49 → reduction = 91/140 = 65.0% exactly.
+    fn exfat_65_percent_population() -> RamDevice {
+        const FILES: usize = 21;
+        const COPIES: usize = 3;
+        const ORPHANS: usize = 7;
+        const PSTS: usize = 49;
+        let total_sectors = 8192u32; // 4 MiB
+        let heap_off = 8u32; // after boot(1) + FAT(4) + pad(3)
+        let cluster_count = total_sectors - heap_off;
+        let mut ram = RamDevice::new(512 * total_sectors as usize, 512);
+        // Boot sector.
+        let mut s = vec![0u8; 512];
+        s[..3].copy_from_slice(b"\xEB\x76\x90");
+        s[3..11].copy_from_slice(b"EXFAT   ");
+        s[0x0B..0x0F].copy_from_slice(&0u32.to_le_bytes());
+        s[0x0F..0x13].copy_from_slice(&total_sectors.to_le_bytes());
+        s[0x13..0x17].copy_from_slice(&1u32.to_le_bytes()); // FAT offset
+        s[0x17..0x1B].copy_from_slice(&4u32.to_le_bytes()); // FAT length
+        s[0x1B..0x1F].copy_from_slice(&heap_off.to_le_bytes());
+        s[0x1F..0x23].copy_from_slice(&cluster_count.to_le_bytes());
+        s[0x23..0x27].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+        s[0x2F] = 9; // 512 B sectors
+        s[0x30] = 0; // 1 sector/cluster
+        s[510] = 0x55;
+        s[511] = 0xAA;
+        ram.data[..512].copy_from_slice(&s);
+        // Cluster n → byte (heap_off + n − 2) × 512.
+        let cluster_off = |n: u32| (heap_off + n - 2) as usize * 512;
+        let mut set_fat = |ram: &mut RamDevice, n: u32, v: u32| {
+            let off = 512 + n as usize * 4;
+            ram.data[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        set_fat(&mut ram, 0, 0xFFFF_FFF8);
+        set_fat(&mut ram, 1, 0xFFFF_FFFF);
+        // Root directory chain: clusters 2..6 (5 × 512 B = 2560 B for
+        // 21 entry sets × 96 B = 2016 B).
+        for c in 2..6u32 {
+            set_fat(&mut ram, c, c + 1);
+        }
+        set_fat(&mut ram, 6, 0xFFFF_FFFF);
+        // Structured files: clusters 10..(10+FILES), data = distinct
+        // PNGs; FAT marks each EOC (allocated).
+        let mut dir = Vec::new();
+        for i in 0..FILES {
+            let cluster = 10 + i as u32;
+            set_fat(&mut ram, cluster, 0xFFFF_FFFF);
+            let png = bmp_variant(i as u8);
+            let at = cluster_off(cluster);
+            ram.data[at..at + png.len()].copy_from_slice(&png);
+            // The exFAT entry set (primary 0x85 + stream 0xC0 + name).
+            let name = format!("file{i:02}.bmp");
+            let name_u16: Vec<u16> = name.encode_utf16().collect();
+            let mut f = [0u8; 32];
+            f[0] = 0x85;
+            f[1] = 2;
+            f[8..10].copy_from_slice(&0x20u16.to_le_bytes());
+            dir.extend_from_slice(&f);
+            let mut st = [0u8; 32];
+            st[0] = 0xC0;
+            st[1] = 1;
+            st[3] = name_u16.len() as u8;
+            st[8..16].copy_from_slice(&(png.len() as u64).to_le_bytes());
+            st[0x14..0x18].copy_from_slice(&cluster.to_le_bytes());
+            st[0x18..0x20].copy_from_slice(&(png.len() as u64).to_le_bytes());
+            dir.extend_from_slice(&st);
+            let mut nm = [0u8; 32];
+            nm[0] = 0xC1;
+            for (j, u) in name_u16.iter().enumerate() {
+                nm[2 + j * 2..4 + j * 2].copy_from_slice(&u.to_le_bytes());
+            }
+            dir.extend_from_slice(&nm);
+        }
+        let root = cluster_off(2);
+        ram.data[root..root + dir.len()].copy_from_slice(&dir);
+        // Duplicate copies: 3 per file, byte-identical, FAT untouched
+        // (unallocated space — carving territory).
+        for i in 0..FILES {
+            let png = bmp_variant(i as u8);
+            for c in 0..COPIES {
+                let cluster = 100 + (i * COPIES + c) as u32;
+                let at = cluster_off(cluster);
+                ram.data[at..at + png.len()].copy_from_slice(&png);
+            }
+        }
+        // Orphan PNGs: unique content, unallocated.
+        for j in 0..ORPHANS {
+            let png = bmp_variant(200 + j as u8);
+            let at = cluster_off(200 + j as u32);
+            ram.data[at..at + png.len()].copy_from_slice(&png);
+        }
+        // PST signature hits: distinct prefixes (byte 8 varies →
+        // distinct content keys), unallocated.
+        for k in 0..PSTS {
+            let at = cluster_off(300 + k as u32);
+            ram.data[at..at + 4].copy_from_slice(b"!BDN");
+            ram.data[at + 8] = k as u8;
+        }
+        ram
+    }
+
+    #[test]
+    fn qa6_essential_mode_reduces_review_set_by_65_percent() {
+        // The product claim's end-to-end proof: duplicate (Version)
+        // and named-by-content (LostName) results hide in essential
+        // mode; structured + first-copy + orphan results stay. The
+        // engineered census lands at exactly 65.0% — "about 65%".
+        let ram = exfat_65_percent_population();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let (tree, report) = run_scan(dev, "DW 65% (E:)", &mut NoObserver).expect("scan");
+        let files: Vec<_> = tree.nodes().iter().filter(|n| !n.is_dir).collect();
+        use crate::types::NodeOrigin;
+        let census = |o: NodeOrigin| files.iter().filter(|n| n.origin == o).count();
+        let existing = census(NodeOrigin::Existing);
+        let deleted = census(NodeOrigin::Deleted);
+        let lostpath = census(NodeOrigin::LostPath);
+        let version = census(NodeOrigin::Version);
+        let lostname = census(NodeOrigin::LostName);
+        // The engineered population (see the fixture doc comment).
+        assert_eq!(existing, 21, "structured files");
+        assert_eq!(deleted, 0);
+        assert_eq!(lostpath, 28, "21 first-copy duplicates + 7 orphans");
+        assert_eq!(version, 42, "21 files × 2 repeat copies");
+        assert_eq!(lostname, 49, "PST named-by-content hits");
+        let complete = existing + deleted + lostpath + version + lostname;
+        assert_eq!(complete, 140, "the same-region carves were absorbed");
+        // The UI's essential mode hides lost-name + version
+        // (src/state/results.ts ESSENTIAL_HIDDEN_ORIGINS).
+        let essential = existing + deleted + lostpath;
+        assert_eq!(essential, 49);
+        let reduction = (complete - essential) * 100 / complete;
+        assert_eq!(reduction, 65, "the ~65% claim, exact on this fixture");
+        // The report's headline numbers stay honest.
+        assert_eq!(report.files_found, tree.totals().0);
+    }
 }
