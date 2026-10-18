@@ -68,6 +68,10 @@ export interface RecoverProgressState {
   enableRepair: boolean;
   repairedFiles: number;
   finished: boolean;
+  /** Set when the recovery command itself failed (destination
+   * rejected, destination mkdir error, stale generation, …) — the
+   * summary panel renders the honest failure instead of "Success". */
+  error?: string;
 }
 
 interface ResultsState {
@@ -209,7 +213,30 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
       bytes,
       destinationName: dest?.name ?? "Destination",
       enableRepair: get().enableRepair,
-    }).catch(() => undefined);
+    }).catch((e: unknown) => {
+      // NEVER swallow a failed recovery: the user would stare at
+      // "Preparing…" forever. Surface the backend's typed error
+      // (DESTINATION_ON_SOURCE / NO_DESTINATION / mkdir failure /
+      // stale generation) as the summary — the honest failure state
+      // the QA tour's byte-truth step can also see.
+      const msg = e instanceof Error ? e.message : String(e);
+      set({
+        recoverProgress: null,
+        recoverSummary: {
+          totalFiles: nodeIds.length,
+          doneFiles: 0,
+          failedFiles: nodeIds.length,
+          totalBytes: bytes,
+          doneBytes: 0,
+          currentFile: msg,
+          destination: dest?.name ?? "Destination",
+          enableRepair: get().enableRepair,
+          repairedFiles: 0,
+          finished: true,
+          error: msg,
+        },
+      });
+    });
   },
 
   clearRecovery: () => set({ recoverProgress: null }),

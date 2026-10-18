@@ -64,6 +64,25 @@ function tourEndTitle() {
   }
 }
 
+/** Fail LOUDLY (the QA harness's honesty rule): stamp the reserved
+ * t99 failure frame — the harness captures it like any step — and
+ * stop the tour. The workflow's fail-frame check turns this into a
+ * precise CI failure naming the broken funnel stage, instead of a
+ * silent no-op surfacing minutes later as RECOVERY_OUTPUT_MISSING
+ * with zero diagnostics (exactly how the first tour run died). */
+function tourFail(reason: string): void {
+  const slug =
+    reason.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase().slice(0, 48) ||
+    "unknown";
+  const title = `DiskWizard · t99-tour-fail-${slug}`;
+  document.title = title;
+  if (isTauri()) {
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
+      .catch(() => undefined);
+  }
+}
+
 export function TourDriver() {
   useEffect(() => {
     let disposed = false;
@@ -198,13 +217,19 @@ async function runTour(hooks: DevHooks): Promise<void> {
     // everything the scan found, open the destination rows (real
     // volumes, the source flagged), pick a non-source drive, run the
     // export, and land on the summary — the workflow then
-    // byte-compares what landed on disk against the seeds.
+    // byte-compares what landed on disk against the seeds. Every
+    // stage asserts its precondition and fails LOUDLY (t99 frame)
+    // instead of silently skipping the recovery.
     steps.push(
       {
         name: "recovery-select-all",
         apply: () => {
           const snap = useResultsStore.getState().snapshot;
           const files = (snap?.nodes ?? []).filter((n) => !n.isDir);
+          if (files.length === 0) {
+            tourFail(snap ? "no-files-in-snapshot" : "results-snapshot-null");
+            return;
+          }
           useResultsStore.getState().selectAll(files.map((n) => n.id));
         },
       },
@@ -214,8 +239,12 @@ async function runTour(hooks: DevHooks): Promise<void> {
         apply: () => {
           const rs = useResultsStore.getState();
           const rows = rs.destinations;
+          if (rows.length === 0) {
+            tourFail("no-destination-rows");
+            return;
+          }
           const chosen = rows.find((d) => !d.isSource) ?? rows[0];
-          if (chosen) rs.chooseDestination(chosen.id);
+          rs.chooseDestination(chosen.id);
         },
         dwell: 1.4,
       },
@@ -230,23 +259,49 @@ async function runTour(hooks: DevHooks): Promise<void> {
             .filter((n) => rs.selectedIds.has(n.id))
             .reduce((a, n) => a + n.size, 0);
           const dest = rs.destinations.find((d) => d.id === rs.chosenDestinationId);
-          if (dest && ids.length > 0) {
-            // Drive the store's funnel so the progress/summary states
-            // render exactly as a user would see them.
-            rs.chooseDestination(dest.id);
-            await rs.beginRecovery(ids, bytes);
+          if (!dest) {
+            tourFail("no-destination-chosen");
+            return;
           }
+          if (ids.length === 0) {
+            tourFail("selection-empty-at-recovery");
+            return;
+          }
+          // Drive the store's funnel so the progress/summary states
+          // render exactly as a user would see them.
+          rs.chooseDestination(dest.id);
+          await rs.beginRecovery(ids, bytes);
         },
         dwell: 2,
       },
       {
         name: "recovery-progress",
         apply: async () => {
-          await waitForRecoveryDone(180_000);
+          const ok = await waitForRecoveryDone(180_000);
+          if (!ok) {
+            tourFail("recovery-no-summary-180s");
+          }
         },
         dwell: 6,
       },
-      { name: "recovery-complete", apply: () => undefined, dwell: 2 },
+      {
+        name: "recovery-complete",
+        apply: () => {
+          const summary = useResultsStore.getState().recoverSummary;
+          if (!summary) {
+            tourFail("recovery-summary-missing");
+            return;
+          }
+          if (summary.error) {
+            tourFail(`recovery-cmd-${summary.error}`);
+            return;
+          }
+          if (summary.failedFiles > 0) {
+            tourFail(`recovery-${summary.failedFiles}-files-failed`);
+          }
+        },
+        dwell: 2,
+      },
     );
   }
 
@@ -268,6 +323,12 @@ async function runTour(hooks: DevHooks): Promise<void> {
     window.dispatchEvent(new CustomEvent("dw-tour-step", { detail: { index: i, name: step.name } }));
     (window as unknown as Record<string, unknown>).__DW_TOUR_STATE__ = { step: i + 1, name: step.name };
     await sleep((step.dwell ?? 1) * DWELL_MS);
+    // A failed stage stamped the t99 fail frame — stop advancing so
+    // the failure is the tour's last word (the end marker still lets
+    // the harness break out of its capture loop immediately).
+    if (document.title.includes("t99-tour-fail")) {
+      break;
+    }
   }
 
   // End marker — the harness knows the tour is over.

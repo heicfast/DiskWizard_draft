@@ -166,12 +166,22 @@ jobs:
           # Marker indices shift when steps are inserted; assert by NAME
           # substring instead of exact index.
           $names = @($shot | ForEach-Object { $_ })
-          $mustHave = @('scan-complete','results-all','recovery-select-all','recovery-started','recovery-complete','license-pro-seeded','scan-live')
+          $mustHave = @('scan-complete','results-all','recovery-select-all','recovery-destination-chosen','recovery-started','recovery-complete','license-pro-seeded','scan-live')
           $missing = @($mustHave | Where-Object { -not ($names -match $_) })
           if ($missing.Count -gt 0) {
             throw "MISSING_FRAMES: $($missing -join ', ') - the real-core tour did not reach them (see logs)"
           }
           "frame assertions passed ($($names.Count) frames)"
+
+          # The driver's LOUD failures: a t99-tour-fail-* frame names the
+          # exact broken funnel stage (no-results / no-destinations /
+          # recovery command error / failed files). Surface it as the CI
+          # failure instead of letting the byte-truth step report a bare
+          # RECOVERY_OUTPUT_MISSING minutes later.
+          $fails = @($names | Where-Object { $_ -match 'tour-fail' })
+          if ($fails.Count -gt 0) {
+            throw "TOUR_FAIL: $($fails -join ', ') - the driver flagged a broken funnel stage"
+          }
 
           if (Test-Path "$env:RUNNER_TEMP\app-stderr.log") {
             "--- app-stderr tail ---"

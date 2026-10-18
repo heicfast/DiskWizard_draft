@@ -6,7 +6,7 @@
  */
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
-import { CheckIcon, WrenchIcon, XIcon } from "lucide-react";
+import { CheckIcon, TriangleAlertIcon, WrenchIcon, XIcon } from "lucide-react";
 import { formatBytes, formatCountFull } from "../../lib/format";
 import { useResultsStore } from "../../state/results";
 import { useViewStore } from "../../state/view";
@@ -21,7 +21,10 @@ export function RecoverOverlay() {
   // the case where the summary was dismissed quickly).
   useEffect(() => {
     if (summary) {
-      showToast("Recovery completed — files saved", "check");
+      showToast(
+        summary.error ? `Recovery failed — ${summary.error}` : "Recovery completed — files saved",
+        summary.error ? "info" : "check",
+      );
     }
   }, [summary, showToast]);
 
@@ -96,10 +99,17 @@ export function RecoverOverlay() {
               transition={{ duration: 0.28, ease: [0.2, 0.9, 0.3, 1.05] }}
             >
               <button type="button" className="dw-dialog-x" onClick={dismissSummary} aria-label="Close">✕</button>
-              <div className="dw-recover-summary-badge">
-                <CheckIcon size={26} strokeWidth={2.4} />
+              <div className={`dw-recover-summary-badge${summary.error ? " is-error" : ""}`}>
+                {summary.error ? <TriangleAlertIcon size={26} strokeWidth={2.4} /> : <CheckIcon size={26} strokeWidth={2.4} />}
               </div>
-              <h2 className="dw-dialog-title dw-display">Recovery Successful</h2>
+              <h2 className="dw-dialog-title dw-display">
+                {summary.error ? "Recovery Could Not Start" : "Recovery Successful"}
+              </h2>
+              {summary.error && (
+                <p className="dw-recover-summary-note" role="alert">
+                  {summary.error}
+                </p>
+              )}
               <div className="dw-recover-summary-stats dw-num">
                 <div className="dw-stop-stat">
                   <span className="dw-stop-stat-num">{formatCountFull(summary.totalFiles - summary.failedFiles)}</span>

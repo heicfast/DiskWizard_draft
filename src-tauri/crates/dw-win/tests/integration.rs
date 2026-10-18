@@ -17,6 +17,22 @@ use dw_core::recover::{DestWriter, build_queue, run_recovery};
 use dw_core::scan::{ProgressObserver, run_scan};
 use dw_core::types::NodeOrigin;
 
+/// Serialize every test that touches the shared DWTEST VHD. Rust runs
+/// test threads in parallel: the first Windows-runner cycle caught
+/// `iocp_batch` comparing batch bytes against a sequential reference
+/// taken WHILE `vhd_end_to_end`'s scan was touching the same volume —
+/// the mounted NTFS's metadata ($MFT/$LogFile access-time updates)
+/// legitimately changed window 0 between the two reads. The lock makes
+/// each test's view of the disk stable; poisoning is ignored (a
+/// panicked test must not cascade into unrelated failures).
+static VHD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_vhd() -> std::sync::MutexGuard<'static, ()> {
+    VHD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Find the test VHD's volume letter by its label ("DWTEST").
 fn find_test_volume() -> Option<char> {
     for letter in 'C'..='Z' {
@@ -92,6 +108,7 @@ impl DestWriter for DirDest {
 #[test]
 #[ignore = "requires the DWTEST VHD attached (windows-integration.yml)"]
 fn vhd_end_to_end() {
+    let _vhd = lock_vhd();
     let Some(letter) = find_test_volume() else {
         panic!("DWTEST volume not found — attach the VHD first (see the workflow)");
     };
@@ -228,6 +245,8 @@ fn smart_reports_on_disk0() {
 fn iocp_batch_matches_sequential_on_real_disk() {
     use dw_core::blockdev::{AlignedBuf, BatchRead};
 
+    let _vhd = lock_vhd();
+
     // Prefer the test VHD's physical drive; fall back to disk 0.
     let index = match find_test_volume() {
         Some(letter) => {
@@ -282,11 +301,25 @@ fn iocp_batch_matches_sequential_on_real_disk() {
 
     // Byte-identical: batch window i covers the same bytes as seq.
     for (i, b) in bufs.iter().enumerate() {
-        assert_eq!(
-            &b[..window],
-            &seq[i * window..(i + 1) * window],
-            "batch window {i} diverges from the sequential read"
-        );
+        let expect = &seq[i * window..(i + 1) * window];
+        let got = &b[..window];
+        if got != expect {
+            // Name the first divergent byte — a raw offset+value pair
+            // turns "diverges" into diagnosable evidence (which window,
+            // how deep in, what values).
+            let at = got
+                .iter()
+                .zip(expect.iter())
+                .position(|(x, y)| x != y)
+                .unwrap_or(window);
+            panic!(
+                "batch window {i} diverges from the sequential read at byte {at} \
+                 (device offset {}): batch {:#04x} vs seq {:#04x}",
+                i * window + at,
+                got[at],
+                expect[at]
+            );
+        }
     }
 
     // Informational throughput (not asserted — shared-runner noise).

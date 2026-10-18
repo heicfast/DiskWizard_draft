@@ -1362,6 +1362,13 @@
   background: var(--free-soft);
 }
 
+/* The failed-command variant (destination rejected, mkdir error…):
+   the honest failure state, not a green check. */
+.dw-recover-summary-badge.is-error {
+  color: var(--warn, #b45309);
+  background: var(--warn-soft, #fef3c7);
+}
+
 .dw-recover-summary-stats {
   display: flex;
   justify-content: center;

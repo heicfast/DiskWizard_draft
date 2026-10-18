@@ -30,20 +30,35 @@ impl BlockDevice for FuzzRam {
         if let Some(e) = check_buf(buf, 512) {
             return Err(e);
         }
-        let start = start_lba as usize * 512;
-        let end = start + buf.len();
-        if end > self.data.len() {
-            return Err(CoreError::ReadFailed {
-                offset: start_lba * 512,
-                len: buf.len() as u64,
-                source: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "past end"),
-            });
+        // Hostile-input discipline: engines fed fuzzed structures can
+        // request absurd LBAs; the harness must REJECT them, never
+        // panic (the CI fuzz run caught the usize add-overflow here —
+        // cargo-fuzz builds with overflow checks on, so the plain
+        // `start + buf.len()` aborted the process instead of erroring).
+        let Some(start) = start_lba.checked_mul(512) else {
+            return Err(eof_error(start_lba, buf.len()));
+        };
+        let Some(end) = start.checked_add(buf.len() as u64) else {
+            return Err(eof_error(start_lba, buf.len()));
+        };
+        if end > self.data.len() as u64 {
+            return Err(eof_error(start_lba, buf.len()));
         }
-        buf.copy_from_slice(&self.data[start..end]);
+        buf.copy_from_slice(&self.data[start as usize..end as usize]);
         Ok(())
     }
     fn describe(&self) -> String {
         format!("fuzzram://{}x512", self.total_sectors())
+    }
+}
+
+/// The graceful out-of-range read: a typed `ReadFailed` (the same
+/// error a real device's short/failed read produces), never a panic.
+fn eof_error(start_lba: u64, len: usize) -> CoreError {
+    CoreError::ReadFailed {
+        offset: start_lba.saturating_mul(512),
+        len: len as u64,
+        source: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "past end"),
     }
 }
 
