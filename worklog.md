@@ -65,3 +65,49 @@ Stage Summary:
 - Remaining for next sessions: Rust CI compile pass (Linux box lacks
   the GTK toolchain — the workflows carry it), the repair phase
   (docs/TODO.md), real core integration.
+
+## Session 2 — CI recovery, contract hardening, release-pipeline green
+
+**Diagnosed + fixed all 3 workflow failures** (root causes from the
+CI logs): invalid `bundle.targets ["nsis","msix"]` (msix is not a
+Tauri bundle target — the Store package builds via MakeAppx);
+PowerShell here-string terminators at column 0 terminated the YAML
+block scalars in msix-build/ui-screenshots (both died at parse —
+rewrote on the DiskGenie donor harness, zero here-strings); ci.yml
+pinned `--target x86_64-pc-windows-msvc` + donor release packaging.
+
+**Rust core compiled for the first time** (local cargo 1.99 + stub
+pkg-config): fixed 2 compile errors (missing Manager imports), 5
+clippy::all denies (DeviceSpec struct et al.), adopted the donor's
+linker-manifest pattern. First Windows link hit mt.exe c1010001/
+LNK1327 (the linker's default asInvoker UAC snippet vs our
+requireAdministrator) — fixed with /MANIFESTUAC:NO. **NSIS + MSIX +
+Screenshots all GREEN**: DiskWizard-0.1.0-x64-setup.exe +
+portable.zip + SHA256SUMS; DiskWizard-0.1.0.6-x64.msix (40 files,
+Store identity templating).
+
+**Test suite landed (73 tests)** — caught 2 real bugs: licenseKey
+never enforced the Crockford body (no I/L/O/U) and formatKeyInput
+painted a phantom "DW-" over partial typing. Markers rebuilt as
+Crockford-safe leet (WR0NG/EXP1R/REV0K/TAKEN/TESTS) in BOTH mocks —
+the old markers could never fire (they failed shape validation
+first). Demo keys documented in README.
+
+**VLM release-build review + color math**: fixed the WCAG AA fail on
+ink-on-ink-soft small text via a per-theme --ink-deep token (blossom
+3.42→4.76:1, light 2.49→4.70:1; dark/ember/tide keep --ink). Email
+category got real name variety in both mocks (Rust had lumped email
+into "other" — parity gap).
+
+**Tour title-channel fixed beyond the donor**: Tauri 2 does not
+auto-sync document.title (wry wires DocumentTitleChanged only when an
+app handler exists — the donor's own ci-artifacts show its harness
+always fell back to cadence capture). tourTitle now stamps the native
+window via getCurrentWindow().setTitle: the harness captured **27
+named frames (t02..t28), one per tour step, tour-complete end marker
+detected** — exceeding the donor's capture fidelity.
+
+**Multi-POV verdicts**: PM feature-complete for scope; Production
+pipelines green with hygiene; Senior-dev check/clippy/fmt clean +
+73 tests + mock parity; Designer 9/9/9/8 pages, AA proven per-theme;
+Paying-user honest licensing + free disk-health trust builder.
