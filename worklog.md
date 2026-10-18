@@ -546,3 +546,23 @@ suite, IOCP test, real-core tour), and sync the registers.
   their first completed run — the shared-hallucination trap (F14)
   is the standing lesson: fixtures must come from REAL formatters,
   not hand-built mirrors of the parser.
+
+### Session 6 continuation — the fuzz class fix + the tour's named stage
+
+- The dict-enabled fuzz sweep (local, CI-equivalent invocation) found
+  TWO more beyond the CI's three: read_bytes' `offset + len` at the
+  device-boundary choke point, and GPT's `entries_lba + s` in the
+  salvage loop. All five fixed with catching regressions; all ten
+  targets re-swept clean (307K–23M execs) + both crash artifacts
+  replayed (cb3b712).
+- The instrumented tour's first flight named its stage:
+  `recovery-cmd-mkdir-destination-…` = ERROR_INVALID_NAME — the real
+  inventory's "C:" letters + `":\\"` → `C::\DiskWizard Recovered`.
+  Fixed + windows-gated unit regression + the CI blind-spot closed
+  (`cargo check --tests` for the app crate — plain check skips
+  #[cfg(test)] code) (604ee3d, F18).
+- The funnel was otherwise PROVEN healthy by the t99 evidence chain:
+  selection non-empty, destination rows non-empty, destination
+  chosen, recovery command invoked — every prior silent-skip suspect
+  eliminated. With the mkdir fixed, the tour's byte-truth leg is the
+  remaining witness.
