@@ -1,6 +1,7 @@
 //! Device commands — the real inventory via dw-win, the SMART free
 //! tier, BitLocker unlock, SDR.
 
+use dw_core::blockdev::BlockDevice;
 use serde_json::{Value, json};
 use tauri::State;
 
