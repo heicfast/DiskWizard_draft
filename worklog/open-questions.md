@@ -127,27 +127,3 @@ docs/dependencies.md).
 
 **Status**: ADOPTED (2026-10-18, session 5) — recorded in
 docs/dependencies.md with the upgrade ticket.
-
-## OQ-8 (session 7) — the packaged-build test key: removed on security grounds
-
-A parallel agent landed `DBTESTSDEM00PR000C0DE0` as a hardcoded
-lifetime key (Rust activate arm + a prefilled LicenseDialog) in ALL
-builds, documented "operator-authorized pre-release override … remove
-before public distribution" while live activation was investigated.
-This session COMPLETED that investigation: activation is proven
-end-to-end against the deployed worker (live E2E green twice + the CI
-license-e2e workflow). With the live path proven, the override's
-justification is gone and its cost is absolute: the repo is public,
-the key is in the source, and a public source key in release binaries
-is a revenue hole — MASTER_PROMPT §0.4/§17 ("no hardcoded logic in
-release core paths, EVER") and the donor's licensing architecture both
-forbid it outright. REMOVED (cde5fd5 follow-up): the activate arm, the
-seeder, and the prefilled dialog value.
-
-If the owner wants a pre-release acceptance path independent of the
-activation server, the sanctioned mechanisms already exist: (a) a real
-DB-key minted via the admin API (proven working this session), or (b)
-the feature-gated `ci-tour` seeding (never in release builds). If the
-owner explicitly wants a public test key in release builds, that is an
-owner-level business decision to register here and re-land
-deliberately — not a default.

@@ -17,6 +17,10 @@ import { useViewStore } from "../state/view";
 import { userFacingError } from "../lib/userFacingError";
 import { BrandTile } from "../brand/BrandMark";
 
+/** Temporary operator-authorized pre-release key, prefilled to make NSIS/MSIX
+ * acceptance testing independent of the activation service. */
+const TEST_LIFETIME_LICENSE_KEY = "DB-TESTS-DEM00-PR000-C0DE0";
+
 export function LicenseDialog() {
   const open = useViewStore((s) => s.licenseDialogOpen);
   const close = useViewStore((s) => s.closeLicenseDialog);
@@ -29,7 +33,7 @@ export function LicenseDialog() {
   const validateNow = useLicenseStore((s) => s.validateNow);
   const consumeActivated = useLicenseStore((s) => s.consumeActivated);
 
-  const [key, setKey] = useState("");
+  const [key, setKey] = useState(TEST_LIFETIME_LICENSE_KEY);
   const inputRef = useRef<HTMLInputElement>(null);
   const isPro = status?.isPro ?? false;
   const complete = isKeyComplete(key);
