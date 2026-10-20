@@ -739,7 +739,11 @@ mod tests {
         a[0x08] = 0; // resident
         a[0x10..0x14].copy_from_slice(&((fn_len - content) as u32).to_le_bytes());
         a[0x14..0x16].copy_from_slice(&(content as u16).to_le_bytes());
-        a[content..content + 8].copy_from_slice(&parent.to_le_bytes());
+        // Real $FILE_NAME parent refs carry the reuse SEQUENCE in the
+        // high 16 bits — emit one (seq 3) so the fixture exercises the
+        // 48-bit mask (the VHD run's exact condition).
+        let full_ref = (3u64 << 48) | parent;
+        a[content..content + 8].copy_from_slice(&full_ref.to_le_bytes());
         a[content + 0x40] = name_u16.len() as u8;
         a[content + 0x41] = 2; // Win32 namespace
         for (i, u) in name_u16.iter().enumerate() {

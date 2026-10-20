@@ -56,6 +56,10 @@ const ATTR_BITMAP: u32 = 0xB0;
 /// MFT record header: "FILE" magic.
 const FILE_MAGIC: [u8; 4] = *b"FILE";
 
+/// FILE_REFERENCE mask: the low 48 bits are the MFT segment (record)
+/// number; the high 16 are the reuse sequence.
+const MFT_REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
 /// The parsed boot sector (BPB) facts.
 #[derive(Debug, Clone, Copy)]
 pub struct NtfsBoot {
@@ -804,7 +808,12 @@ impl NtfsEngine {
             for (parent, name) in names {
                 let display_name = name.clone();
                 let mut entry = FoundEntry::structured(display_name, is_dir, FsKind::Ntfs);
-                entry.parent_hint = Some(format!("@mft:{parent}"));
+                // $FILE_NAME parent refs are FULL file references —
+                // sequence in the high 16 bits, segment (record) in
+                // the low 48. The tree keys on the RECORD: mask (the
+                // VHD run proved it — every user file's ref carried a
+                // nonzero sequence and missed the map entirely).
+                entry.parent_hint = Some(format!("@mft:{}", parent & MFT_REF_MASK));
                 // Session 8: the record number is the tree's pass-2
                 // resolution key (dirs register record → node).
                 entry.record_id = Some(record_no);
@@ -821,7 +830,7 @@ impl NtfsEngine {
                                 Some(sn) => format!("{name}:{sn}"),
                                 None => name.clone(),
                             },
-                            parent_hint: Some(format!("@mft:{parent}")),
+                            parent_hint: Some(format!("@mft:{}", parent & MFT_REF_MASK)),
                             record_id: Some(record_no),
                             partition: None,
                             is_dir: false,
