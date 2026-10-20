@@ -262,6 +262,13 @@ fn parse_ata_smart_sector(data: &[u8]) -> AtaSummary {
     s
 }
 
+/// `IOCTL_ATA_PASS_THROUGH_EX` — CTL_CODE(IOCTL_SCSI_BASE=0x04,
+/// function 0x0410, METHOD_BUFFERED, FILE_READ_ACCESS |
+/// FILE_WRITE_ACCESS) = 0x0004D040 (the documented Win32 value;
+/// windows-rs 0.62 ships only the legacy `IOCTL_ATA_PASS_THROUGH`,
+/// so the EX code is defined here).
+const IOCTL_ATA_PASS_THROUGH_EX: u32 = 0x0004_D040;
+
 /// ATA SMART READ DATA via `IOCTL_ATA_PASS_THROUGH_EX` (SAT — the
 /// smartmontools transport). Session 9's fix: the struct was always
 /// EX-shaped but the IOCTL was the legacy `IOCTL_ATA_PASS_THROUGH`
@@ -275,9 +282,7 @@ fn ata_smart(
     model: &str,
     serial: &str,
 ) -> Option<SmartReport> {
-    use windows::Win32::Storage::IscsiDisc::{
-        ATA_FLAGS_DATA_IN, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH_EX,
-    };
+    use windows::Win32::Storage::IscsiDisc::{ATA_FLAGS_DATA_IN, ATA_PASS_THROUGH_EX};
     // The 512-byte SMART data sector follows the struct in the buffer.
     let struct_size = std::mem::size_of::<ATA_PASS_THROUGH_EX>();
     let mut buf = vec![0u8; struct_size + 512];
