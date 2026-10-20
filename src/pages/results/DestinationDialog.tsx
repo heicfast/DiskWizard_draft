@@ -1,6 +1,6 @@
 /**
  * The destination picker (ChooseDestinationPathDialog analog): Local /
- * Cloud tabs, destination rows with free-space checks, the "Enable
+ * Destination rows with free-space checks, the "Enable
  * file repair" toggle (ON by default), the overwrite-safety coaching
  * and the insufficient-space gate.
  */
@@ -10,7 +10,6 @@ import {
   AlertIcon,
   ArchiveIcon,
   CheckIcon,
-  CloudIcon,
   HardDriveIcon,
   WrenchIcon,
 } from "../../shell/icons";
@@ -30,7 +29,6 @@ export function DestinationDialog() {
   const snapshot = useResultsStore((s) => s.snapshot);
   const beginRecovery = useResultsStore((s) => s.beginRecovery);
 
-  const [tab, setTab] = useState<"local" | "cloud">("local");
   const [spaceGate, setSpaceGate] = useState<string | null>(null);
 
   const selectedBytes = useMemo(() => {
@@ -43,7 +41,7 @@ export function DestinationDialog() {
     return b;
   }, [snapshot, selectedIds]);
 
-  const rows = destinations.filter((d) => (tab === "local" ? d.kind === "local" : d.kind === "cloud"));
+  const rows = destinations.filter((d) => d.kind === "local");
   const chosenDest = destinations.find((d) => d.id === chosen) ?? null;
 
   // Reset the space gate when the selection changes.
@@ -97,15 +95,6 @@ export function DestinationDialog() {
             You have {selectedIds.size} file{selectedIds.size === 1 ? "" : "s"} ({formatBytes(selectedBytes)}) to recover.
           </p>
 
-          <div className="dw-segmented dw-dest-tabs" role="tablist" aria-label="Destination kind">
-            <button type="button" role="tab" aria-selected={tab === "local"} className={tab === "local" ? "is-on" : ""} onClick={() => setTab("local")}>
-              <HardDriveIcon size={13} /> Local
-            </button>
-            <button type="button" role="tab" aria-selected={tab === "cloud"} className={tab === "cloud" ? "is-on" : ""} onClick={() => setTab("cloud")}>
-              <CloudIcon size={13} /> Cloud
-            </button>
-          </div>
-
           <div className="dw-dest-list dw-scroll" role="list">
             {loading && (
               <div className="dw-dest-loading">
@@ -126,7 +115,7 @@ export function DestinationDialog() {
                     {chosen === d.id && <CheckIcon size={12} strokeWidth={3} />}
                   </span>
                   <span className="dw-dest-icon">
-                    {d.kind === "cloud" ? <CloudIcon size={16} strokeWidth={1.8} /> : <HardDriveIcon size={16} strokeWidth={1.8} />}
+                    <HardDriveIcon size={16} strokeWidth={1.8} />
                   </span>
                   <span className="dw-dest-info">
                     <span className="dw-dest-name">{d.name}</span>

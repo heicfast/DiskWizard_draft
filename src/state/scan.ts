@@ -33,7 +33,6 @@ interface ScanState {
   start: (deviceId: string) => Promise<boolean>;
   startFolder: (label: string) => Promise<boolean>;
   startDiskImage: (imagePath: string) => Promise<boolean>;
-  startCloud: (driveId: string) => Promise<boolean>;
   /** Resume a saved .rsf session by id (CORE-INTERFACE-GAPS P0-3):
    * the core adopts the tree and reports {generation, deviceName}. */
   resumeSession: (sessionId: string) => Promise<boolean>;
@@ -79,18 +78,6 @@ export const useScanStore = create<ScanState>((set) => ({
     set({ starting: true, error: null, done: null });
     try {
       const r = await invoke<{ generation: number }>("start_disk_image_scan", { imagePath });
-      set({ generation: r.generation, starting: false });
-      return true;
-    } catch (e) {
-      set({ starting: false, error: String(e) });
-      return false;
-    }
-  },
-
-  startCloud: async (driveId) => {
-    set({ starting: true, error: null, done: null });
-    try {
-      const r = await invoke<{ generation: number }>("start_cloud_scan", { driveId });
       set({ generation: r.generation, starting: false });
       return true;
     } catch (e) {

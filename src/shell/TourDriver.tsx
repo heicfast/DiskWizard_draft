@@ -308,8 +308,6 @@ async function runTour(hooks: DevHooks): Promise<void> {
   steps.push(
     // Tools (free disk health):
     { name: "tools-disk-health", apply: () => useViewStore.getState().setPage("tools") },
-    // Cloud:
-    { name: "cloud", apply: () => useViewStore.getState().setPage("cloud"), dwell: 2.2 },
     // Settings + theme sweep (each palette's crossfade gets a frame):
     { name: "settings", apply: () => useViewStore.getState().setPage("settings") },
     // Help:

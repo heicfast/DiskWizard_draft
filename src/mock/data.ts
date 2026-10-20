@@ -13,7 +13,6 @@
  *    wear IDs), including one genuine Caution disk.
  */
 import type {
-  CloudDrive,
   DeviceInventory,
   RecoverDestination,
   RecoverySession,
@@ -309,43 +308,6 @@ export function smartReportFor(
     ],
   };
 }
-
-/* ── Cloud drives ────────────────────────────────────────────────────── */
-
-export const CLOUD_DRIVES: CloudDrive[] = [
-  {
-    id: "cloud-icloud",
-    provider: "icloud",
-    account: "alex.morgan@icloud.com",
-    label: "iCloud Drive",
-    used: 82.4 * GB,
-    total: 200 * GB,
-  },
-  {
-    id: "cloud-gdrive",
-    provider: "google",
-    account: "alex.morgan@gmail.com",
-    label: "Google Drive",
-    used: 41.2 * GB,
-    total: 100 * GB,
-  },
-  {
-    id: "cloud-dropbox",
-    provider: "dropbox",
-    account: "alex@morganstudio.co",
-    label: "Dropbox",
-    used: 6.8 * GB,
-    total: 2_048 * GB,
-  },
-  {
-    id: "cloud-onedrive",
-    provider: "onedrive",
-    account: "alex.morgan@outlook.com",
-    label: "OneDrive",
-    used: 118.9 * GB,
-    total: 1_024 * GB,
-  },
-];
 
 /* ── Recovery destinations ───────────────────────────────────────────── */
 

@@ -260,26 +260,6 @@ pub async fn unlock_bitlocker(
     }
 }
 
-/* ── Cloud (M3 per the plan) ─────────────────────────────────────── */
-
-#[tauri::command]
-pub fn list_cloud_drives() -> Value {
-    json!([
-        { "id": "icloud", "provider": "icloud", "account": "", "label": "iCloud Drive", "used": 0, "total": 0 },
-        { "id": "google", "provider": "google", "account": "", "label": "Google Drive", "used": 0, "total": 0 },
-        { "id": "dropbox", "provider": "dropbox", "account": "", "label": "Dropbox", "used": 0, "total": 0 },
-        { "id": "onedrive", "provider": "onedrive", "account": "", "label": "OneDrive", "used": 0, "total": 0 },
-    ])
-}
-
-#[tauri::command]
-pub async fn cloud_sign_in(_drive_id: String) -> Result<Value, String> {
-    Err("NOT_AVAILABLE. Cloud recovery connects in the M3 engine update.".into())
-}
-
-#[tauri::command]
-pub async fn start_cloud_scan(s: State<'_, AppState>, drive_id: String) -> Result<Value, String> {
-    super::license::require_licensed(&s)?;
-    let _ = drive_id;
-    Err("NOT_AVAILABLE. Cloud recovery connects in the M3 engine update.".into())
-}
+/* Cloud Recovery: REMOVED per owner directive (session 8) — local
+ * recovery only. Every cloud surface (backend commands, mock data,
+ * UI page, sidebar entry, destination tab, tour step) is deleted. */

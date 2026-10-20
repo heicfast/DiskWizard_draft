@@ -36,7 +36,6 @@ export {
   Settings as SettingsIcon,
   HelpCircle as HelpCircleIcon,
   LifeBuoy as SupportIcon,
-  Cloud as CloudIcon,
   ShieldCheck as ShieldIcon,
   Lock as LockIcon,
   Unlock as UnlockIcon,

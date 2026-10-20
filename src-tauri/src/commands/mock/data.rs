@@ -1,5 +1,5 @@
 //! Mock-core seed data: the device inventory (the cherry-blossom
-//! reference page, byte-exact), SMART reports, cloud drives, recovery
+//! reference page, byte-exact), SMART reports, recovery
 //! destinations, and the per-target scan scale tables.
 use serde_json::{Value, json};
 
@@ -332,22 +332,6 @@ pub fn smart_report(device_id: &str) -> Value {
 
 /* ── Cloud drives ────────────────────────────────────────────────────── */
 
-pub fn cloud_drives() -> Value {
-    json!([
-        { "id": "cloud-icloud", "provider": "icloud", "account": "alex.morgan@icloud.com", "label": "iCloud Drive", "used": gb(82.4), "total": gb(200.0) },
-        { "id": "cloud-gdrive", "provider": "google", "account": "alex.morgan@gmail.com", "label": "Google Drive", "used": gb(41.2), "total": gb(100.0) },
-        { "id": "cloud-dropbox", "provider": "dropbox", "account": "alex@morganstudio.co", "label": "Dropbox", "used": gb(6.8), "total": gb(2048.0) },
-        { "id": "cloud-onedrive", "provider": "onedrive", "account": "alex.morgan@outlook.com", "label": "OneDrive", "used": gb(118.9), "total": gb(1024.0) },
-    ])
-}
-
-pub fn cloud_drive(id: &str) -> Value {
-    cloud_drives()
-        .as_array()
-        .and_then(|a| a.iter().find(|d| d["id"] == json!(id)).cloned())
-        .unwrap_or_else(|| json!({ "id": "cloud-icloud", "label": "iCloud Drive" }))
-}
-
 /* ── Recovery destinations ───────────────────────────────────────────── */
 
 pub fn recover_destinations(source_id: Option<&str>) -> Value {
@@ -364,14 +348,6 @@ pub fn recover_destinations(source_id: Option<&str>) -> Value {
             })
         })
         .collect();
-    for c in cloud_drives().as_array().into_iter().flatten() {
-        let used = c["used"].as_u64().unwrap_or(0);
-        let total = c["total"].as_u64().unwrap_or(1);
-        list.push(json!({
-            "id": c["id"], "name": c["label"], "kind": "cloud",
-            "freeBytes": total.saturating_sub(used), "totalBytes": total,
-        }));
-    }
     json!(list)
 }
 

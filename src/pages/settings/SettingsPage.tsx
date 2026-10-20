@@ -73,7 +73,7 @@ export function SettingsPage() {
             <>
               <div className="dw-license-panel-copy">
                 <strong>DiskWizard Pro unlocks every recovery capability.</strong>
-                Unlimited recovery, file repair, SD Card Rescue, cloud and lost-partition
+                Unlimited recovery, file repair, SD Card Rescue and lost-partition
                 recovery. Disk health monitoring stays free.
               </div>
               <div className="dw-license-actions">

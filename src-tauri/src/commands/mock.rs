@@ -200,19 +200,6 @@ pub fn start_disk_image_scan(
 }
 
 #[tauri::command]
-pub fn start_cloud_scan(s: State<'_, SharedState>, drive_id: String) -> Result<Value, String> {
-    license_gate(&s)?;
-    let drive = data::cloud_drive(&drive_id);
-    let device = json!({ "id": drive["id"], "name": drive["label"] });
-    let generation = {
-        let mut st = s.lock();
-        st.start(&device);
-        st.generation
-    };
-    Ok(json!({ "generation": generation }))
-}
-
-#[tauri::command]
 pub fn pause_scan(s: State<'_, SharedState>) -> Value {
     let mut st = s.lock();
     if !st.paused
@@ -417,18 +404,7 @@ pub fn start_recovery(
     Ok(json!({ "ok": true }))
 }
 
-/* ── Cloud ───────────────────────────────────────────────────────────── */
-
-#[tauri::command]
-pub fn list_cloud_drives() -> Value {
-    data::cloud_drives()
-}
-
-#[tauri::command]
-pub async fn cloud_sign_in() -> Result<Value, String> {
-    delay(1_800).await;
-    Ok(json!({ "ok": true, "account": "alex.morgan@outlook.com" }))
-}
+/* Cloud Recovery: removed per owner directive (session 8). */
 
 /* ── Licensing ───────────────────────────────────────────────────────── */
 

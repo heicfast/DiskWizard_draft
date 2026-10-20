@@ -26,7 +26,6 @@ import type {
   DevHooks,
   DeviceInventory,
   LicenseStatus,
-  RecoverDestination,
   RecoverySession,
   ScanProgress,
   ScanResultsSnapshot,
@@ -35,7 +34,6 @@ import type {
 } from "../types";
 import { EV_LICENSE_CHANGED, EV_SCAN_DONE, EV_SCAN_PROGRESS, EV_DEVICES_CHANGED, EV_RECOVER_PROGRESS, EV_RECOVER_DONE } from "../types";
 import {
-  CLOUD_DRIVES,
   DEVICES,
   LOST_PARTITION,
   RECENT_SESSIONS,
@@ -646,17 +644,7 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
     /* ── Recovery funnel (licensed) ─────────────────────────────── */
     case "list_recover_destinations": {
       const sourceId = (args?.sourceDeviceId as string | null) ?? null;
-      const list: RecoverDestination[] = recoverDestinations(sourceId).map((d) => ({ ...d }));
-      for (const c of CLOUD_DRIVES) {
-        list.push({
-          id: c.id,
-          name: c.label,
-          kind: "cloud",
-          freeBytes: c.total - c.used,
-          totalBytes: c.total,
-        });
-      }
-      return list;
+      return recoverDestinations(sourceId).map((d) => ({ ...d }));
     }
     case "start_recovery": {
       licenseGate();
@@ -678,34 +666,6 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       if (recoverTicker !== null) window.clearInterval(recoverTicker);
       recoverTicker = window.setInterval(recoverTick, 180);
       return { ok: true };
-    }
-
-    /* ── Cloud (licensed scan; browsing free) ────────────────────── */
-    case "list_cloud_drives":
-      return CLOUD_DRIVES;
-    case "cloud_sign_in": {
-      await delay(1_800); // OAuth loopback handshake
-      return { ok: true, account: "alex.morgan@outlook.com" };
-    }
-    case "start_cloud_scan": {
-      licenseGate();
-      const id = String(args?.driveId ?? CLOUD_DRIVES[0].id);
-      const drive = CLOUD_DRIVES.find((c) => c.id === id) ?? CLOUD_DRIVES[0];
-      const pseudo: StorageDevice = {
-        id: drive.id,
-        name: drive.label,
-        letter: null,
-        kind: "hdd",
-        fileSystem: "NTFS",
-        used: drive.used,
-        total: drive.total,
-        health: "ok",
-        bitLocker: "none",
-        trim: null,
-        isSystem: false,
-        diskIndex: 0,
-      };
-      return startScan(pseudo);
     }
 
     /* ── Licensing (DiskGenie architecture, DW keys) ────────────── */

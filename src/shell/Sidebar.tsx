@@ -25,7 +25,6 @@ const NAV: { id: PageId; label: string; icon: typeof HardDriveIcon }[] = [
   { id: "recover", label: "Recover Data", icon: HardDriveIcon },
   { id: "results", label: "Scan Results", icon: ListIcon },
   { id: "tools", label: "Disk Tools", icon: SupportIcon },
-  { id: "cloud", label: "Cloud Recovery", icon: HardDriveIcon },
   { id: "settings", label: "Settings", icon: HelpCircleIcon },
   { id: "help", label: "Help Center", icon: HelpCircleIcon },
 ];
@@ -34,7 +33,6 @@ const NAV_ICONS: Record<PageId, typeof HardDriveIcon> = {
   recover: HardDriveIcon,
   results: ListIcon,
   tools: SupportIcon,
-  cloud: HardDriveIcon,
   settings: HelpCircleIcon,
   help: HelpCircleIcon,
 };

@@ -17,7 +17,6 @@ import { Toast } from "./components/Toast";
 import { RecoverPage } from "./pages/recover/RecoverPage";
 import { ResultsPage } from "./pages/results/ResultsPage";
 import { ToolsPage } from "./pages/tools/ToolsPage";
-import { CloudPage } from "./pages/cloud/CloudPage";
 import { SettingsPage } from "./pages/settings/SettingsPage";
 import { HelpPage } from "./pages/help/HelpPage";
 import { useViewStore } from "./state/view";
@@ -100,7 +99,6 @@ function AppShell() {
             {page === "recover" && <RecoverPage />}
             {page === "results" && <ResultsPage />}
             {page === "tools" && <ToolsPage />}
-            {page === "cloud" && <CloudPage />}
             {page === "settings" && <SettingsPage />}
             {page === "help" && <HelpPage />}
           </PageSwap>

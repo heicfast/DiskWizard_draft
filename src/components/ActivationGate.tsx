@@ -17,10 +17,6 @@ const PITCHES: Record<string, { title: string; body: string }> = {
     title: "Scan Results — preview, filter and recover",
     body: "Browse found files with recoverability indicators, preview photos, videos and documents, then recover everything you need.",
   },
-  cloud: {
-    title: "Cloud Recovery — one-stop cloud rescue",
-    body: "Sign in to iCloud, Google Drive, Dropbox or OneDrive and recover deleted cloud files without leaving DiskWizard.",
-  },
   tools: {
     title: "Rescue tools",
     body: "SD Card Rescue, lost-partition repair guidance and disk images.",

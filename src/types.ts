@@ -199,7 +199,7 @@ export interface ScanResultsSnapshot {
 export interface RecoverDestination {
   id: string;
   name: string;
-  kind: "local" | "cloud";
+  kind: "local";
   freeBytes: number;
   totalBytes: number;
   /** The scan's source — hard-blocked ("Cannot save to original partition"). */
@@ -246,18 +246,6 @@ export interface SmartReport {
   attributes: SmartAttribute[];
 }
 
-/* ── Cloud recovery ──────────────────────────────────────────────────── */
-
-export type CloudProvider = "icloud" | "google" | "dropbox" | "onedrive";
-
-export interface CloudDrive {
-  id: string;
-  provider: CloudProvider;
-  account: string;
-  label: string;
-  used: number;
-  total: number;
-}
 
 /* ── Licensing (DiskGenie architecture, DB-prefixed) ─────────────────── */
 
@@ -295,7 +283,7 @@ export interface DevHooks {
 
 /* ── View state ──────────────────────────────────────────────────────── */
 
-export type PageId = "recover" | "results" | "tools" | "cloud" | "settings" | "help";
+export type PageId = "recover" | "results" | "tools" | "settings" | "help";
 
 export type ResultsMode = "essential" | "complete";
 

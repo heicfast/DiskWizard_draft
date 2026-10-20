@@ -91,7 +91,6 @@ pub fn run() {
             commands::start_scan,
             commands::start_folder_scan,
             commands::start_disk_image_scan,
-            commands::start_cloud_scan,
             commands::pause_scan,
             commands::resume_scan,
             commands::stop_scan,
@@ -104,9 +103,6 @@ pub fn run() {
             commands::list_recover_destinations,
             commands::start_recovery,
             commands::preview_file,
-            // Cloud
-            commands::list_cloud_drives,
-            commands::cloud_sign_in,
             // Licensing
             commands::license_status,
             commands::activate_license,
