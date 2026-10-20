@@ -717,3 +717,23 @@ New surfaces:
 - Dependency bumps: react 19, zustand 5, framer-motion 14, vite 8,
   vitest 5, tauri 2.12 stack; 155 dw-core + 27 dw-license tests, 74
   web tests, all green.
+### Session 8 close — ALL EIGHT WORKFLOWS GREEN (0016a2c)
+
+The final layer of the @mft story: $FILE_NAME parent refs carry the
+reuse SEQUENCE in the high 16 bits — the dir emission masked it, the
+file emission didn't. Every user file on a real volume landed on
+"File Path Lost". Fixed with MFT_REF_MASK on both arms + a
+seq-hardened end-to-end fixture (the exact real-volume condition).
+
+The truth-gate evidence (core-e2e run 39483485020, real Windows
+runner, real VHD, real deletion):
+- Scan: 155 files / 510.9 MB / **1 second** / NTFS (was: hours-stuck
+  with TB-inflated counters)
+- Structure: **139 structured** / 16 lost-branch (the folder tree
+  resolves: Photos/, Videos/, Docs/… with their deleted contents)
+- Byte-verify: **115/116 deleted files byte-IDENTICAL, 0 different**
+  (99.1% recovery truth through the production engine + dw-cli)
+
+All eight workflows green on the same SHA: CI, Core E2E, Windows
+Integration, Real-Core Tour, UI Screenshots, MSIX, License E2E, Fuzz
+(the full hostile-media corpus over the carver overhaul).
