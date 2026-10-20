@@ -203,7 +203,11 @@ fn vhd_end_to_end() {
     assert_eq!(report.done_files, 2, "both files recover: {report:?}");
     assert_eq!(report.failed_files, 0);
     // Session-8 diagnosis: what actually landed under the destination.
-    for entry in std::fs::read_dir(&dest_root).flatten().take(20) {
+    for entry in std::fs::read_dir(&dest_root)
+        .map(|rd| rd.flatten())
+        .unwrap_or_default()
+        .take(20)
+    {
         eprintln!("diag: dest entry {:?}", entry.file_name());
     }
 

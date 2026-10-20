@@ -288,6 +288,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
           $results = Get-Content "$evidence\results.json" -Raw | ConvertFrom-Json
           $manifest = Get-Content "$evidence\manifest.json" -Raw | ConvertFrom-Json
           Write-Host ("Scan: {0} files / {1} bytes / {2}s / fs={3} / nodes={4}" -f
