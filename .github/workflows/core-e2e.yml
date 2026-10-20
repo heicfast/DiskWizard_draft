@@ -17,9 +17,6 @@ concurrency:
   group: core-e2e-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  EVIDENCE: ${{ runner.temp }}\dwevidence
-
 jobs:
   cross-platform-core:
     name: Core tests + selftest (ubuntu)
@@ -53,6 +50,8 @@ jobs:
     name: Real recovery (VHD seed → delete → scan → recover → verify)
     runs-on: windows-latest
     timeout-minutes: 50
+    env:
+      EVIDENCE: ${{ runner.temp }}\dwevidence
     steps:
       - uses: actions/checkout@v4
 
