@@ -244,7 +244,16 @@ impl RawHandleDevice {
                     OffsetHigh: u32::try_from(offset >> 32).unwrap_or(u32::MAX),
                 },
             },
-            hEvent: ev.event,
+            // The LOW-BIT trick (documented ReadFile mechanism): once
+            // this handle is associated with the batch completion
+            // port (iocp()), plain reads would otherwise queue a
+            // completion packet there too — and a later batch's
+            // harvest would pop this stack OVERLAPPED and die on the
+            // unknown pointer (the vhd_end_to_end panic). Setting the
+            // event's low bit tells the system to signal the event
+            // WITHOUT posting to the port: single reads stay
+            // event-driven, the port stays batch-only.
+            hEvent: HANDLE(((ev.event.0 as usize) | 1) as *mut core::ffi::c_void),
             ..Default::default()
         };
         // SAFETY: the handle is owned and opened overlapped+sharing;
@@ -509,11 +518,15 @@ impl RawHandleDevice {
                 continue;
             }
             // Map the completed OVERLAPPED back to its slot (depth ≤16:
-            // a linear scan beats an index header).
-            let slot = slots
-                .iter_mut()
-                .find(|s| std::ptr::from_ref(&*s.ov) == pov)
-                .expect("completion for an unknown OVERLAPPED");
+            // a linear scan beats an index header). A packet that
+            // matches NO slot is a stale completion (an event-driven
+            // read that predated the low-bit fix, or a foreign
+            // issuer on a shared handle) — it is DROPPED: a scan
+            // must never die on a completion it didn't ask for (the
+            // F16 lesson, now structural).
+            let Some(slot) = slots.iter_mut().find(|s| std::ptr::from_ref(&*s.ov) == pov) else {
+                continue;
+            };
             if matches!(slot.status, SlotStatus::Pending) {
                 pending -= 1;
                 match harvested {

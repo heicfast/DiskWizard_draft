@@ -1,0 +1,176 @@
+name: Engine Benchmark (multi-environment speed evidence)
+
+# The owner's speed mandate, made continuous: seed REAL volumes of
+# varying sizes/populations on a REAL Windows runner, drive the
+# production engine through dw-cli, and record throughput + phase
+# timings + memory into comparable evidence — gated against both our
+# own recorded baseline (regression protection) and the og app's
+# DOCUMENTED reference (quick scan ≈21 s on a 129 GB NTFS partition;
+# ≈170 MB/s full-session aggregate — `dynamic-ground-truth--scan-
+# phase-captured.md` §8, `qa-logs--session-forensics.md` §2).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: engine-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: VHD matrix (small dense / large sparse)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build dw-cli (release)
+        run: cargo build --release -p dw-cli
+        working-directory: src-tauri
+
+      - name: Environment recording (the context every number carries)
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\bench"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          [pscustomobject]@{
+            time = (Get-Date -AsUTC).ToString("o")
+            runner = "windows-latest"
+            cores = $env:NUMBER_OF_PROCESSORS
+            ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+            cpu = (Get-CimInstance Win32_Processor).Name
+            buildProfile = "release"
+          } | ConvertTo-Json | Set-Content "$evidence\environment.json"
+          Get-Content "$evidence\environment.json"
+
+      - name: Small dense volume (512 MB, 2000 files)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vhd = "$env:RUNNER_TEMP\bench-small.vhd"
+          $script = @(
+            'create vdisk file="' + $vhd + '" maximum=512 type=fixed',
+            'attach vdisk', 'create partition primary',
+            'format fs=ntfs label=BENCHS quick', 'assign letter=S'
+          ) -join "`r`n"
+          Set-Content -Path "$env:RUNNER_TEMP\dps.txt" -Value $script -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\dps.txt" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
+          Start-Sleep -Seconds 3
+          # 2000 small files (fast .NET writes, no per-file hashing).
+          $dirs = "a","b","c","d"
+          foreach ($d in $dirs) { New-Item -ItemType Directory -Force -Path "S:\$d" | Out-Null }
+          $rnd = [System.Random]::new(7)
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          for ($i = 0; $i -lt 2000; $i++) {
+            $bytes = New-Object byte[] (4KB + ($i % 8) * 4KB)
+            $rnd.NextBytes($bytes)
+            [IO.File]::WriteAllBytes("S:\$($dirs[$i % 4])\file$i.dat", $bytes)
+          }
+          Write-Host ("seeded 2000 files in {0}s" -f $sw.Elapsed.Seconds)
+          Remove-Item -Recurse -Force S:\a, S:\b, S:\c, S:\d
+          Write-VolumeCache -DriveLetter S
+
+      - name: Benchmark scan (small)
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\bench"
+          cargo run --release -p dw-cli -- scan vol-S --out "$evidence\small.json" --log "$evidence\small.log" -v --max-seconds 300
+        working-directory: src-tauri
+
+      - name: Large sparse volume (2 GB expandable, 200 files + free space)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vhd = "$env:RUNNER_TEMP\bench-large.vhd"
+          $script = @(
+            'create vdisk file="' + $vhd + '" maximum=2048 type=expandable',
+            'attach vdisk', 'create partition primary',
+            'format fs=ntfs label=BENCHL quick', 'assign letter=L'
+          ) -join "`r`n"
+          Set-Content -Path "$env:RUNNER_TEMP\dpl.txt" -Value $script -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\dpl.txt" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
+          Start-Sleep -Seconds 3
+          $rnd = [System.Random]::new(11)
+          New-Item -ItemType Directory -Force -Path L:\data | Out-Null
+          for ($i = 0; $i -lt 200; $i++) {
+            $bytes = New-Object byte[] (256KB)
+            $rnd.NextBytes($bytes)
+            [IO.File]::WriteAllBytes("L:\data\block$i.bin", $bytes)
+          }
+          Remove-Item -Recurse -Force L:\data
+          Write-VolumeCache -DriveLetter L
+
+      - name: Benchmark scan (large — the carve-dominated profile)
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\bench"
+          cargo run --release -p dw-cli -- scan vol-L --out "$evidence\large.json" --log "$evidence\large.log" -v --max-seconds 600
+        working-directory: src-tauri
+
+      - name: SMART census (every physical disk, honest outcomes)
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\bench"
+          $out = @()
+          foreach ($dev in Get-CimInstance Win32_DiskDrive) {
+            $r = cargo run --release -p dw-cli -- smart "disk$($dev.Index)" 2>&1 | Out-String
+            $out += [pscustomobject]@{ disk = "disk$($dev.Index)"; model = $dev.Model; cli = $r.Trim() }
+          }
+          $out | ConvertTo-Json -Depth 3 | Set-Content "$evidence\smart-census.json"
+          Get-Content "$evidence\smart-census.json"
+        working-directory: src-tauri
+
+      - name: Truth gate + the comparison report
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidence = "$env:RUNNER_TEMP\bench"
+          $small = Get-Content "$evidence\small.json" -Raw | ConvertFrom-Json
+          $large = Get-Content "$evidence\large.json" -Raw | ConvertFrom-Json
+          Write-Host ("small: {0} files {1:N1} MiB/s {2}s peakWS {3:N0} MB" -f $small.filesFound, $small.throughputMbps, $small.durationSec, ($small.peakWorkingSet / 1MB))
+          Write-Host ("large: {0} files {1:N1} MiB/s {2}s peakWS {3:N0} MB" -f $large.filesFound, $large.throughputMbps, $large.durationSec, ($large.peakWorkingSet / 1MB))
+          # GATE: the engine must clear 150 MiB/s through the VHD stack
+          # on runner storage (our recorded baseline is ~370-430; the
+          # og's documented full-session aggregate is ~170 MB/s on a
+          # REAL 149 GB disk — the reference line, not the bar: VHD +
+          # runner storage is a different environment, so the gate
+          # protects OUR regression floor).
+          if ($small.throughputMbps -lt 150) { throw "SMALL_UNDERPERFORMS: $($small.throughputMbps) MiB/s < 150" }
+          if ($large.throughputMbps -lt 150) { throw "LARGE_UNDERPERFORMS: $($large.throughputMbps) MiB/s < 150" }
+          # GATE: memory stays bounded on both profiles.
+          if ($small.peakWorkingSet -gt 512MB -or $large.peakWorkingSet -gt 512MB) { throw "MEMORY_BLOWN" }
+          # The comparison record: our numbers vs the og's documented
+          # reference (quick ≈21 s / 129 GB NTFS; ≈170 MB/s aggregate).
+          [pscustomobject]@{
+            ours = @{ small = $small; large = $large }
+            ogReference = @{ quickScanSec129GB = 21; fullSessionMBps = 170; source = "drw-research dynamic-ground-truth--scan-phase-captured.md §8" }
+          } | ConvertTo-Json -Depth 6 | Set-Content "$evidence\comparison.json"
+
+      - name: Detach + clean
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($v in @("bench-small.vhd", "bench-large.vhd")) {
+            $script = @('select vdisk file="' + "$env:RUNNER_TEMP\$v" + '"', 'detach vdisk') -join "`r`n"
+            Set-Content -Path "$env:RUNNER_TEMP\dp-clean.txt" -Value $script -Encoding ascii
+            diskpart /s "$env:RUNNER_TEMP\dp-clean.txt" | Out-Null
+          }
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-benchmark-${{ github.run_id }}
+          path: ${{ runner.temp }}\bench
+          if-no-files-found: warn
+          retention-days: 90

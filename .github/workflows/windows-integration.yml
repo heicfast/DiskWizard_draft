@@ -85,6 +85,16 @@ jobs:
         working-directory: src-tauri
         continue-on-error: true # Runners' virtual disks may lack SMART
 
+      # Session 9: the independent Windows-API surface tests (every
+      # Win32 call the core makes, one assertion per call, against the
+      # REAL host disks — the ATA/NVMe transports assert their TYPED
+      # outcomes, not data availability on virtual hardware).
+      - name: Windows-API surface tests (per-call verification)
+        run: cargo test -p dw-win --test win_api_surface --nocapture
+        working-directory: src-tauri
+        env:
+          RUST_BACKTRACE: "1"
+
       - name: Detach + clean the VHD
         if: always()
         shell: pwsh
