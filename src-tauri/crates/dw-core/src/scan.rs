@@ -531,9 +531,32 @@ impl ScanController {
             return units;
         }
         let layout = read_partition_layout(&*self.dev).unwrap_or_default();
-        if layout.partitions.is_empty() {
+        if !layout.partitions.is_empty() {
+            for p in &layout.partitions {
+                if p.total_sectors == 0 {
+                    continue;
+                }
+                let sub = Arc::new(crate::blockdev::SubDevice::new(
+                    Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
+                    p.start_lba,
+                    p.total_sectors,
+                    format!("part{}", p.index),
+                ));
+                let fs = fs::probe_filesystem(&*sub).unwrap_or(FsKind::Raw);
+                units.push(ScanUnit {
+                    dev: sub,
+                    sectors: p.total_sectors,
+                    prefix: Some(format!("Partition {}", p.index)),
+                    fs,
+                });
+            }
+        }
+        if units.is_empty() {
             // Whole-disk without a table (superfloppy/volume target) or
-            // an unreadable table: one unit covering everything.
+            // an EMPTY table (every partition deleted — the carve
+            // covers everything): one unit covering the disk. No early
+            // return: the lost sweep below may still find structured
+            // volumes hiding in the unallocated space.
             let fs = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
             units.push(ScanUnit {
                 dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
@@ -541,32 +564,36 @@ impl ScanController {
                 prefix: None,
                 fs,
             });
-            return units;
         }
-        for p in &layout.partitions {
-            if p.total_sectors == 0 {
+        // LOST PARTITIONS (session 9 wiring — the owner's
+        // deleted-partition scenario): sweep the table's unclaimed
+        // regions for filesystem boot sectors (1 MiB-aligned probes,
+        // bounded) and add each discovery as its own structured unit.
+        // A deleted partition's volume survives intact inside the gap
+        // — the MFT/FAT walk reconstructs it under a "Lost Partition"
+        // branch exactly like a live one (the og's "Insert lost
+        // partition" trace, `architecture/04-recovery-workflow.md`
+        // §3). The carve sweep still covers every gap for
+        // signature-only residue.
+        let lost =
+            crate::partition::sweep_for_lost_partitions(&*self.dev, &layout).unwrap_or_default();
+        for (i, hint) in lost.into_iter().enumerate() {
+            if hint.info.total_sectors == 0 {
                 continue;
             }
             let sub = Arc::new(crate::blockdev::SubDevice::new(
                 Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
-                p.start_lba,
-                p.total_sectors,
-                format!("part{}", p.index),
+                hint.info.start_lba,
+                hint.info.total_sectors,
+                format!("lost{}", hint.info.start_lba),
             ));
-            let fs = fs::probe_filesystem(&*sub).unwrap_or(FsKind::Raw);
+            // The sweep already probed the FS; a re-probe through the
+            // slice confirms (the probe is cheap and cached).
+            let fs = fs::probe_filesystem(&*sub).unwrap_or(hint.info.fs);
             units.push(ScanUnit {
                 dev: sub,
-                sectors: p.total_sectors,
-                prefix: Some(format!("Partition {}", p.index)),
-                fs,
-            });
-        }
-        if units.is_empty() {
-            let fs = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
-            units.push(ScanUnit {
-                dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
-                sectors: self.dev.total_sectors(),
-                prefix: None,
+                sectors: hint.info.total_sectors,
+                prefix: Some(format!("Lost Partition {}", i + 1)),
                 fs,
             });
         }
@@ -692,6 +719,62 @@ mod tests {
         assert_eq!(units.len(), 1, "one table entry → one partition unit");
         assert_eq!(units[0].sectors, 1024);
         assert_eq!(units[0].prefix.as_deref(), Some("Partition 1"));
+    }
+
+    /// The owner's deleted-partition scenario: the table entry is
+    /// GONE (zeroed) but the volume survives inside the gap — the
+    /// lost sweep must discover the boot sector at the 1 MiB boundary
+    /// and build a structured "Lost Partition" unit around it, so the
+    /// full MFT/FAT reconstruction runs instead of carve-only.
+    #[test]
+    fn deleted_partition_is_rediscovered_as_a_lost_unit() {
+        let mut ram = RamDevice::new(512 * 16_384, 512); // 8 MiB
+        // An intact FAT16 volume at LBA 2048 (the standard 1 MiB
+        // alignment) — built by reusing the FAT fixture's geometry
+        // (+ the FAT16 label the boot-sector probe keys on).
+        let mut vol = fat_image_with_file();
+        vol.data[0x36..0x3E].copy_from_slice(b"FAT16   ");
+        ram.data[2048 * 512..2048 * 512 + vol.data.len()].copy_from_slice(&vol.data);
+        // MBR present (0x55AA) with the partition entry ZEROED — the
+        // exact on-disk state after `delete partition`.
+        ram.data[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let ctrl = ScanController::new(Arc::new(ram), "disk");
+        let units = ctrl.scan_units();
+        let lost: Vec<&ScanUnit> = units
+            .iter()
+            .filter(|u| {
+                u.prefix
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("Lost Partition"))
+            })
+            .collect();
+        assert!(
+            !lost.is_empty(),
+            "the deleted volume was rediscovered ({} units)",
+            units.len()
+        );
+        assert_eq!(
+            lost[0].fs,
+            FsKind::Fat16,
+            "the boot sector's FS carried through"
+        );
+        assert_eq!(lost[0].sectors, 8192, "the BPB-derived volume size");
+        // And through the full pipeline: the file inside the lost
+        // volume lands STRUCTURED (not carve-only).
+        let mut ram2 = RamDevice::new(512 * 16_384, 512);
+        ram2.data[2048 * 512..2048 * 512 + vol.data.len()].copy_from_slice(&vol.data);
+        ram2.data[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram2);
+        let mut obs = Recorder(Vec::new(), Vec::new());
+        let (tree, _report) = run_scan(dev, "disk", &mut obs).expect("scan");
+        let structured = tree
+            .nodes()
+            .iter()
+            .any(|n| !n.is_dir && n.path.contains("Lost Partition"));
+        assert!(
+            structured,
+            "the lost volume's files land under the Lost Partition branch"
+        );
     }
 
     struct Recorder(Vec<Progress>, Vec<Phase>);

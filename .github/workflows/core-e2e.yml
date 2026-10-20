@@ -86,7 +86,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           Write-Host "VHD attached at V: (512 MB, NTFS)"
 
-      - name: Seed 100+ files across every format family
+      - name: Seed the realistic population (2000+ files, every format family)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -95,69 +95,81 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           $seedRoot = "$env:RUNNER_TEMP\seed"
           New-Item -ItemType Directory -Force -Path $seedRoot | Out-Null
-          foreach ($d in @("Photos", "Videos", "Music", "Docs", "Archives", "Bin", "Mixed\Nested\Deep")) {
-            New-Item -ItemType Directory -Force -Path (Join-Path $seedRoot $d) | Out-Null
-          }
-          $script:manifest = @()
-          $rnd = [System.Random]::new(20261021)
-
-          function Save-Hash([string]$path) {
-            $script:manifest += [pscustomobject]@{
+          # The realistic tree (the owner's ask: "spawn 2000+ files in
+          # structured directories"): work documents, photo quarters,
+          # source trees, media, archives, data exports + the original
+          # format-family coverage under Formats\.
+          $dirs = @(
+            "Users\Documents\Work", "Users\Pictures\2024\Q1", "Users\Pictures\2024\Q2",
+            "Users\Pictures\2024\Q3", "Users\Pictures\2024\Q4", "Users\Videos",
+            "Projects\src\core", "Projects\src\ui", "Projects\src\tools",
+            "Projects\tests", "Media\Music", "Archives", "Data\exports",
+            "Formats\Photos", "Formats\Videos", "Formats\Music", "Formats\Docs",
+            "Formats\Archives", "Formats\Bin", "Formats\Mixed\Nested\Deep"
+          )
+          foreach ($d in $dirs) { New-Item -ItemType Directory -Force -Path (Join-Path $seedRoot $d) | Out-Null }
+          # One manifest per DELETION GROUP (the matrix the verifier
+          # gates on): keep / permanent / recycle / overwrite / churn.
+          $script:groups = @{}
+          foreach ($g in @("keep","permanent","recycle","overwrite","churn")) { $script:groups[$g] = @() }
+          function Save-Hash([string]$path, [string]$group) {
+            $script:groups[$group] += [pscustomobject]@{
               rel = $path.Substring($seedRoot.Length + 1)
               sha256 = (Get-FileHash -Algorithm SHA256 -Path $path).Hash
               size = (Get-Item $path).Length
             }
           }
-          # LE byte-array copy at an offset.
+          $rnd = [System.Random]::new(20261021)
           function Copy-LE([byte[]]$src, [byte[]]$dst, [int]$at) {
             for ($i = 0; $i -lt $src.Length; $i++) { $dst[$at + $i] = $src[$i] }
           }
-          # BE byte-array copy at an offset (BitConverter emits LE).
           function Copy-BE([byte[]]$src, [byte[]]$dst, [int]$at) {
             for ($i = 0; $i -lt $src.Length; $i++) { $dst[$at + $i] = $src[$src.Length - 1 - $i] }
           }
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-          # 40 real JPEGs/PNGs/BMPs via System.Drawing (varied sizes).
-          for ($i = 0; $i -lt 16; $i++) {
-            $bmp = [System.Drawing.Bitmap]::new(160 + $i * 8, 120 + $i * 4)
-            for ($x = 0; $x -lt $bmp.Width; $x += 7) {
-              for ($y = 0; $y -lt $bmp.Height; $y += 7) {
-                $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($rnd.Next(256), $rnd.Next(256), $rnd.Next(256)))
-              }
-            }
-            $p = "$seedRoot\Photos\photo$i.jpg"
-            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose(); Save-Hash $p
-            $bmp2 = [System.Drawing.Bitmap]::new(96 + $i * 4, 64)
-            $g = [System.Drawing.Graphics]::FromImage($bmp2)
-            $g.Clear([System.Drawing.Color]::FromArgb($rnd.Next(256), 200, 100)); $g.Dispose()
-            $p2 = "$seedRoot\Photos\graphic$i.png"
-            $bmp2.Save($p2, [System.Drawing.Imaging.ImageFormat]::Png); $bmp2.Dispose(); Save-Hash $p2
+          # ── Group KEEP (existing files — the scan must mark them
+          #    origin=existing; 500 work documents 8-64 KB).
+          for ($i = 0; $i -lt 500; $i++) {
+            $p = "$seedRoot\Users\Documents\Work\report$i.doc.txt"
+            $len = 2KB + ($i % 16) * 4KB
+            [IO.File]::WriteAllText($p, ("Work document $i content line. " * ($len / 32)))
+            Save-Hash $p "keep"
           }
-          for ($i = 0; $i -lt 8; $i++) {
-            $bmp = [System.Drawing.Bitmap]::new(64 + $i * 16, 48)
+
+          # ── Photos: 400 REAL JPEGs (Graphics.Clear + Save — fast),
+          #    split overwrite-half / keep-half via index parity so the
+          #    same-name-overwrite group shares directories with
+          #    survivors (the realistic mixed state).
+          for ($i = 0; $i -lt 400; $i++) {
+            $q = "Q" + (1 + [math]::Floor($i / 100))
+            $p = "$seedRoot\Users\Pictures\2024\$q\photo$i.jpg"
+            $bmp = [System.Drawing.Bitmap]::new(320 + ($i % 40) * 8, 240)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.Clear([System.Drawing.Color]::FromArgb(100, $rnd.Next(256), 200)); $g.Dispose()
-            $p = "$seedRoot\Photos\image$i.bmp"
-            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Bmp); $bmp.Dispose(); Save-Hash $p
+            $g.Clear([System.Drawing.Color]::FromArgb($rnd.Next(256), $rnd.Next(256), $rnd.Next(256)))
+            $g.Dispose(); $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose()
+            Save-Hash $p ($(if ($i % 2 -eq 0) { "overwrite" } else { "keep" }))
           }
 
-          # 12 MP4s (valid ftyp/free/mdat box chains, 8-100 KB).
-          for ($i = 0; $i -lt 12; $i++) {
-            $mdatLen = 8192 * (1 + $i)
-            $bytes = New-Object byte[] (24 + 8 + $mdatLen)
-            Copy-BE ([BitConverter]::GetBytes([UInt32]24)) $bytes 0
-            Copy-LE ([Text.Encoding]::ASCII.GetBytes("ftypisom")) $bytes 4
-            Copy-BE ([BitConverter]::GetBytes([UInt32]8)) $bytes 24
-            Copy-LE ([Text.Encoding]::ASCII.GetBytes("free")) $bytes 28
-            Copy-BE ([BitConverter]::GetBytes([UInt32]$mdatLen)) $bytes 32
-            Copy-LE ([Text.Encoding]::ASCII.GetBytes("mdat")) $bytes 36
-            for ($j = 40; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
-            $p = "$seedRoot\Videos\clip$i.mp4"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+          # ── Group PERMANENT (900: 600 source files + 300 exports).
+          $srcExt = @("rs","ts","py","go","c","h","js","css")
+          for ($i = 0; $i -lt 600; $i++) {
+            $sub = @("core","ui","tools")[$i % 3]
+            $ext = $srcExt[$i % $srcExt.Count]
+            $p = "$seedRoot\Projects\src\$sub\module$i.$ext"
+            [IO.File]::WriteAllText($p, "// module $i`n" + ("fn handler_$i() { /* content */ }`n" * (8 + $i % 40)))
+            Save-Hash $p "permanent"
+          }
+          for ($i = 0; $i -lt 300; $i++) {
+            $ext = if ($i % 2 -eq 0) { "csv" } else { "json" }
+            $p = "$seedRoot\Data\exports\table$i.$ext"
+            [IO.File]::WriteAllText($p, ("id,name,value`n$i,row-$i,$($rnd.Next(100000))`n" * (10 + $i % 30)))
+            Save-Hash $p "permanent"
           }
 
-          # 10 MP3s (ID3v2.3 headers with syncsafe sizes).
-          for ($i = 0; $i -lt 10; $i++) {
-            $tagLen = 4096 * (1 + $i)
+          # ── Group RECYCLE (150 real MP3s — ID3v2.3, syncsafe).
+          for ($i = 0; $i -lt 150; $i++) {
+            $tagLen = 2048 * (1 + $i % 8)
             $bytes = New-Object byte[] (10 + $tagLen)
             Copy-LE ([Text.Encoding]::ASCII.GetBytes("ID3")) $bytes 0
             $bytes[3] = 3
@@ -166,10 +178,59 @@ jobs:
             $bytes[8] = [byte](($tagLen -shr 7) -band 0x7F)
             $bytes[9] = [byte]($tagLen -band 0x7F)
             for ($j = 10; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
-            $p = "$seedRoot\Music\track$i.mp3"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+            $p = "$seedRoot\Media\Music\track$i.mp3"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p "recycle"
           }
 
-          # 8 WAVs (RIFF + PCM payloads).
+          # ── Group CHURN (100 real ZIPs — deleted then their clusters
+          #    get reused by fresh data; some damage is EXPECTED).
+          for ($i = 0; $i -lt 100; $i++) {
+            $tmp = "$env:RUNNER_TEMP\ziptmp$i"; New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            1..4 | ForEach-Object { [IO.File]::WriteAllText("$tmp\file$_.txt", "archive $i content " * (40 * $_)) }
+            $p = "$seedRoot\Archives\bundle$i.zip"
+            Compress-Archive -Path "$tmp\*" -DestinationPath $p -Force
+            Remove-Item -Recurse -Force $tmp
+            Save-Hash $p "churn"
+          }
+
+          # ── Group PERMANENT (100 MP4s — box grammar, 8-64 KB).
+          for ($i = 0; $i -lt 100; $i++) {
+            $mdatLen = 4096 * (1 + $i % 16)
+            $bytes = New-Object byte[] (24 + 8 + $mdatLen)
+            Copy-BE ([BitConverter]::GetBytes([UInt32]24)) $bytes 0
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("ftypisom")) $bytes 4
+            Copy-BE ([BitConverter]::GetBytes([UInt32]8)) $bytes 24
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("free")) $bytes 28
+            Copy-BE ([BitConverter]::GetBytes([UInt32]$mdatLen)) $bytes 32
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("mdat")) $bytes 36
+            for ($j = 40; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
+            $p = "$seedRoot\Users\Videos\clip$i.mp4"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p "permanent"
+          }
+
+          # ── The original format-family coverage (valid JPEG/PNG/BMP
+          #    pixel art, WAVs, PDFs, DOCX, EXEs, nested text) —
+          #    permanent-deleted like before.
+          for ($i = 0; $i -lt 16; $i++) {
+            $bmp = [System.Drawing.Bitmap]::new(160 + $i * 8, 120 + $i * 4)
+            for ($x = 0; $x -lt $bmp.Width; $x += 7) {
+              for ($y = 0; $y -lt $bmp.Height; $y += 7) {
+                $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($rnd.Next(256), $rnd.Next(256), $rnd.Next(256)))
+              }
+            }
+            $p = "$seedRoot\Formats\Photos\photo$i.jpg"
+            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose(); Save-Hash $p "permanent"
+            $bmp2 = [System.Drawing.Bitmap]::new(96 + $i * 4, 64)
+            $g = [System.Drawing.Graphics]::FromImage($bmp2)
+            $g.Clear([System.Drawing.Color]::FromArgb($rnd.Next(256), 200, 100)); $g.Dispose()
+            $p2 = "$seedRoot\Formats\Photos\graphic$i.png"
+            $bmp2.Save($p2, [System.Drawing.Imaging.ImageFormat]::Png); $bmp2.Dispose(); Save-Hash $p2 "permanent"
+          }
+          for ($i = 0; $i -lt 8; $i++) {
+            $bmp = [System.Drawing.Bitmap]::new(64 + $i * 16, 48)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(100, $rnd.Next(256), 200)); $g.Dispose()
+            $p = "$seedRoot\Formats\Photos\image$i.bmp"
+            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Bmp); $bmp.Dispose(); Save-Hash $p "permanent"
+          }
           for ($i = 0; $i -lt 8; $i++) {
             $dataLen = 2048 * (1 + $i)
             $bytes = New-Object byte[] (44 + $dataLen)
@@ -184,26 +245,12 @@ jobs:
             Copy-LE ([Text.Encoding]::ASCII.GetBytes("data")) $bytes 36
             Copy-LE ([BitConverter]::GetBytes([UInt32]$dataLen)) $bytes 40
             for ($j = 44; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
-            $p = "$seedRoot\Music\sound$i.wav"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+            $p = "$seedRoot\Formats\Music\sound$i.wav"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p "permanent"
           }
-
-          # 10 minimal-but-valid PDFs.
           for ($i = 0; $i -lt 10; $i++) {
             $body = "%PDF-1.4`n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj`n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj`n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>endobj`ntrailer<</Root 1 0 R>>`n" + ("pdf filler content line $i " * (30 * ($i + 1))) + "`n%%EOF"
-            $p = "$seedRoot\Docs\document$i.pdf"; [IO.File]::WriteAllText($p, $body); Save-Hash $p
+            $p = "$seedRoot\Formats\Docs\document$i.pdf"; [IO.File]::WriteAllText($p, $body); Save-Hash $p "permanent"
           }
-
-          # 10 real ZIPs (compressed text payloads).
-          for ($i = 0; $i -lt 10; $i++) {
-            $tmp = "$env:RUNNER_TEMP\ziptmp$i"; New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-            1..5 | ForEach-Object { [IO.File]::WriteAllText("$tmp\file$_.txt", "archive $i content " * (50 * $_)) }
-            $p = "$seedRoot\Archives\bundle$i.zip"
-            Compress-Archive -Path "$tmp\*" -DestinationPath $p -Force
-            Remove-Item -Recurse -Force $tmp
-            Save-Hash $p
-          }
-
-          # 6 DOCX (real OPC zips).
           for ($i = 0; $i -lt 6; $i++) {
             $tmp = "$env:RUNNER_TEMP\docxtmp$i"
             New-Item -ItemType Directory -Force -Path "$tmp\_rels" | Out-Null
@@ -211,35 +258,41 @@ jobs:
             [IO.File]::WriteAllText("$tmp\[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
             [IO.File]::WriteAllText("$tmp\_rels\.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
             [IO.File]::WriteAllText("$tmp\word\document.xml", "<w:document xmlns:w=`"http://schemas.openxmlformats.org/wordprocessingml/2006/main`"><w:body><w:p><w:r><w:t>Report $i</w:t></w:r></w:p></w:body></w:document>")
-            $p = "$seedRoot\Docs\report$i.docx"
+            $p = "$seedRoot\Formats\Docs\report$i.docx"
             Compress-Archive -Path "$tmp\*" -DestinationPath $p -Force
             Remove-Item -Recurse -Force $tmp
-            Save-Hash $p
+            Save-Hash $p "permanent"
           }
-
-          # 6 real EXEs (system binaries — the .exe format family).
           $i = 0
           foreach ($name in @("where.exe", "sort.exe", "hostname.exe", "tasklist.exe", "mode.com", "more.com")) {
             $src = "C:\Windows\System32\$name"
             if (Test-Path $src) {
-              $p = "$seedRoot\Bin\tool$i.exe"; Copy-Item $src $p; Save-Hash $p; $i++
+              $p = "$seedRoot\Formats\Bin\tool$i.exe"; Copy-Item $src $p; Save-Hash $p "permanent"; $i++
             }
           }
-
-          # 14 text-family files (txt/csv/json/log/md), incl. deep nesting.
           1..14 | ForEach-Object {
             $exts = @("txt", "csv", "json", "log", "md")
             $ext = $exts[($_ - 1) % $exts.Count]
-            $sub = if ($_ -le 7) { "Docs" } else { "Mixed\Nested\Deep" }
+            $sub = if ($_ -le 7) { "Formats\Docs" } else { "Formats\Mixed\Nested\Deep" }
             $p = "$seedRoot\$sub\note$_.$ext"
             [IO.File]::WriteAllText($p, "DiskWizard seed file $_ " * (100 * $_))
-            Save-Hash $p
+            Save-Hash $p "permanent"
           }
 
-          $script:manifest | ConvertTo-Json | Set-Content -Path "$evidence\manifest.json"
-          Write-Host ("Seeded {0} files ({1} bytes total) + manifest" -f $script:manifest.Count, (($script:manifest | Measure-Object -Property size -Sum).Sum))
+          # Persist the grouped manifest.
+          [pscustomobject]@{
+            keep = $script:groups["keep"]; permanent = $script:groups["permanent"]
+            recycle = $script:groups["recycle"]; overwrite = $script:groups["overwrite"]
+            churn = $script:groups["churn"]
+          } | ConvertTo-Json -Depth 4 | Set-Content -Path "$evidence\manifest.json"
+          $total = ($script:groups.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+          $bytes = ($script:groups.Values | ForEach-Object { $_ | Measure-Object -Property size -Sum } | Measure-Object -Property Sum -Sum).Sum
+          Write-Host ("Seeded {0} files ({1} MB) in {2}s — keep={3} permanent={4} recycle={5} overwrite={6} churn={7}" -f
+            $total, [math]::Round($bytes/1MB,1), $sw.Elapsed.Seconds,
+            $script:groups["keep"].Count, $script:groups["permanent"].Count,
+            $script:groups["recycle"].Count, $script:groups["overwrite"].Count, $script:groups["churn"].Count)
 
-      - name: Stage seeds onto the volume, then delete completely
+      - name: Stage + apply the deletion matrix (5 real-world styles)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -248,11 +301,54 @@ jobs:
           Write-Host "Staged $count files on V:\"
           Write-VolumeCache -DriveLetter V
           Start-Sleep -Seconds 1
-          # DELETE — Remove-Item bypasses the recycle bin (permanent
-          # delete; NTFS marks the MFT records free).
-          Remove-Item -Recurse -Force "V:\seed"
+
+          # Style 1 — PERMANENT (Shift+Delete semantics): Remove-Item
+          # bypasses the recycle bin; NTFS marks the MFT records free.
+          Remove-Item -Recurse -Force "V:\seed\Projects", "V:\seed\Data", "V:\seed\Users\Videos", "V:\seed\Formats"
+          Write-Host "Permanent-deleted Projects/ Data/ Videos/ Formats/"
+
+          # Style 2 — RECYCLE BIN (the Explorer delete path: rename to
+          # $R/$I pairs, then the bin empties — two-name records).
+          Add-Type -AssemblyName Microsoft.VisualBasic
+          Get-ChildItem -Recurse -File "V:\seed\Media" | ForEach-Object {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($_.FullName, "OnlyErrorDialogs", "SendToRecycleBin")
+          }
           Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-          Write-Host "Deleted V:\seed completely (recycle bin emptied)"
+          Write-Host "Recycle-deleted + emptied Media/"
+
+          # Style 3 — SAME-NAME OVERWRITE (delete, then new content
+          # under the same path — MFT record reuse + Versions case).
+          $even = Get-ChildItem -Recurse -File "V:\seed\Users\Pictures" | Where-Object { $_.BaseName -match '(\d+)$' -and ([int]$Matches[1] % 2 -eq 0) }
+          $even | ForEach-Object { Remove-Item -Force $_.FullName }
+          $rnd2 = [System.Random]::new(99)
+          foreach ($f in $even) {
+            $bmp = [System.Drawing.Bitmap]::new(200, 150)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb($rnd2.Next(256), 10, 10)); $g.Dispose()
+            $bmp.Save($f.FullName, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose()
+          }
+          Write-Host "Overwrote $($even.Count) pictures with new content (same names)"
+
+          # Style 4 — CLUSTER-REUSE CHURN (delete the archives, then
+          # copy fresh data so the freed clusters get re-allocated —
+          # the QA-4 destroy/partial paths under real allocation).
+          Remove-Item -Recurse -Force "V:\seed\Archives"
+          $churnDir = "V:\churn"
+          New-Item -ItemType Directory -Force -Path $churnDir | Out-Null
+          for ($i = 0; $i -lt 64; $i++) {
+            $bytes = New-Object byte[] (1MB)
+            for ($j = 0; $j -lt $bytes.Length; $j += 4096) { $bytes[$j] = $i }
+            [IO.File]::WriteAllBytes("$churnDir\block$i.bin", $bytes)
+          }
+          Write-Host "Churn-deleted Archives/ + wrote 64 MB of replacement data"
+
+          # Style 5 — KEEP: Users\Documents\Work + the odd-numbered
+          # pictures survive as EXISTING files (the origin gate).
+
+          Write-VolumeCache -DriveLetter V
+          Start-Sleep -Seconds 1
+          $remaining = (Get-ChildItem -Recurse -File V:\seed).Count
+          Write-Host "Post-deletion population on V:\ $remaining surviving seed files (+ churn)"
 
       - name: dw-cli devices (enumeration smoke)
         run: |
@@ -297,12 +393,53 @@ jobs:
           Write-Host ("Scan: {0} files / {1} bytes / {2}s / fs={3} / nodes={4}" -f
             $results.filesFound, $results.bytesFound, $results.durationSec, $results.fs, $results.nodes.Count)
 
-          # TRUTH GATE 1: the scan found a meaningful fraction of the
-          # deleted population (MFT records survive deletion).
-          $expectedMin = [Math]::Floor($manifest.Count * 0.75)
+          # TRUTH GATE 1 (population): the scan found a meaningful
+          # fraction of the TOTAL population (existing + deleted —
+          # MFT records survive deletion; existing files must appear
+          # too, the owner's "only already-present files" inverse).
+          $total = ($manifest.PSObject.Properties.Value | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+          $expectedMin = [Math]::Floor($total * 0.80)
           if ($results.filesFound -lt $expectedMin) {
-            throw "SCAN_UNDERPERFORMS: found $($results.filesFound), expected >= $expectedMin of $($manifest.Count)"
+            throw "SCAN_UNDERPERFORMS: found $($results.filesFound), expected >= $expectedMin of $total"
           }
+          # TRUTH GATE 1b (origin honesty): the KEEP group surfaces as
+          # EXISTING (they were never deleted) — the deleted/existing
+          # distinction the owner found missing.
+          $keepRels = @($manifest.keep | ForEach-Object { $_.rel })
+          $existingHits = @($results.nodes | Where-Object {
+            -not $_.isDir -and $_.origin -eq "existing" -and $keepRels -contains $_.path
+          })
+          Write-Host ("Origin gate: {0}/{1} keep-group files marked existing" -f $existingHits.Count, $keepRels.Count)
+          if ($existingHits.Count -lt [Math]::Floor($keepRels.Count * 0.85)) {
+            throw "ORIGIN_LIES: only $($existingHits.Count)/$($keepRels.Count) never-deleted files marked existing"
+          }
+          # TRUTH GATE 1c (deleted found): the PERMANENT group surfaces
+          # with a deleted-class origin.
+          $permRels = @($manifest.permanent | ForEach-Object { [IO.Path]::GetFileName($_.rel) })
+          $deletedHits = @($results.nodes | Where-Object {
+            -not $_.isDir -and $_.origin -ne "existing" -and $permRels -contains $_.name
+          })
+          Write-Host ("Deleted gate: {0}/{1} permanent-group files found non-existing" -f $deletedHits.Count, $permRels.Count)
+          if ($deletedHits.Count -lt [Math]::Floor($permRels.Count * 0.70)) {
+            throw "DELETED_MISSING: only $($deletedHits.Count)/$($permRels.Count) deleted files surfaced"
+          }
+          # TRUTH GATE 1d (perf + memory, from the CLI instrumentation):
+          # throughput recorded, working set bounded (no leak-class
+          # growth on a 2000-file population).
+          Write-Host ("Perf: {0:N1} MiB/s  peak_ws={1:N0} MB  phases: {2}" -f
+            $results.throughputMbps, ($results.peakWorkingSet / 1MB),
+            (($results.phaseTimings | ForEach-Object { "$($_.0)=$([math]::Round($_.1,1))s" }) -join " "))
+          if ($results.peakWorkingSet -gt 768MB) {
+            throw "MEMORY_BLOWN: peak working set $([math]::Round($results.peakWorkingSet / 1MB)) MB > 768 MB"
+          }
+          [pscustomobject]@{
+            throughputMbps = $results.throughputMbps
+            peakWorkingSetMB = [math]::Round($results.peakWorkingSet / 1MB, 1)
+            peakPrivateMB = [math]::Round($results.peakPrivateBytes / 1MB, 1)
+            durationSec = $results.durationSec
+            phaseTimings = $results.phaseTimings
+            filesFound = $results.filesFound
+          } | ConvertTo-Json -Depth 4 | Set-Content "$evidence\perf.json"
           # TRUTH GATE 2: bytes stay physical (the session-8 clamp).
           if ($results.bytesFound -gt 512MB) {
             throw "BYTES_INFLATED: $($results.bytesFound) > the 512 MB volume"
@@ -312,34 +449,56 @@ jobs:
           $structured = @($results.nodes | Where-Object { $_.path -notmatch 'File Path Lost|Tags Extracted' -and -not $_.isDir })
           $lost = @($results.nodes | Where-Object { $_.path -match 'File Path Lost|Tags Extracted' -and -not $_.isDir })
           Write-Host ("Structure: {0} structured / {1} lost-branch files" -f $structured.Count, $lost.Count)
-          if ($structured.Count -lt [Math]::Floor($manifest.Count / 2)) {
+          if ($structured.Count -lt [Math]::Floor($total / 2)) {
             throw "TREE_COLLAPSED: only $($structured.Count) structured files (NTFS @mft resolution regression?)"
           }
           if (@($results.nodes | Where-Object { $_.name -match '@mft' -or $_.path -match '@mft' }).Count -gt 0) {
             throw "LITERAL_MFT_LEAK: '@mft' leaked into node names/paths"
           }
 
-          # TRUTH GATE 4: byte-identity of recovered content.
+          # TRUTH GATE 4 (byte-identity, group-aware): name-match first,
+          # then HASH-match across everything recovered (recycle-bin
+          # deletions rename to $R… — the bytes are the truth, not the
+          # name). Groups gate separately: keep/permanent/recycle hard
+          # (>= 75%), overwrite new-content hard, churn soft (>= 30% —
+          # the clusters were deliberately re-allocated).
           $recoveredRoot = "C:\dw-recovered"
-          $ok = 0; $missed = 0; $different = 0
-          foreach ($m in $manifest) {
-            $name = [IO.Path]::GetFileName($m.rel)
-            $hits = @(Get-ChildItem -Recurse -File $recoveredRoot -Filter $name -ErrorAction SilentlyContinue)
-            if ($hits.Count -eq 0) { $missed++; continue }
-            $match = $false
-            foreach ($h in $hits) {
-              if ((Get-FileHash -Algorithm SHA256 -Path $h.FullName).Hash -eq $m.sha256) { $match = $true; break }
+          $allRecovered = @(Get-ChildItem -Recurse -File $recoveredRoot -ErrorAction SilentlyContinue)
+          $hashCache = @{}
+          foreach ($f in $allRecovered) { $hashCache[$f.FullName] = (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash }
+          $hashIndex = @{}
+          foreach ($f in $allRecovered) {
+            $h = $hashCache[$f.FullName]
+            if (-not $hashIndex.ContainsKey($h)) { $hashIndex[$h] = @() }
+            $hashIndex[$h] += $f.Name
+          }
+          $report = @{}
+          foreach ($group in @("keep","permanent","recycle","overwrite","churn")) {
+            $ok = 0; $missed = 0; $different = 0
+            foreach ($m in $manifest.$group) {
+              $name = [IO.Path]::GetFileName($m.rel)
+              $nameHit = $allRecovered | Where-Object { $_.Name -eq $name -and $hashCache[$_.FullName] -eq $m.sha256 }
+              if ($nameHit) { $ok++; continue }
+              if ($hashIndex.ContainsKey($m.sha256)) { $ok++; continue }
+              if ($allRecovered | Where-Object { $_.Name -eq $name }) { $different++ } else { $missed++ }
             }
-            if ($match) { $ok++ } else { $different++ }
+            $n = $manifest.$group.Count
+            $report[$group] = [pscustomobject]@{ identical = $ok; missed = $missed; different = $different; total = $n }
+            Write-Host ("Byte-verify [{0}]: {1} identical / {2} missed / {3} different (of {4})" -f $group, $ok, $missed, $different, $n)
           }
-          Write-Host ("Byte-verify: {0} identical / {1} missed / {2} different (of {3})" -f $ok, $missed, $different, $manifest.Count)
-          # Threshold: >= 60% byte-identical (runner storage may TRIM
-          # parts of the VHD backing; the log carries the full census).
-          if ($ok -lt [Math]::Floor($manifest.Count * 0.60)) {
-            throw "RECOVERY_UNDERPERFORMS: only $ok/$($manifest.Count) byte-identical"
+          foreach ($group in @("keep","permanent","recycle","overwrite")) {
+            $n = $manifest.$group.Count
+            if ($report[$group].identical -lt [Math]::Floor($n * 0.75)) {
+              throw ("RECOVERY_UNDERPERFORMS [{0}]: only {1}/{2} byte-identical" -f $group, $report[$group].identical, $n)
+            }
           }
-          [pscustomobject]@{ identical = $ok; missed = $missed; different = $different; total = $manifest.Count } |
-            ConvertTo-Json | Set-Content "$evidence\verify.json"
+          if ($report["churn"].identical -lt [Math]::Floor($manifest.churn.Count * 0.30)) {
+            throw ("CHURN_RECOVERY_COLLAPSED: only {0}/{1} survived the deliberate cluster reuse" -f $report["churn"].identical, $manifest.churn.Count)
+          }
+          [pscustomobject]@{
+            keep = $report["keep"]; permanent = $report["permanent"]; recycle = $report["recycle"]
+            overwrite = $report["overwrite"]; churn = $report["churn"]
+          } | ConvertTo-Json -Depth 4 | Set-Content "$evidence\verify.json"
           Write-Host "ALL TRUTH GATES PASSED"
 
       - name: Detach + clean the VHD

@@ -118,7 +118,11 @@ impl ScanSession {
 
     /// Total materialized nodes (base + appended).
     fn node_count(&self) -> usize {
-        let base = self.tree.lock().as_ref().map_or(0, Arc::len);
+        let base = self
+            .tree
+            .lock()
+            .as_ref()
+            .map_or(0, |b: &std::sync::Arc<Vec<TreeNode>>| b.len());
         base + self.appended.lock().len()
     }
 
@@ -151,7 +155,11 @@ impl ScanSession {
         appended.extend_from_slice(&nodes[taken..]);
         self.taken.store(nodes.len(), Ordering::Release);
         if appended.len() >= FOLD_THRESHOLD && base.is_some() {
-            let mut all = Vec::with_capacity(base.as_ref().map_or(0, Arc::len) + appended.len());
+            let mut all = Vec::with_capacity(
+                base.as_ref()
+                    .map_or(0, |b: &std::sync::Arc<Vec<TreeNode>>| b.len())
+                    + appended.len(),
+            );
             if let Some(b) = base.as_deref() {
                 all.extend_from_slice(b);
             }
@@ -785,7 +793,9 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u
         // cleared one (lost nodes).
         let base = s.scan.tree.lock();
         let appended = s.scan.appended.lock();
-        let base_len = base.as_ref().map_or(0, Arc::len);
+        let base_len = base
+            .as_ref()
+            .map_or(0, |b: &std::sync::Arc<Vec<TreeNode>>| b.len());
         if since < base_len {
             if let Some(b) = base.as_deref() {
                 for n in &b[since..] {

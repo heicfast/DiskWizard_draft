@@ -223,7 +223,7 @@ fn sample_self() -> Option<(u64, u64)> {
                 as u32,
         )
     };
-    if !ok.as_bool() {
+    if ok.is_err() {
         return None;
     }
     Some((pmc.WorkingSetSize as u64, pmc.PagefileUsage as u64))
@@ -460,6 +460,6 @@ fn total_physical_bytes() -> Option<u64> {
     };
     // SAFETY: ms is the documented output struct with dwLength set.
     unsafe { GlobalMemoryStatusEx(&mut ms) }
-        .ok()
-        .then(|| ms.ullTotalPhys)
+        .is_ok()
+        .then_some(ms.ullTotalPhys)
 }
