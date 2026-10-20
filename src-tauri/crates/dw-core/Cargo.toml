@@ -14,6 +14,10 @@ parking_lot = "0.12"
 flate2 = "1"
 crc32fast = "1"
 memchr = "2.8.3"
+# FAT family timestamps are LOCAL wall-clock (the Windows mount
+# behavior); interpreting them needs the host timezone. clock+std
+# only — no oldtime/serde baggage.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
 tempfile = "3"

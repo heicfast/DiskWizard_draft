@@ -540,16 +540,37 @@ fn short_name(entry: &[u8]) -> String {
 /// FAT date/time → unix seconds.
 #[must_use]
 pub fn fat_datetime(date: u16, time: u16) -> i64 {
+    // FAT stores LOCAL wall-clock (the Windows mount behavior — the
+    // og displays the stored wall time as-is). Interpret through the
+    // host timezone so local rendering round-trips to the same
+    // wall clock (session 9: the old as-if-UTC read shifted every
+    // FAT timestamp by the user's UTC offset).
+    fat_datetime_at(date, time, local_utc_offset_secs())
+}
+
+/// FAT date/time → unix MILLISECONDS, interpreted at an explicit
+/// UTC offset (the pure, testable core of [`fat_datetime`]).
+#[must_use]
+pub fn fat_datetime_at(date: u16, time: u16, utc_offset_secs: i64) -> i64 {
     let year = 1980 + (date >> 9) as i64;
     let month = ((date >> 5) & 0x0F) as i64;
     let day = (date & 0x1F) as i64;
     let hour = (time >> 11) as i64;
     let min = ((time >> 5) & 0x3F) as i64;
     let sec = (time & 0x1F) as i64 * 2;
-    civil_to_unix(year, month.max(1), day.max(1), hour, min, sec)
+    (civil_to_unix(year, month.max(1), day.max(1), hour, min, sec) - utc_offset_secs) * 1000
 }
 
-/// FAT date-only → unix seconds.
+/// The host's current UTC offset in seconds (FAT wall-clock
+/// interpretation; the offset for NOW — Windows' own FAT handling
+/// applies the current offset to stored dates too). Zero when the
+/// timezone can't be determined (the no-conversion fallback).
+#[must_use]
+pub fn local_utc_offset_secs() -> i64 {
+    i64::from(chrono::Local::now().offset().local_minus_utc())
+}
+
+/// FAT date-only → unix milliseconds (midnight local).
 #[must_use]
 pub fn fat_date(date: u16) -> i64 {
     fat_datetime(date, 0)
@@ -735,10 +756,30 @@ mod tests {
 
     #[test]
     fn fat_times_convert() {
-        // 2026-10-17 00:00:00 ≈ 1792243200.
+        // 2026-10-17 00:00:00 UTC = 1_792_195_200 s (20743 days ×
+        // 86400 — the old comment's ≈1792243200 was off; the range
+        // assert masked it). The pure form (offset 0) carries
+        // milliseconds now (the og's display fidelity: FAT's
+        // 2-second granularity stays visible).
         let date = ((2026 - 1980) << 0x9) | (10 << 0x5) | 0x11;
-        let t = fat_datetime(date, 0);
-        assert!(t > 1_790_000_000 && t < 1_800_000_000);
+        let t = fat_datetime_at(date, 0, 0);
+        assert_eq!(t, 1_792_195_200_000);
+        // 23:59:58 — the FAT 2-second tick lands exactly.
+        let time = (23 << 11) | (59 << 5) | 0x1D;
+        assert_eq!(fat_datetime_at(date, time, 0) - t, 86_398_000);
+    }
+
+    #[test]
+    fn fat_local_interpretation_shifts_by_the_offset() {
+        // The same stored wall-clock read at a −7 h offset maps to a
+        // UTC instant 7 h LATER ("00:00 wall" in UTC−7 = 07:00 UTC):
+        // the local-round-trip property that fixes the owner's
+        // shifted FAT dates (a file saved at 15:00 local must
+        // DISPLAY 15:00 local, never 15:00 UTC).
+        let date = ((2026 - 1980) << 0x9) | (10 << 0x5) | 0x11;
+        let utc = fat_datetime_at(date, 0, 0);
+        let minus7 = fat_datetime_at(date, 0, -7 * 3600);
+        assert_eq!(minus7 - utc, 7 * 3600 * 1000);
     }
 
     #[test]

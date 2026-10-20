@@ -32,3 +32,21 @@ pub mod license_plat;
 pub mod repair;
 pub mod smart;
 pub mod volume;
+
+/// Raise the CALLING thread's scheduling priority to
+/// `THREAD_PRIORITY_HIGHEST` — the compute-worker posture the og app
+/// gives its scan/classify/check threads (uniform
+/// `QThread::TimeCriticalPriority`, research:
+/// `DRWUI-exe--thread-architecture.md`). HIGHEST, not
+/// TIME_CRITICAL: the WebView render thread must keep painting while
+/// the scan burns cores. Returns success (false = best-effort skip —
+/// priority is an optimization, never a gate).
+pub fn raise_thread_priority_highest() -> bool {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
+    // SAFETY: GetCurrentThread returns a pseudo-handle valid only on
+    // this thread (exactly where we call); SetThreadPriority takes it
+    // by value with no ownership transfer.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) }.is_ok()
+}

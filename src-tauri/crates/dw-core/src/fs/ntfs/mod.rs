@@ -31,7 +31,7 @@ pub mod lznt1;
 
 use std::sync::Arc;
 
-use crate::blockdev::{BlockDevice, BlockRead};
+use crate::blockdev::{AlignedBuf, BlockDevice, BlockRead};
 use crate::error::{CoreError, CoreResult};
 use crate::fs::{ScanControl, ScanEngine, ScanSink, ScanStats};
 use crate::types::{Extent, FileAttrs, FoundEntry, FsKind, NodeOrigin, Timestamps};
@@ -160,56 +160,66 @@ impl RawRecord {
     ) -> CoreResult<Self> {
         let mut data = vec![0u8; size as usize];
         dev.read_bytes(offset, &mut data)?;
-        if data.len() < 48 || data[..4] != FILE_MAGIC {
+        if !apply_fixup(&mut data, u64::from(sector_size)) {
             return Err(CoreError::Corrupt {
                 structure: "MFT record",
-                detail: format!("bad magic at {offset:#x}"),
+                detail: format!("bad magic or fixup at {offset:#x}"),
             });
-        }
-        // Fixup: USA offset at +4, count at +6 (count includes the
-        // USN itself; entries swap into each sector's last 2 bytes).
-        let usa_off = u16::from_le_bytes([data[4], data[5]]) as usize;
-        let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
-        let ss = sector_size as usize;
-        // 4Kn volumes: MFT records stay 1 KiB (the BPB's record size
-        // is cluster-count-based), i.e. SMALLER than one sector —
-        // such records carry no in-record fixups (USA count 1, the
-        // USN alone). Only sector-multiple records go through the
-        // fixup exchange.
-        let fixup_applicable = data.len().is_multiple_of(ss);
-        if usa_count == 0
-            || usa_off + usa_count * 2 > data.len()
-            || (fixup_applicable && usa_count > 1 && usa_off + usa_count * 2 > ss)
-        {
-            return Err(CoreError::Corrupt {
-                structure: "MFT fixup",
-                detail: format!("bad USA off={usa_off} count={usa_count}"),
-            });
-        }
-        if !fixup_applicable {
-            // Sub-sector record (4Kn media): no fixups to apply.
-            return Ok(Self { data });
-        }
-        let usn = [data[usa_off], data[usa_off + 1]];
-        for i in 1..usa_count {
-            let sector_idx = i - 1;
-            let tail = sector_idx * ss + ss - 2;
-            if tail + 2 > data.len() {
-                break;
-            }
-            let current = [data[tail], data[tail + 1]];
-            if current != usn {
-                // USN mismatch: the record spans a torn write — the
-                // affected sector is suspect but the rest may parse.
-                // (Deep-dive artifact: ≥0x400 clamp semantics.)
-                continue;
-            }
-            let fix = [data[usa_off + i * 2], data[usa_off + i * 2 + 1]];
-            data[tail] = fix[0];
-            data[tail + 1] = fix[1];
         }
         Ok(Self { data })
     }
+}
+
+/// Validate + fixup one MFT record IN PLACE: the "FILE" magic check,
+/// then the USA (update sequence) exchange — each sector's last two
+/// bytes swap against the fixup array so multi-sector records read
+/// coherently. 4Kn volumes: records smaller than one sector carry no
+/// in-record fixups (USA count 1 = the USN alone). `false` = the
+/// record fails validation (caller skips it).
+fn apply_fixup(data: &mut [u8], ss: u64) -> bool {
+    if data.len() < 48 || data[..4] != FILE_MAGIC {
+        return false;
+    }
+    // Fixup: USA offset at +4, count at +6 (count includes the
+    // USN itself; entries swap into each sector's last 2 bytes).
+    let usa_off = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let ss = ss as usize;
+    // 4Kn volumes: MFT records stay 1 KiB (the BPB's record size
+    // is cluster-count-based), i.e. SMALLER than one sector —
+    // such records carry no in-record fixups (USA count 1, the
+    // USN alone). Only sector-multiple records go through the
+    // fixup exchange.
+    let fixup_applicable = data.len().is_multiple_of(ss);
+    if usa_count == 0
+        || usa_off + usa_count * 2 > data.len()
+        || (fixup_applicable && usa_count > 1 && usa_off + usa_count * 2 > ss)
+    {
+        return false;
+    }
+    if !fixup_applicable {
+        // Sub-sector record (4Kn media): no fixups to apply.
+        return true;
+    }
+    let usn = [data[usa_off], data[usa_off + 1]];
+    for i in 1..usa_count {
+        let sector_idx = i - 1;
+        let tail = sector_idx * ss + ss - 2;
+        if tail + 2 > data.len() {
+            break;
+        }
+        let current = [data[tail], data[tail + 1]];
+        if current != usn {
+            // USN mismatch: the record spans a torn write — the
+            // affected sector is suspect but the rest may parse.
+            // (Deep-dive artifact: ≥0x400 clamp semantics.)
+            continue;
+        }
+        let fix = [data[usa_off + i * 2], data[usa_off + i * 2 + 1]];
+        data[tail] = fix[0];
+        data[tail + 1] = fix[1];
+    }
+    true
 }
 
 /// Read a resident stream's inline content from its MFT record —
@@ -612,272 +622,400 @@ impl NtfsEngine {
     /// Walk the MFT, emitting one [`FoundEntry`] per record (files,
     /// dirs, named streams). The tree builder links via
     /// `parent_hint`-encoded record refs (see [`FoundEntry`]).
+    ///
+    /// The session-9 I/O model (the og engine's shape — research:
+    /// `ntfs-engine-internals.md` "the MFT walk streams cluster-
+    /// strided aligned blocks through one 64 KiB buffer"): records
+    /// stream through the MFT extents in 4 MiB aligned chunks — ONE
+    /// positioned bulk read each (the cache layer's ≥256 KiB bypass),
+    /// never per-record 1 KiB hop-throughs — and each chunk's records
+    /// PARSE on a scoped worker pool before in-order emission
+    /// (parallel parse, sequential semantics: the sink contract and
+    /// record numbering are exactly the sequential walk's). Media
+    /// damage inside a chunk zero-fills through the sparse read; the
+    /// damaged records fail the magic check and skip individually.
     #[allow(clippy::too_many_lines)] // One record-walk state machine; splitting would hurt locality.
     fn walk(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
         let total = self.record_count();
-        let rs = self.boot.mft_record_size;
-        let ss = self.boot.bytes_per_sector;
+        let rs = u64::from(self.boot.mft_record_size).max(1);
+        let ss = u64::from(self.boot.bytes_per_sector).max(1);
         let cluster = self.boot.cluster_size();
-        let max_clusters = self.boot.total_sectors / u64::from(self.boot.sectors_per_cluster);
-        // Attribute-name table: record → preferred name (two-pass is
-        // overkill; single pass resolves most parents because names
-        // are stored IN the child's $FILE_NAME, not the parent's).
-        let mut batch_check = 0u64;
-        // Lazily-loaded volume $Bitmap for the QA-4 deleted-viability
-        // walk (outer Option = "computed", inner = "loaded OK").
-        let mut bitmap_cache: Option<Option<Vec<u8>>> = None;
-        for record_no in 0..total {
-            batch_check += 1;
-            if batch_check >= 512 {
-                batch_check = 0;
+        let max_clusters =
+            (self.boot.total_sectors / u64::from(self.boot.sectors_per_cluster.max(1))).max(1);
+        // The QA-4 viability bitmap — loaded ONCE up front (the og
+        // `CNTFSBuildVolumeBitmap` model; per-record lazy loading raced
+        // the worker pool by needing `&mut self` mid-parse).
+        let bitmap = self.load_volume_bitmap();
+        // Records per streaming chunk: 4 MiB worth, rounded so every
+        // chunk START stays sector-aligned even when records are
+        // sub-sector (4 KiB sectors + 1 KiB records — lcm = 4 KiB).
+        let recs_align = ss.div_ceil(rs).max(1);
+        let recs_per_chunk = ((MFT_STREAM_TARGET / rs) / recs_align * recs_align).max(recs_align);
+        // Scoped parse workers (the og's priority-7 worker family):
+        // cap at 8 — parse is memory-bound, more just thrashes.
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .clamp(1, 8);
+        let mut record_no: u64 = 0;
+        'all: for ext in self.mft_extents.clone() {
+            let recs_here = ext.len / rs;
+            let mut done = 0u64;
+            while done < recs_here {
                 ctrl.checkpoint()?;
-                sink.on_progress(record_no, total);
-            }
-            if (4..=4).contains(&record_no) {
-                continue; // $AttrDef — pure metadata
-            }
-            let Some(offset) = self.record_offset(record_no) else {
-                break;
-            };
-            let Ok(rec) = RawRecord::read(&*self.dev, offset, rs, ss) else {
-                continue; // damage or empty slot — skip
-            };
-            let flags = u16::from_le_bytes([rec.data[0x16], rec.data[0x17]]);
-            let in_use = flags & 0x0001 != 0;
-            let is_dir = flags & 0x0002 != 0;
-            let base_ref = u64::from_le_bytes({
-                let mut b = [0u8; 8];
-                b.copy_from_slice(&rec.data[0x20..0x28]);
-                b
-            });
-            if base_ref != 0 {
-                // Extension record (ATTRIBUTE_LIST child): its
-                // attributes merge into the base record's entry —
-                // handled when the base references them via the list.
-                // Emitting it standalone would duplicate.
-                continue;
-            }
-            let mut names: Vec<(u64, String)> = Vec::new(); // (parent, name)
-            let mut times = Timestamps::default();
-            let mut dos_attrs = 0u32;
-            let mut data_streams: Vec<(Option<String>, u64, Vec<Extent>, bool)> = Vec::new();
-            for attr in iter_attrs(&rec.data) {
-                match attr.kind {
-                    ATTR_STANDARD_INFORMATION => {
-                        if let Some(r) = attr.resident
-                            && r.len() >= 0x30
-                        {
-                            let t = |off: usize| {
-                                i64::from_le_bytes({
-                                    let mut b = [0u8; 8];
-                                    b.copy_from_slice(&r[off..off + 8]);
-                                    b
-                                })
-                            };
-                            times.created = Some(ntfs_time(t(0x00)));
-                            times.changed = Some(ntfs_time(t(0x08)));
-                            times.modified = Some(ntfs_time(t(0x10)));
-                            times.accessed = Some(ntfs_time(t(0x18)));
-                            dos_attrs = u32::from_le_bytes([r[0x20], r[0x21], r[0x22], r[0x23]]);
-                        }
-                    }
-                    ATTR_FILE_NAME => {
-                        if let Some(r) = attr.resident
-                            && r.len() >= 0x42
-                        {
-                            let parent = u64::from_le_bytes({
-                                let mut b = [0u8; 8];
-                                b.copy_from_slice(&r[0x00..0x08]);
-                                b
-                            });
-                            let ft = |off: usize| {
-                                i64::from_le_bytes({
-                                    let mut b = [0u8; 8];
-                                    b.copy_from_slice(&r[off..off + 8]);
-                                    b
-                                })
-                            };
-                            if times.modified.is_none() {
-                                times.modified = Some(ntfs_time(ft(0x08)));
-                                times.changed = Some(ntfs_time(ft(0x10)));
-                                times.accessed = Some(ntfs_time(ft(0x18)));
+                let take = recs_per_chunk.min(recs_here - done);
+                let off = ext.offset + done * rs;
+                let mut buf =
+                    AlignedBuf::zeroed((take * rs) as usize, self.dev.preferred_read_alignment());
+                // Damage-tolerant bulk read: bad sectors zero-fill;
+                // their records fail the magic check and skip.
+                let _ = self.dev.read_sectors_sparse(off / ss, &mut buf);
+                // PARSE in parallel, EMIT in order (dense record
+                // numbering across the chunk's spans).
+                let base_no = record_no;
+                let mut parsed: Vec<Option<ParsedRecord>> = Vec::with_capacity(take as usize);
+                {
+                    let per = ((take as usize) + workers - 1) / workers.max(1);
+                    let slice = &buf[..];
+                    std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(workers);
+                        for w in 0..workers {
+                            let start = w * per;
+                            if start >= take as usize {
+                                break;
                             }
-                            let name_len = r[0x40] as usize;
-                            let namespace = r[0x41];
-                            if name_len == 0 || 0x42 + name_len * 2 > r.len() {
-                                continue;
-                            }
-                            let (units, _) = r[0x42..0x42 + name_len * 2].as_chunks::<2>();
-                            let units: Vec<u16> =
-                                units.iter().map(|c| u16::from_le_bytes(*c)).collect();
-                            let name = String::from_utf16_lossy(&units);
-                            // Namespace 2 = Win32, 3 = Win32&DOS (best),
-                            // 0 = POSIX, 1 = DOS-only (8.3 mangled).
-                            if namespace == 1 && names.iter().any(|(p, _)| *p == parent) {
-                                continue;
-                            }
-                            names.push((parent, name));
-                            if times.deleted.is_none() && !in_use {
-                                // Deleted time unknown from SI; the
-                                // change time approximates.
-                                times.deleted = Some(ntfs_time(ft(0x10)));
-                            }
-                        }
-                    }
-                    ATTR_DATA => {
-                        let size = if let Some(r) = attr.resident {
-                            r.len() as u64
-                        } else {
-                            attr.real_size
-                        };
-                        let extents = attr
-                            .runlist
-                            .and_then(|rl| decode_runlist(rl, cluster, max_clusters.max(1)).ok())
-                            .unwrap_or_default();
-                        data_streams.push((attr.name.clone(), size, extents, attr.compression > 0));
-                    }
-                    _ => {}
-                }
-            }
-            // Skip pure-extension records with no name at all.
-            if names.is_empty() {
-                continue;
-            }
-            let origin = if in_use {
-                NodeOrigin::Existing
-            } else {
-                NodeOrigin::Deleted
-            };
-            // ── QA-4: deleted-viability $Bitmap scoring (research:
-            // ntfs-engine-algorithms-v2 §1) ──────────────────────
-            // A DELETED non-directory file ≥ 1 KiB whose unnamed
-            // $DATA clusters ALL read as allocated in the live
-            // $Bitmap has been fully re-used since deletion — the
-            // content is gone, destroy the candidate. Partially
-            // re-used files stay (the "possibly damaged but listed"
-            // UX) with confidence scaled by the intact fraction.
-            // Small files (< 0x3FF, usually resident) and system
-            // ($-prefixed) records skip the cluster walk entirely.
-            // A cluster outside the bitmap's coverage marks the
-            // candidate unverifiable → conservative KEEP.
-            let mut destroyed = false;
-            let mut partial_confidence: Option<u8> = None;
-            if origin == NodeOrigin::Deleted
-                && !is_dir
-                && names.iter().any(|(_, n)| !n.starts_with('$'))
-                && let Some((_, size, extents, _)) =
-                    data_streams.iter().find(|(sn, _, _, _)| sn.is_none())
-                && *size >= 0x3FF
-                && !extents.is_empty()
-            {
-                if bitmap_cache.is_none() {
-                    bitmap_cache = Some(self.load_volume_bitmap());
-                }
-                if let Some(bitmap) = bitmap_cache.as_ref().and_then(Option::as_deref) {
-                    let cs = cluster.max(1);
-                    let mut total = 0u64;
-                    let mut reused = 0u64;
-                    let mut unverifiable = false;
-                    'runs: for e in extents {
-                        let first = e.offset / cs;
-                        let count = e.len / cs;
-                        for c in first..first + count {
-                            if c / 8 >= bitmap.len() as u64 {
-                                unverifiable = true;
-                                break 'runs;
-                            }
-                            total += 1;
-                            if bitmap[(c / 8) as usize] & (1 << (c % 8)) != 0 {
-                                reused += 1;
-                            }
-                        }
-                    }
-                    if !unverifiable && total > 0 && reused == total {
-                        destroyed = true; // every cluster re-allocated
-                    } else if !unverifiable && reused > 0 {
-                        let intact = total - reused;
-                        partial_confidence =
-                            Some(u8::try_from(40 + (60 * intact) / total).unwrap_or(100));
-                    }
-                }
-            }
-            if destroyed {
-                continue; // fully re-used since deletion — no content left
-            }
-            for (parent, name) in names {
-                let display_name = name.clone();
-                let mut entry = FoundEntry::structured(display_name, is_dir, FsKind::Ntfs);
-                // $FILE_NAME parent refs are FULL file references —
-                // sequence in the high 16 bits, segment (record) in
-                // the low 48. The tree keys on the RECORD: mask (the
-                // VHD run proved it — every user file's ref carried a
-                // nonzero sequence and missed the map entirely).
-                entry.parent_hint = Some(format!("@mft:{}", parent & MFT_REF_MASK));
-                // Session 8: the record number is the tree's pass-2
-                // resolution key (dirs register record → node).
-                entry.record_id = Some(record_no);
-                entry.attrs = FileAttrs(dos_attrs);
-                entry.timestamps = times;
-                entry.origin = origin;
-                if is_dir {
-                    entry.size = 0;
-                    sink.on_entry(entry);
-                } else {
-                    for (stream_name, size, extents, compressed) in &data_streams {
-                        let mut e = FoundEntry {
-                            name: match stream_name {
-                                Some(sn) => format!("{name}:{sn}"),
-                                None => name.clone(),
-                            },
-                            parent_hint: Some(format!("@mft:{}", parent & MFT_REF_MASK)),
-                            record_id: Some(record_no),
-                            partition: None,
-                            is_dir: false,
-                            size: *size,
-                            attrs: FileAttrs(dos_attrs),
-                            timestamps: times,
-                            origin,
-                            extents: extents.clone(),
-                            confidence: {
-                                let base = if *compressed { 70 } else { 100 };
-                                match partial_confidence {
-                                    Some(pc) => pc.min(base),
-                                    None => base,
+                            let end = ((w + 1) * per).min(take as usize);
+                            handles.push(scope.spawn(move || {
+                                let mut out = Vec::with_capacity(end - start);
+                                for k in start..end {
+                                    let ro = base_no + k as u64;
+                                    let rec_off = off + k as u64 * rs;
+                                    let data = &slice[k * rs as usize..(k + 1) * rs as usize];
+                                    out.push(parse_record(
+                                        data,
+                                        ro,
+                                        rec_off,
+                                        ss,
+                                        cluster,
+                                        max_clusters,
+                                    ));
                                 }
-                            },
-                            category_hint: None,
-                            dimensions: None,
-                            content_key: None,
-                            source: FsKind::Ntfs,
-                        };
-                        // Resident streams carry inline content.
-                        if let Some(r) = iter_attrs(&rec.data)
-                            .into_iter()
-                            .find(|a| {
-                                a.kind == ATTR_DATA && a.name.as_deref() == stream_name.as_deref()
-                            })
-                            .and_then(|a| a.resident)
-                        {
-                            e.extents = vec![Extent::new(offset, 0)]; // resident-marker
-                            e.confidence = 100;
-                            let _ = r;
-                            // (Resident content is re-read at recovery
-                            // time from the record; the marker guides it.)
-                            e.size = r.len() as u64;
+                                out
+                            }));
                         }
-                        stats.entries += 1;
-                        stats.bytes += e.size;
-                        sink.on_entry(e);
-                    }
+                        for h in handles {
+                            parsed.extend(h.join().unwrap_or_default());
+                        }
+                    });
                 }
-                if !is_dir {
-                    break; // one name per file entry (first wins)
+                // Sequential emission — identical ordering + semantics
+                // to the record-number loop it replaces.
+                for p in parsed.into_iter().flatten() {
+                    if p.record_no == 4 {
+                        continue; // $AttrDef — pure metadata
+                    }
+                    ctrl.checkpoint()?;
+                    let origin = if p.in_use {
+                        NodeOrigin::Existing
+                    } else {
+                        NodeOrigin::Deleted
+                    };
+                    // ── QA-4: deleted-viability $Bitmap scoring ──
+                    // (research: ntfs-engine-algorithms-v2 §1): a
+                    // DELETED non-directory file ≥ 1 KiB whose unnamed
+                    // $DATA clusters ALL read as allocated in the live
+                    // $Bitmap has been fully re-used — destroy it.
+                    // Partial re-use keeps the candidate ("possibly
+                    // damaged but listed") with confidence scaled by
+                    // the intact fraction. Unverifiable → KEEP.
+                    let mut destroyed = false;
+                    let mut partial_confidence: Option<u8> = None;
+                    if origin == NodeOrigin::Deleted
+                        && !p.is_dir
+                        && p.names.iter().any(|(_, n)| !n.starts_with('$'))
+                        && let Some(stream) = p
+                            .data_streams
+                            .iter()
+                            .find(|s| s.name.is_none() && s.resident_len.is_none())
+                        && stream.size >= 0x3FF
+                        && !stream.extents.is_empty()
+                        && let Some(bm) = bitmap.as_deref()
+                    {
+                        let cs = cluster.max(1);
+                        let mut tot = 0u64;
+                        let mut reused = 0u64;
+                        let mut unverifiable = false;
+                        'runs: for e in &stream.extents {
+                            let first = e.offset / cs;
+                            let count = e.len / cs;
+                            for c in first..first + count {
+                                if c / 8 >= bm.len() as u64 {
+                                    unverifiable = true;
+                                    break 'runs;
+                                }
+                                tot += 1;
+                                if bm[(c / 8) as usize] & (1 << (c % 8)) != 0 {
+                                    reused += 1;
+                                }
+                            }
+                        }
+                        if !unverifiable && tot > 0 && reused == tot {
+                            destroyed = true; // every cluster re-allocated
+                        } else if !unverifiable && reused > 0 {
+                            let intact = tot - reused;
+                            partial_confidence =
+                                Some(u8::try_from(40 + (60 * intact) / tot).unwrap_or(100));
+                        }
+                    }
+                    if destroyed {
+                        continue; // fully re-used since deletion
+                    }
+                    emit_parsed(&p, origin, partial_confidence, sink, &mut stats);
+                }
+                record_no += take;
+                done += take;
+                sink.on_progress(record_no.min(total), total);
+                if record_no >= total {
+                    break 'all;
                 }
             }
         }
         sink.on_progress(total, total);
         Ok(stats)
+    }
+}
+
+/// Streaming chunk target: 4 MiB of MFT per bulk read (the og's
+/// cluster-strided block loader, scaled to modern media).
+const MFT_STREAM_TARGET: u64 = 4 * 1024 * 1024;
+
+/// One $DATA stream parsed off a record.
+struct ParsedStream {
+    name: Option<String>,
+    size: u64,
+    extents: Vec<Extent>,
+    compressed: bool,
+    /// Some(len) when the stream is RESIDENT (inline content in the
+    /// record — the recovery path re-reads it from `record_offset`).
+    resident_len: Option<u64>,
+}
+
+/// One MFT record's parse product — the pure pre-emission state.
+struct ParsedRecord {
+    record_no: u64,
+    /// Device byte offset of the record (resident-content reads).
+    offset: u64,
+    in_use: bool,
+    is_dir: bool,
+    names: Vec<(u64, String)>,
+    times: Timestamps,
+    dos_attrs: u32,
+    data_streams: Vec<ParsedStream>,
+}
+
+/// Parse + fixup one MFT record from an in-memory slice. `None` =
+/// skip (bad magic, damage, extension record, no names). Pure: the
+/// scoped parse workers call this concurrently.
+#[allow(clippy::too_many_lines)] // One record-parse state machine; splitting would hurt locality.
+fn parse_record(
+    data: &[u8],
+    record_no: u64,
+    offset: u64,
+    ss: u64,
+    cluster: u64,
+    max_clusters: u64,
+) -> Option<ParsedRecord> {
+    if data.len() < 48 || data[..4] != FILE_MAGIC {
+        return None;
+    }
+    let mut data = data.to_vec();
+    if !apply_fixup(&mut data, ss) {
+        return None;
+    }
+    let flags = u16::from_le_bytes([data[0x16], data[0x17]]);
+    let in_use = flags & 0x0001 != 0;
+    let is_dir = flags & 0x0002 != 0;
+    let base_ref = u64::from_le_bytes({
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&data[0x20..0x28]);
+        b
+    });
+    if base_ref != 0 {
+        // Extension record (ATTRIBUTE_LIST child): attributes merge
+        // into the base record's entry — emitting it standalone
+        // would duplicate.
+        return None;
+    }
+    let mut names: Vec<(u64, String)> = Vec::new();
+    let mut times = Timestamps::default();
+    let mut dos_attrs = 0u32;
+    let mut data_streams: Vec<ParsedStream> = Vec::new();
+    for attr in iter_attrs(&data) {
+        match attr.kind {
+            ATTR_STANDARD_INFORMATION => {
+                if let Some(r) = attr.resident
+                    && r.len() >= 0x30
+                {
+                    let t = |off: usize| {
+                        i64::from_le_bytes({
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&r[off..off + 8]);
+                            b
+                        })
+                    };
+                    times.created = Some(ntfs_time_ms(t(0x00)));
+                    times.changed = Some(ntfs_time_ms(t(0x08)));
+                    times.modified = Some(ntfs_time_ms(t(0x10)));
+                    times.accessed = Some(ntfs_time_ms(t(0x18)));
+                    dos_attrs = u32::from_le_bytes([r[0x20], r[0x21], r[0x22], r[0x23]]);
+                }
+            }
+            ATTR_FILE_NAME => {
+                if let Some(r) = attr.resident
+                    && r.len() >= 0x42
+                {
+                    let parent = u64::from_le_bytes({
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(&r[0x00..0x08]);
+                        b
+                    });
+                    let ft = |off: usize| {
+                        i64::from_le_bytes({
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&r[off..off + 8]);
+                            b
+                        })
+                    };
+                    if times.modified.is_none() {
+                        times.modified = Some(ntfs_time_ms(ft(0x08)));
+                        times.changed = Some(ntfs_time_ms(ft(0x10)));
+                        times.accessed = Some(ntfs_time_ms(ft(0x18)));
+                    }
+                    let name_len = r[0x40] as usize;
+                    let namespace = r[0x41];
+                    if name_len == 0 || 0x42 + name_len * 2 > r.len() {
+                        continue;
+                    }
+                    let (units, _) = r[0x42..0x42 + name_len * 2].as_chunks::<2>();
+                    let units: Vec<u16> = units.iter().map(|c| u16::from_le_bytes(*c)).collect();
+                    let name = String::from_utf16_lossy(&units);
+                    // Namespace 2 = Win32, 3 = Win32&DOS (best),
+                    // 0 = POSIX, 1 = DOS-only (8.3 mangled).
+                    if namespace == 1 && names.iter().any(|(p, _)| *p == parent) {
+                        continue;
+                    }
+                    names.push((parent, name));
+                    if times.deleted.is_none() && !in_use {
+                        // Deleted time unknown from SI; the change
+                        // time approximates.
+                        times.deleted = Some(ntfs_time_ms(ft(0x10)));
+                    }
+                }
+            }
+            ATTR_DATA => {
+                let (size, resident_len) = if let Some(r) = attr.resident {
+                    (r.len() as u64, Some(r.len() as u64))
+                } else {
+                    (attr.real_size, None)
+                };
+                let extents = attr
+                    .runlist
+                    .and_then(|rl| decode_runlist(rl, cluster, max_clusters).ok())
+                    .unwrap_or_default();
+                data_streams.push(ParsedStream {
+                    name: attr.name.clone(),
+                    size,
+                    extents,
+                    compressed: attr.compression > 0,
+                    resident_len,
+                });
+            }
+            _ => {}
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(ParsedRecord {
+        record_no,
+        offset,
+        in_use,
+        is_dir,
+        names,
+        times,
+        dos_attrs,
+        data_streams,
+    })
+}
+
+/// Emit one parsed record through the sink — the sequential-emission
+/// half of the streaming walk (ordering + semantics preserved from
+/// the record-number loop it replaces).
+fn emit_parsed(
+    p: &ParsedRecord,
+    origin: NodeOrigin,
+    partial_confidence: Option<u8>,
+    sink: &mut dyn ScanSink,
+    stats: &mut ScanStats,
+) {
+    for (parent, name) in &p.names {
+        let mut entry = FoundEntry::structured(name.clone(), p.is_dir, FsKind::Ntfs);
+        // $FILE_NAME parent refs are FULL file references — sequence
+        // in the high 16 bits, segment (record) in the low 48. The
+        // tree keys on the RECORD (the VHD run proved it — every user
+        // file's ref carried a nonzero sequence and missed the map).
+        entry.parent_hint = Some(format!("@mft:{}", parent & MFT_REF_MASK));
+        entry.record_id = Some(p.record_no);
+        entry.attrs = FileAttrs(p.dos_attrs);
+        entry.timestamps = p.times;
+        entry.origin = origin;
+        if p.is_dir {
+            entry.size = 0;
+            sink.on_entry(entry);
+        } else {
+            for stream in &p.data_streams {
+                let mut e = FoundEntry {
+                    name: match &stream.name {
+                        Some(sn) => format!("{name}:{sn}"),
+                        None => name.clone(),
+                    },
+                    parent_hint: Some(format!("@mft:{}", parent & MFT_REF_MASK)),
+                    record_id: Some(p.record_no),
+                    partition: None,
+                    is_dir: false,
+                    size: stream.size,
+                    attrs: FileAttrs(p.dos_attrs),
+                    timestamps: p.times,
+                    origin,
+                    extents: stream.extents.clone(),
+                    confidence: {
+                        let base = if stream.compressed { 70 } else { 100 };
+                        match partial_confidence {
+                            Some(pc) => pc.min(base),
+                            None => base,
+                        }
+                    },
+                    category_hint: None,
+                    dimensions: None,
+                    content_key: None,
+                    source: FsKind::Ntfs,
+                };
+                // Resident streams carry inline content in the record.
+                if let Some(rlen) = stream.resident_len {
+                    e.extents = vec![Extent::new(p.offset, 0)]; // resident-marker
+                    e.confidence = 100;
+                    // (Resident content is re-read at recovery time
+                    // from the record; the marker guides it.)
+                    e.size = rlen;
+                }
+                stats.entries += 1;
+                stats.bytes += e.size;
+                sink.on_entry(e);
+            }
+        }
+        if !p.is_dir {
+            break; // one name per file entry (first wins)
+        }
     }
 }
 
@@ -891,11 +1029,14 @@ impl ScanEngine for NtfsEngine {
     }
 }
 
-/// NTFS timestamp (100-ns ticks since 1601-01-01) → unix seconds.
+/// NTFS timestamp (100-ns ticks since 1601-01-01) → unix
+/// MILLISECONDS — the wire carries the og's sub-second precision
+/// (the normalized FILETIME model, `ifileproperties-part1` §1/§2:
+/// three 100-ns qwords per record; ms is display-complete).
 #[must_use]
-pub fn ntfs_time(ticks: i64) -> i64 {
-    const EPOCH_DIFF: i64 = 11_644_473_600;
-    ticks.div_euclid(10_000_000) - EPOCH_DIFF
+pub fn ntfs_time_ms(ticks: i64) -> i64 {
+    const EPOCH_DIFF_MS: i64 = 11_644_473_600_000;
+    ticks.div_euclid(10_000) - EPOCH_DIFF_MS
 }
 
 #[cfg(test)]
@@ -992,8 +1133,11 @@ mod tests {
     #[test]
     fn ntfs_time_epoch_math() {
         // 1601-01-01 → unix 0 is 11644473600 seconds.
-        assert_eq!(ntfs_time(116_444_736_000_000_000), 0);
-        assert_eq!(ntfs_time(0), -11_644_473_600);
+        assert_eq!(ntfs_time_ms(116_444_736_000_000_000), 0);
+        assert_eq!(ntfs_time_ms(0), -11_644_473_600_000);
+        // Sub-second precision survives the wire (the og's FILETIME
+        // fidelity): 1.5 s past epoch stays 1500 ms, not 1 s.
+        assert_eq!(ntfs_time_ms(116_444_736_000_000_000 + 15_000_000), 1_500);
     }
 
     /// Build a minimal valid MFT record with a $FILE_NAME +

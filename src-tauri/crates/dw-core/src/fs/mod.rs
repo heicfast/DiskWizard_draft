@@ -106,14 +106,22 @@ pub trait ScanEngine: Send {
     /// untrusted input.
     fn quick_scan(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats>;
 
-    /// The sector-by-sector extension (unallocated regions, orphan
-    /// chains, deleted reanimation). Default: quick + RAW carving is
-    /// the deep phase for engines without a distinct deep pass.
+    /// The deep/complete pass. Default: NO-OP — the quick pass of
+    /// every same-filesystem engine already walks the full metadata
+    /// stream INCLUDING deleted records (the NTFS MFT walk visits
+    /// every record; the og's complete searcher adds only USN
+    /// cross-check + orphan sweeps, which the tree's pass-2 fixpoint
+    /// provides here). Re-running quick would re-read the entire MFT
+    /// for zero new entries — the session-9 "scan is very very slow"
+    /// defect. Engines with REAL deep work (ext/refs/hfs+ orphan
+    /// passes, lost-filesystem probes) override this.
     ///
     /// # Errors
     /// Same contract as [`ScanEngine::quick_scan`].
     fn deep_scan(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
-        self.quick_scan(sink, ctrl)
+        ctrl.checkpoint()?;
+        let _ = sink; // no re-emission: quick's entries stand
+        Ok(ScanStats::default())
     }
 }
 

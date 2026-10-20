@@ -152,9 +152,7 @@ pub fn start_recovery(
     }
     let nodes = s
         .scan
-        .tree_slot()
-        .lock()
-        .clone()
+        .snapshot_nodes()
         .ok_or("NO_SCAN_RESULTS. The scan has no results yet.")?;
     let ids = node_ids.unwrap_or_default();
     if ids.is_empty() {
@@ -344,9 +342,7 @@ pub fn preview_file(
     }
     let nodes = s
         .scan
-        .tree_slot()
-        .lock()
-        .clone()
+        .snapshot_nodes()
         .ok_or("NO_SCAN_RESULTS. Nothing to preview.")?;
     let Some(node) = nodes.iter().find(|n: &&TreeNode| n.id == node_id) else {
         return Err("UNKNOWN_NODE. That file is no longer in the results.".into());

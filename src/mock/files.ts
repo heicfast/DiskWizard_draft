@@ -175,8 +175,11 @@ function sizeFor(category: FileCategory, rng: () => number): number {
 
 /** Deterministic date within the last ~3 years, weighted recent. */
 function dateFor(rng: () => number): number {
+  // Unix MILLISECONDS (the session-9 wire contract) with sub-second
+  // spread — the mock must exercise the precision the real core now
+  // sends (NTFS 100ns → ms, exFAT 10ms ticks).
   const daysBack = Math.floor(Math.pow(rng(), 1.8) * 1_090); // ~3y, recent-heavy
-  return Math.floor(Date.now() / 1000) - daysBack * 86400 - Math.floor(rng() * 86400);
+  return Date.now() - daysBack * 86_400_000 - Math.floor(rng() * 86_400_000);
 }
 
 function gradeFor(rng: () => number, origin: FileNode["origin"]): Recoverability {
@@ -321,7 +324,7 @@ export function generateResults(
   // files under them. IDs: dir nodes first (compact), then files.
   const dirIndex = new Map<string, number>();
   const nodes: FileNode[] = [];
-  const now = Math.floor(Date.now() / 1000);
+  const now = Date.now(); // ms — matches the modified wire contract
 
   const dirNode = (path: string): number => {
     const existing = dirIndex.get(path);
@@ -364,7 +367,10 @@ export function generateResults(
       path: `${r.folder}\\${r.name}.${r.ext}`,
       width: r.dims?.[0],
       height: r.dims?.[1],
-      deletedAgo: r.origin === "deleted" ? Math.max(0, Math.round((now - r.modified) / 86400)) : undefined,
+      deletedAgo:
+        r.origin === "deleted"
+          ? Math.max(0, Math.round((now - r.modified) / 86_400_000))
+          : undefined,
       ext: r.ext,
     });
   }

@@ -159,7 +159,7 @@ export interface FileNode {
   category: FileCategory;
   /** Bytes (files) or aggregate (dirs). */
   size: number;
-  modified: number; // unix seconds
+  modified: number; // unix milliseconds (session 9 precision contract)
   origin: NodeOrigin;
   recoverability: Recoverability;
   /** Full display path (F:\Photos\Vacation Photo.jpg). */

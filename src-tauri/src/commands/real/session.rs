@@ -37,7 +37,7 @@ pub fn resume_session(s: State<'_, AppState>, session_id: String) -> Result<Valu
         let next = st.generation() + 1;
         st.set_generation(next);
         st.set_target(loaded.device.name.as_str(), loaded.device.name.as_str());
-        *st.tree_slot().lock() = Some(std::sync::Arc::new(loaded.nodes.clone()));
+        st.adopt_loaded(std::sync::Arc::new(loaded.nodes.clone()));
         *st.report_slot().lock() = Some(dw_core::scan::ScanReport {
             files_found: loaded.header.files_found,
             bytes_found: loaded.header.bytes_found,

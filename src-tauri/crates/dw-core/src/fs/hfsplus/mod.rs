@@ -608,9 +608,11 @@ impl ScanEngine for HfsPlusEngine {
                 }
                 entry.size = r.data_fork.logical_size;
                 entry.extents = self.fork_extents(r.file_id, &r.data_fork, FORK_DATA);
+                // 1904-epoch u32 seconds → unix MILLISECONDS (the
+                // ms wire; HFS+ carries no sub-second fields).
                 entry.timestamps = Timestamps {
-                    created: Some(r.create),
-                    modified: Some(r.modify),
+                    created: Some(r.create * 1000),
+                    modified: Some(r.modify * 1000),
                     accessed: None,
                     changed: None,
                     deleted: None,

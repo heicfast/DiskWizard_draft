@@ -89,25 +89,101 @@ fn attr_name(id: u8) -> String {
     )
 }
 
-/// Build the report for a physical disk (probes transport by device).
+/// Build the report for a physical disk (transport gated by the
+/// device's bus type — session 9's fix for "SMART shows for the
+/// first disk only": disk 0 is NVMe (the storage-query path was
+/// correct), every SATA/USB disk died in the ATA path).
 ///
 /// # Errors
 /// String error when no transport yields data.
 pub fn report_for_disk(index: u32) -> Result<SmartReport, String> {
     let dev = RawHandleDevice::open_physical(index).map_err(|e| e.to_string())?;
     let (model, serial, bus) = crate::devices::disk_identity(index);
-    // NVMe first (protocol-specific query), then ATA PASS-THROUGH.
-    if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
-        finalize_verdict(&mut rep);
-        return Ok(rep);
-    }
-    if let Some(mut rep) = ata_smart(&dev, index, &model, &serial) {
-        finalize_verdict(&mut rep);
-        return Ok(rep);
+    // Bus gating: NVMe transports only answer for NVMe buses (the
+    // old try-both probed NVMe on SATA and kept an adapter-property
+    // fallback that can return ANOTHER controller's data).
+    if bus == "NVMe" {
+        if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+    } else {
+        // ATA PASS-THROUGH with a dedicated READ|WRITE handle (the
+        // smartmontools/CrystalDiskInfo posture — many storport
+        // stacks reject pass-through on read-only handles). The
+        // RAII wrapper closes it exactly once.
+        if let Some(handle) = open_pass_through_handle(index) {
+            let handle = RawPassThroughHandle(Some(handle));
+            if let Some(mut rep) = ata_smart(
+                handle.0.as_ref().expect("just wrapped"),
+                index,
+                &model,
+                &serial,
+            ) {
+                finalize_verdict(&mut rep);
+                return Ok(rep);
+            }
+        }
+        // Last resort on mis-reported buses: try both transports.
+        if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+        if let Some(handle) = open_pass_through_handle(index) {
+            let handle = RawPassThroughHandle(Some(handle));
+            if let Some(mut rep) = ata_smart(
+                handle.0.as_ref().expect("just wrapped"),
+                index,
+                &model,
+                &serial,
+            ) {
+                finalize_verdict(&mut rep);
+                return Ok(rep);
+            }
+        }
     }
     Err(format!(
         "no SMART transport for PhysicalDrive{index} ({bus})"
     ))
+}
+
+/// Open `\\.\PhysicalDriveN` with GENERIC_READ | GENERIC_WRITE for
+/// ATA PASS-THROUGH (IOCTL_ATA_PASS_THROUGH_EX classically requires
+/// read-write access — the read-only scan handle gets
+/// ERROR_ACCESS_DENIED on many storport/USB stacks). Synchronous
+/// (no FILE_FLAG_OVERLAPPED — DeviceIoControl blocks to completion).
+fn open_pass_through_handle(index: u32) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}\0")
+        .encode_utf16()
+        .collect();
+    // SAFETY: path is NUL-terminated; the returned handle is stored
+    // and closed by the owner (RawPassThroughHandle below).
+    let handle = unsafe {
+        CreateFileW(
+            windows::core::PCWSTR(path.as_ptr()),
+            0xC000_0000, // GENERIC_READ | GENERIC_WRITE (pass-through needs RW)
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES::default(),
+            None,
+        )
+    };
+    handle.ok()
+}
+
+/// Owned close for the pass-through handle.
+struct RawPassThroughHandle(Option<windows::Win32::Foundation::HANDLE>);
+impl Drop for RawPassThroughHandle {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            // SAFETY: h came from CreateFileW, closed exactly once.
+            unsafe { windows::Win32::Foundation::CloseHandle(h) };
+        }
+    }
 }
 
 /// The distilled ATA SMART READ DATA sector.
@@ -186,16 +262,26 @@ fn parse_ata_smart_sector(data: &[u8]) -> AtaSummary {
     s
 }
 
-/// ATA SMART READ DATA via `IOCTL_ATA_PASS_THROUGH` (SAT).
-fn ata_smart(dev: &RawHandleDevice, index: u32, model: &str, serial: &str) -> Option<SmartReport> {
+/// ATA SMART READ DATA via `IOCTL_ATA_PASS_THROUGH_EX` (SAT — the
+/// smartmontools transport). Session 9's fix: the struct was always
+/// EX-shaped but the IOCTL was the legacy `IOCTL_ATA_PASS_THROUGH`
+/// (task-file-first decode — the command byte landed at the wrong
+/// offset and every SATA/USB query failed) and `Length` was never
+/// set (the EX path validates it). The handle is the dedicated
+/// READ|WRITE pass-through open, not the scan device's read-only one.
+fn ata_smart(
+    handle: &windows::Win32::Foundation::HANDLE,
+    index: u32,
+    model: &str,
+    serial: &str,
+) -> Option<SmartReport> {
     use windows::Win32::Storage::IscsiDisc::{
-        ATA_FLAGS_DATA_IN, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH,
+        ATA_FLAGS_DATA_IN, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH_EX,
     };
-    let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
     // The 512-byte SMART data sector follows the struct in the buffer.
     let struct_size = std::mem::size_of::<ATA_PASS_THROUGH_EX>();
     let mut buf = vec![0u8; struct_size + 512];
-    let ata = ATA_PASS_THROUGH_EX {
+    let mut ata = ATA_PASS_THROUGH_EX {
         // The flag constant is 2 (fits u16 by construction; a wider
         // value would be an upstream breaking change we want to hear
         // about, hence the explicit saturate-to-0).
@@ -216,13 +302,16 @@ fn ata_smart(dev: &RawHandleDevice, index: u32, model: &str, serial: &str) -> Op
         ],
         ..Default::default()
     };
+    // The EX contract: Length = sizeof(ATA_PASS_THROUGH_EX) — the
+    // driver's first validation (a zero Length is an immediate fail).
+    ata.Length = u16::try_from(struct_size).unwrap_or_default();
     buf[..struct_size].copy_from_slice(unsafe {
         std::slice::from_raw_parts((&raw const ata).cast::<u8>(), struct_size)
     });
     let ok = unsafe {
         windows::Win32::System::IO::DeviceIoControl(
-            handle,
-            IOCTL_ATA_PASS_THROUGH,
+            *handle,
+            IOCTL_ATA_PASS_THROUGH_EX,
             Some(buf.as_mut_ptr() as _),
             win_len(buf.len()),
             Some(buf.as_mut_ptr().cast()),
@@ -271,18 +360,14 @@ fn ata_smart(dev: &RawHandleDevice, index: u32, model: &str, serial: &str) -> Op
 /// after it. `ProtocolDataOffset` counts from the START of the
 /// protocol-specific structure.
 ///
-/// Session 8: the query tries the DEVICE property first
-/// (`StorageDeviceProtocolSpecificProperty` — the documented pattern
-/// for a `\\.\PhysicalDriveN` handle; the adapter variant queries
-/// the HBA and fails or returns junk on many stacks — the owner's
-/// "SMART shows for the first disk only" symptom), with the adapter
-/// property kept as a fallback for older stacks.
+/// Session 9: DEVICE property only — the adapter-property fallback
+/// queried the HBA and could attribute ANOTHER controller's data to
+/// this disk (cross-disk contamination). An honest "unavailable"
+/// beats silently-wrong health data; the bus-type gate in
+/// [`report_for_disk`] keeps this path off SATA/USB disks entirely.
 fn nvme_query_health_log(dev: &RawHandleDevice) -> Option<Vec<u8>> {
-    use windows::Win32::System::Ioctl::{
-        StorageAdapterProtocolSpecificProperty, StorageDeviceProtocolSpecificProperty,
-    };
+    use windows::Win32::System::Ioctl::StorageDeviceProtocolSpecificProperty;
     nvme_query_health_log_with(dev, StorageDeviceProtocolSpecificProperty)
-        .or_else(|| nvme_query_health_log_with(dev, StorageAdapterProtocolSpecificProperty))
 }
 
 fn nvme_query_health_log_with(

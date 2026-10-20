@@ -18,13 +18,21 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{AlignedBuf, BlockDevice, check_buf};
+use super::{AlignedBuf, BatchRead, BlockDevice, check_buf};
 use crate::error::{CoreError, CoreResult};
 
 /// Sectors per cache chunk (32 KiB at 512-byte sectors).
 const CHUNK_SECTORS: u64 = 64;
 /// Default resident chunks (8 MiB at 512-byte sectors).
 const DEFAULT_CHUNKS: usize = 256;
+/// Bulk-read bypass threshold (§5.1 item 6 — "separate metadata I/O
+/// from deep-scan I/O"): requests at least this large skip the
+/// chunk machinery entirely and go straight to the parent device as
+/// one positioned read. Carve validators, MFT stream chunks and
+/// recovery bulk reads stop paying the per-32-KiB mutex/LRU tax;
+/// small metadata reads (boot sectors, dir entries, inode tables)
+/// keep the read-ahead cache.
+const BYPASS_BYTES: usize = 256 * 1024;
 
 struct Chunk {
     data: AlignedBuf,
@@ -185,6 +193,14 @@ impl BlockDevice for CachedDevice {
         if let Some(e) = check_buf(buf, self.sector_size) {
             return Err(e);
         }
+        // Bulk reads bypass the chunk cache (§5.1 item 6): one
+        // positioned parent read instead of N chunk fetches — the
+        // "NEVER a 32 KiB read loop for bulk I/O" rule, applied at
+        // the cache layer so every engine benefits without knowing
+        // the layering exists.
+        if buf.len() >= BYPASS_BYTES {
+            return self.parent.read_sectors(start_lba, buf);
+        }
         let cs = Self::chunk_sectors();
         let n_sectors = (buf.len() / self.sector_size as usize) as u64;
         let mut done_sectors = 0u64;
@@ -225,6 +241,24 @@ impl BlockDevice for CachedDevice {
             return Err(e);
         }
         self.parent.read_sectors_sparse(start_lba, buf)
+    }
+
+    /// The pipelined batch rides the SAME bypass: delegate to the
+    /// parent's batch implementation so the platform IOCP pipeline
+    /// (§5.1 item 3) actually engages for the carve sweep. The
+    /// previous silence here meant the trait's sequential default
+    /// ran — queue depth 1 on every media class, the owner's
+    /// "very very slow" carve.
+    fn read_sectors_sparse_batch(
+        &self,
+        batch: &mut [BatchRead<'_>],
+    ) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+        for r in &mut *batch {
+            if let Some(e) = check_buf(r.buf, self.sector_size) {
+                return Err(e);
+            }
+        }
+        self.parent.read_sectors_sparse_batch(batch)
     }
 
     fn preferred_read_alignment(&self) -> u32 {
@@ -308,5 +342,118 @@ mod tests {
         let ram = pattern_ram();
         let cached = CachedDevice::new(Arc::clone(&ram) as Arc<dyn BlockDevice>);
         assert_eq!(cached.read_profile(), ram.read_profile());
+    }
+
+    /// A counting wrapper — proves the bypass + batch passthrough
+    /// paths by observing parent traffic the cache lets through.
+    struct CountingDevice {
+        inner: Arc<RamDevice>,
+        reads: std::sync::atomic::AtomicUsize,
+        batch_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BlockDevice for CountingDevice {
+        fn sector_size(&self) -> u32 {
+            self.inner.sector_size()
+        }
+        fn total_sectors(&self) -> u64 {
+            self.inner.total_sectors()
+        }
+        fn read_sectors(&self, start_lba: u64, buf: &mut [u8]) -> CoreResult<()> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.read_sectors(start_lba, buf)
+        }
+        fn read_sectors_sparse(
+            &self,
+            start_lba: u64,
+            buf: &mut [u8],
+        ) -> CoreResult<Vec<(u64, u64)>> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.read_sectors_sparse(start_lba, buf)
+        }
+        fn read_sectors_sparse_batch(
+            &self,
+            batch: &mut [BatchRead<'_>],
+        ) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+            self.batch_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Route through the sequential default shape so the Ram
+            // semantics stay identical while the counter proves the
+            // CALL arrived at the parent's batch entry point.
+            let mut out = Vec::with_capacity(batch.len());
+            for r in batch {
+                out.push(self.read_sectors_sparse(r.start_lba, r.buf)?);
+            }
+            Ok(out)
+        }
+    }
+
+    /// §5.1 item 6: a ≥256 KiB read is ONE parent read — not 8 chunk
+    /// fetches through the mutex/LRU path.
+    #[test]
+    fn bulk_reads_bypass_the_chunk_cache() {
+        let counting = Arc::new(CountingDevice {
+            inner: pattern_ram(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            batch_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let cached = CachedDevice::new(Arc::clone(&counting) as Arc<dyn BlockDevice>);
+        let mut buf = vec![0u8; 512 * 1024]; // 512 KiB > BYPASS_BYTES
+        cached.read_sectors(0, &mut buf).expect("bulk read");
+        assert_eq!(
+            counting.reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one bulk read = one parent read (no 32 KiB chunk loop)"
+        );
+        assert_eq!(cached.resident(), 0, "no chunks cached for a bulk read");
+        // Small reads still use the chunk path (read-ahead works).
+        let mut small = [0u8; 512];
+        cached.read_sectors(0, &mut small).expect("small read");
+        assert_eq!(
+            counting.reads.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "the small read goes through the chunk fetch"
+        );
+        assert_eq!(cached.resident(), 1);
+    }
+
+    /// The carve pipeline fix: `read_sectors_sparse_batch` on the
+    /// cached wrapper must reach the PARENT's batch implementation
+    /// (the IOCP pipeline on Windows) — the trait default here ran
+    /// windows strictly sequentially (QD 1) on every media class.
+    #[test]
+    fn sparse_batch_passthrough_reaches_the_parent_pipeline() {
+        let counting = Arc::new(CountingDevice {
+            inner: pattern_ram(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            batch_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let cached = CachedDevice::new(Arc::clone(&counting) as Arc<dyn BlockDevice>);
+        let mut a = vec![0u8; 512 * 4];
+        let mut b = vec![0u8; 512 * 4];
+        let mut batch = vec![
+            BatchRead {
+                start_lba: 10,
+                buf: &mut a,
+            },
+            BatchRead {
+                start_lba: 300,
+                buf: &mut b,
+            },
+        ];
+        let bad = cached.read_sectors_sparse_batch(&mut batch).expect("batch");
+        assert!(bad.iter().all(std::vec::Vec::is_empty));
+        assert_eq!(
+            counting
+                .batch_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the batch arrived at the parent's batch entry point"
+        );
+        // Byte truth through the passthrough.
+        assert_eq!(a[0], ((10 * 512) % 251) as u8);
+        assert_eq!(b[0], ((300 * 512) % 251) as u8);
     }
 }

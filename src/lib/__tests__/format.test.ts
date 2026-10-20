@@ -98,7 +98,7 @@ describe("formatRemaining", () => {
 
 describe("formatDateTime / formatDate", () => {
   it("renders the file-table format (2023-10-24 14:32)", () => {
-    expect(formatDateTime(new Date(2023, 9, 24, 14, 32).getTime() / 1000)).toBe(
+    expect(formatDateTime(new Date(2023, 9, 24, 14, 32).getTime())).toBe(
       "2023-10-24 14:32",
     );
   });

@@ -357,15 +357,29 @@ fn probe_disk_facts(index: u32) -> Option<DiskFacts> {
             .to_string()
     };
     let bus_type = desc.BusType.0;
+    // STORAGE_BUS_TYPE (ntddstor.h) — session 9's correction: the old
+    // table was shifted (SATA 0x0B read as "Virtual", SAS as "MMC"…)
+    // which broke the UI's SD-card classification AND the SMART
+    // transport gating that keys on these strings.
     let bus = match bus_type {
+        0x01 => "SCSI",
+        0x02 => "ATAPI",
+        0x03 => "ATA",
+        0x04 => "1394",
+        0x06 => "FibreChannel",
         0x07 => "USB",
-        0x0A => "MMC",
-        0x0B => "Virtual",
-        0x0C => "FileBackedVirtual",
-        0x03 => "ATAPI",
-        0x02 => "ATA",
-        0x0D => "SD",
-        0x0E => "MMC5",
+        0x08 => "RAID",
+        0x09 => "iSCSI",
+        0x0A => "SAS",
+        0x0B => "SATA",
+        0x0C => "SD",
+        0x0D => "MMC",
+        0x0E => "Virtual",
+        0x0F => "FileBackedVirtual",
+        0x10 => "StorageSpaces",
+        0x11 => "NVMe",
+        0x12 => "SCM",
+        0x13 => "UFS",
         _ => "Other",
     }
     .to_string();

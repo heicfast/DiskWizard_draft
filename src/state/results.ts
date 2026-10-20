@@ -21,7 +21,7 @@ export type TreeMode = "folders" | "types";
 export interface FilterCondition {
   /** Selected categories (empty = all). */
   categories: FileCategory[];
-  /** Date range (unix seconds; null = open). */
+  /** Date range (unix milliseconds; null = open). */
   dateFrom: number | null;
   dateTo: number | null;
   /** Size range bytes (null = open). */
@@ -97,7 +97,7 @@ interface ResultsState {
   recoverProgress: RecoverProgressState | null;
   recoverSummary: RecoverProgressState | null;
   /* Actions */
-  load: (generation: number) => Promise<void>;
+  load: (generation: number, forceFull?: boolean) => Promise<void>;
   setCategory: (c: FileCategory | "all") => void;
   setTreeMode: (m: TreeMode) => void;
   setSearch: (s: string) => void;
@@ -139,17 +139,21 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   recoverProgress: null,
   recoverSummary: null,
 
-  load: async (generation) => {
+  load: async (generation, forceFull = false) => {
     set({ loading: true });
     try {
       // The delta protocol (session 8): ask for everything appended
       // after what we already hold for THIS generation; the backend
       // echoes `since` — zero/undefined (the dev mock) means a full
       // snapshot, anything else is an append batch. Dense arena ids
-      // make appends stable, so accumulation is exact.
+      // make appends stable, so accumulation is exact. `forceFull`
+      // (the session-9 done-reload) asks for the complete tree: the
+      // backend's final adoption carries fresh dir sizes/paths the
+      // mid-scan deltas could not.
       const current = get().snapshot;
-      const since =
-        current && current.generation === generation ? current.nodes.length : 0;
+      const since = !forceFull && current && current.generation === generation
+        ? current.nodes.length
+        : 0;
       const snap = await invoke<ScanResultsSnapshot>("get_scan_results", {
         generation,
         since,

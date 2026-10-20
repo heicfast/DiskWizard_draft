@@ -232,7 +232,14 @@ impl RawCarver {
                     &mut scratch,
                     ctrl,
                 )?;
-                sink.on_progress(off + take as u64 - start_byte, end - start_byte);
+                // Progress in DEVICE SECTORS (session 9): the wire's
+                // sectorsRead/sectorsTotal stay unit-consistent — the
+                // old byte-flavored numbers made the live stats read
+                // past the total mid-carve.
+                sink.on_progress(
+                    (off + take as u64 - start_byte) / ss,
+                    (end - start_byte) / ss,
+                );
             }
             let (last_off, last_take) = *plan.last().expect("plan has a window");
             if last_off + last_take as u64 >= end {
@@ -241,7 +248,7 @@ impl RawCarver {
             let advance = (last_take - CARVE_OVERLAP.min(last_take / 2)).max(1);
             cursor = last_off + advance as u64;
         }
-        sink.on_progress(end - start_byte, end - start_byte);
+        sink.on_progress((end - start_byte) / ss, (end - start_byte) / ss);
         Ok(stats)
     }
 

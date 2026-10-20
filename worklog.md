@@ -737,3 +737,95 @@ runner, real VHD, real deletion):
 All eight workflows green on the same SHA: CI, Core E2E, Windows
 Integration, Real-Core Tour, UI Screenshots, MSIX, License E2E, Fuzz
 (the full hostile-media corpus over the carver overhaul).
+
+## Session 9 (2026-10-21) — the owner's symptom chain, root-caused and fixed (batch 1)
+
+Owner symptoms → root causes (all verified in code before fixing):
+
+1. "Scan very very slow; progress never above 1%; remaining time
+   keeps increasing" — FOUR stacked causes:
+   a) The IOCP pipeline was UNREACHABLE from the scan (CachedDevice
+      lacked read_sectors_sparse_batch; the trait default ran the
+      carve at queue depth 1 on every media). Fixed: the batch
+      override delegates to the parent (regression: the counting-
+      device test proves the batch reaches the parent entry point).
+   b) The MFT was walked per-record (1 KiB reads through 32 KiB
+      chunk-cache fetches: a mutex + LRU scan + Vec alloc + sync
+      event-waited ReadFile per 32 KiB). Fixed: the walk streams
+      4 MiB aligned chunks (the cache layer's new ≥256 KiB bulk
+      bypass — §5.1 item 6), parses records on a scoped worker pool
+      (≤8 threads, the og's priority-7 worker family), emits in
+      order. apply_fixup extracted pure; parse_record is the
+      parallel-safe core.
+   c) The MFT was walked TWICE (deep_scan defaulted to quick_scan).
+      Fixed: the default is a documented no-op (the og's complete
+      searcher adds USN/orphan work our quick pass + tree fixpoint
+      already cover); ext/refs/hfs+ keep their real deep passes.
+   d) ETA = elapsed×(100−p)/p — grows monotonically under sub-linear
+      progress. Fixed: EtaTracker (EWMA over ≥1 s measured
+      percent/sec samples, clamped [1 s, 24 h], stalls keep the last
+      measured rate). Unit-tested.
+   Plus: raw/unknown partition units no longer hold quick/deep
+   progress weight hostage (structured-only weighting — the
+   BitLocker/MSR "bar never moves" case), and the carver reports
+   SECTORS (the wire's sectorsRead/Total are unit-consistent again).
+
+2. "No files appear while scanning; only existing ones" — the
+   2048-node publish floor hid small/mid trees entirely (the tour
+   VHD's 155 files NEVER published mid-scan). Fixed: first publish
+   at 64 nodes, then 512/350 ms (the og's ~1000-item incremental
+   BuildTree cadence); the app session stores DELTAS (O(delta) per
+   publish — the old full-copy-per-publish was O(n²/2048) total)
+   with cumulative category counters (the old slice-local counters
+   clobbered the chips on every append).
+
+3. The tour's t99-tour-fail-results-snapshot-null (flaky on doc-only
+   commits — the 1.4 s poll loop tears down at scan-done between the
+   last null poll and the final publish): closed at BOTH ends — the
+   worker folds the complete tree into the session BEFORE scan-done
+   emits, and the frontend force-reloads (since=0) on done. The
+   mid-scan fold + poll views share the tree→appended→categories
+   lock order (atomic against duplication/loss).
+
+4. "SMART shows for the first disk only" — the ATA path was dead on
+   arrival: an ATA_PASS_THROUGH_EX struct issued through the LEGACY
+   IOCTL_ATA_PASS_THROUGH (wrong decode), Length never set (the EX
+   path's first validation), a read-only handle (pass-through wants
+   READ|WRITE — the smartmontools posture). Disk 0 is NVMe (the
+   storage-query path was correct) — hence "first disk works".
+   Fixed: IOCTL_ATA_PASS_THROUGH_EX + Length + a dedicated RW
+   pass-through handle (RAII-closed) + bus-type gating (NVMe only
+   on NVMe buses) + the adapter-property fallback REMOVED (it could
+   cross-attribute another controller's data). The bus table itself
+   was off-spec (SATA 0x0B read as "Virtual", SAS as "MMC") —
+   corrected to the STORAGE_BUS_TYPE values (also fixes the UI's
+   SD-card classification).
+
+5. "Date/time precision" — NTFS truncated to whole seconds (100 ns
+   source); FAT wall-clock read as-if-UTC (every FAT timestamp
+   shifted by the user's UTC offset); exFAT fields read one slot
+   high ("accessed" consumed the 10ms/offset bytes; attributes read
+   from the create-timestamp offset). Fixed: the wire carries unix
+   MILLISECONDS end-to-end (NTFS ms, exFAT + its 10ms increments
+   with the spec §7.4 field map, ext ×1000, HFS+ ×1000), FAT
+   interprets through the host timezone (chrono, the Windows mount
+   behavior — displays the stored wall clock), .rsf schema v2.
+   Regression tests pin the round-trip properties.
+
+6. Recovery chances were confidence arithmetic only. Fixed: the
+   ORGANIZE phase runs the readability probe (the og
+   CCheckNodeThread model) — the first sector of up to 20 K deleted
+   files' extents; unreadable media grades Poor.
+
+7. Cancellation could lose the assembled tree (Err(Cancelled) at a
+   phase boundary dropped it — the CLI's --max-seconds path
+   reported "no results snapshot"). Fixed: run() wraps the phase
+   machine; every cancellation finishes stopped WITH results.
+
+8. The scan worker now raises itself to THREAD_PRIORITY_HIGHEST
+   (the og's priority-7 compute workers; HIGHEST not TIME_CRITICAL
+   so the WebView keeps painting).
+
+Gates: fmt clean; clippy -D warnings clean; 159 dw-core + 27
+dw-license tests; 74 web tests; tsc clean. The app crate compiles on
+CI (local box lacks GTK — documented).

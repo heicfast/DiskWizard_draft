@@ -716,12 +716,15 @@ impl ExtEngine {
             entry.size = if child.is_dir() { 0 } else { child.size };
             entry.extents = extents;
             entry.confidence = if deleted { 70 } else { 100 };
+            // Unix-seconds inode times → the millisecond wire
+            // (×1000; ext4's nanosecond fields are a future
+            // refinement — second precision rides as :000).
             entry.timestamps = Timestamps {
-                modified: nonzero(child.mtime),
-                accessed: nonzero(child.atime),
-                changed: nonzero(child.ctime),
-                created: nonzero(child.crtime),
-                deleted: nonzero(child.dtime),
+                modified: nonzero(child.mtime * 1000),
+                accessed: nonzero(child.atime * 1000),
+                changed: nonzero(child.ctime * 1000),
+                created: nonzero(child.crtime * 1000),
+                deleted: nonzero(child.dtime * 1000),
             };
             entry.attrs = FileAttrs(if child.is_dir() {
                 FileAttrs::DIRECTORY
@@ -814,11 +817,11 @@ impl ScanEngine for ExtEngine {
                 entry.extents = extents;
                 entry.confidence = if deleted { 65 } else { 70 };
                 entry.timestamps = Timestamps {
-                    modified: nonzero(inode.mtime),
-                    accessed: nonzero(inode.atime),
-                    changed: nonzero(inode.ctime),
-                    created: nonzero(inode.crtime),
-                    deleted: nonzero(inode.dtime),
+                    modified: nonzero(inode.mtime * 1000),
+                    accessed: nonzero(inode.atime * 1000),
+                    changed: nonzero(inode.ctime * 1000),
+                    created: nonzero(inode.crtime * 1000),
+                    deleted: nonzero(inode.dtime * 1000),
                 };
                 stats.entries += 1;
                 stats.bytes += entry.size;
@@ -1244,7 +1247,7 @@ pub mod tests {
             .expect("deleted file found by slack name");
         assert_eq!(f.origin, NodeOrigin::Deleted);
         assert_eq!(f.size, 1024);
-        assert_eq!(f.timestamps.deleted, Some(T as i64));
+        assert_eq!(f.timestamps.deleted, Some(T as i64 * 1000));
         let total: u64 = f.extents.iter().map(|e| e.len).sum();
         assert_eq!(total, 1024, "content extents intact");
     }

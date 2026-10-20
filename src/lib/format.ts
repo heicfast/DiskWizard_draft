@@ -58,10 +58,13 @@ export function formatRemaining(seconds: number): string {
   return `${String(m).padStart(2, "0")}m${String(s % 60).padStart(2, "0")}s`;
 }
 
-/** "2023-10-24 14:32" (file table rows — reference design format). */
-export function formatDateTime(unixSeconds: number): string {
-  if (!unixSeconds) return "—";
-  const d = new Date(unixSeconds * 1000);
+/** "2023-10-24 14:32" (file table rows — reference design format).
+ * Takes unix MILLISECONDS (session 9: the wire carries the og's
+ * sub-second FILETIME precision; licenses/sessions stay seconds on
+ * `formatDate`). */
+export function formatDateTime(unixMs: number): string {
+  if (!unixMs) return "—";
+  const d = new Date(unixMs);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }

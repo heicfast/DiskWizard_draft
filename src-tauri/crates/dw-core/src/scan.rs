@@ -120,6 +120,13 @@ pub struct ScanController {
     /// Session 8: progressive-publish throttle state.
     since_publish: u32,
     last_publish: Instant,
+    /// Session 9: has any mid-scan publish fired yet (first-publish
+    /// uses a lower threshold so small trees stream immediately).
+    ever_published: bool,
+    /// Session 9: the last unit-set's dominant filesystem — the
+    /// stopped-report's label when cancellation lands between the
+    /// units' lifetimes.
+    last_fs_kind: FsKind,
 }
 
 impl ScanController {
@@ -150,6 +157,8 @@ impl ScanController {
             capacity,
             since_publish: 0,
             last_publish: Instant::now(),
+            ever_published: false,
+            last_fs_kind: FsKind::Raw,
         }
     }
 
@@ -186,12 +195,39 @@ impl ScanController {
     /// that are already volumes (partition slices, volume handles,
     /// lost partitions) form a single unit.
     ///
+    /// Cancellation NEVER loses the assembled tree (session 9's
+    /// contract hardening — the CLI's `--max-seconds` watchdog and
+    /// the UI's stop button both keep partial results): every
+    /// `Err(Cancelled)` escape from a phase lands in the
+    /// stopped-report arm with everything emitted so far.
+    ///
     /// # Errors
-    /// [`CoreError::Cancelled`] propagates when stopped (the report
-    /// is still assembled first — stopped scans keep their results).
+    /// Non-cancellation engine/IO failures propagate (the caller
+    /// decides whether a carve-only retry makes sense).
+    #[allow(clippy::too_many_lines)] // The phase machine; phases share sink/weight state by design.
     pub fn run(&mut self, obs: &mut dyn ProgressObserver) -> CoreResult<(TreeBuilder, ScanReport)> {
         let mut tree = TreeBuilder::with_root(&self.root_name.clone());
+        match self.run_inner(obs, &mut tree) {
+            Ok(report) => Ok((tree, report)),
+            Err(CoreError::Cancelled) => {
+                // The stop token fired at a phase boundary: the tree
+                // (built incrementally through `&mut tree`) still
+                // carries every emitted entry — finish it honestly.
+                let fs_kind = self.last_fs_kind;
+                Ok(self.finish_stopped(tree, fs_kind, obs))
+            }
+            Err(e) => Err(e),
+        }
+    }
 
+    /// The phase machine (run's body — tree hoisted so cancellation
+    /// can finish it). Returns the final report.
+    #[allow(clippy::too_many_lines)] // The phase machine; phases share sink/weight state by design.
+    fn run_inner(
+        &mut self,
+        obs: &mut dyn ProgressObserver,
+        tree: &mut TreeBuilder,
+    ) -> CoreResult<ScanReport> {
         // ── PREPARE ────────────────────────────────────────────────
         self.phase = Phase::Preparing;
         obs.on_phase(self.phase);
@@ -203,15 +239,27 @@ impl ScanController {
         // can't be opened/probed degrades to a carve-only unit (the
         // sweep still covers its bytes).
         let units = self.scan_units();
-        let weight_total: u64 = units.iter().map(|u| u.sectors.max(1)).sum();
+        // Structured weight ONLY (session 9): raw/unknown units have
+        // no engine work in quick/deep — their bytes are covered by
+        // the carve sweep — so they must not hold progress weight
+        // hostage (the owner's "progress never goes above 1%" on a
+        // disk whose largest partition was BitLocker/MSR-class).
+        let structured_weight: u64 = units
+            .iter()
+            .filter(|u| !matches!(u.fs, FsKind::Raw | FsKind::Unknown))
+            .map(|u| u.sectors.max(1))
+            .sum();
 
         // ── QUICK ──────────────────────────────────────────────────
         self.phase = Phase::Quick;
         obs.on_phase(self.phase);
         let mut done_weight = 0u64;
         for unit in &units {
-            let lo = 0.38 * weight_frac(done_weight, weight_total);
-            let hi = 0.38 * weight_frac(done_weight + unit.sectors.max(1), weight_total);
+            if matches!(unit.fs, FsKind::Raw | FsKind::Unknown) {
+                continue; // carve-only unit: no quick work, no weight
+            }
+            let lo = 0.38 * weight_frac(done_weight, structured_weight);
+            let hi = 0.38 * weight_frac(done_weight + unit.sectors.max(1), structured_weight);
             done_weight += unit.sectors.max(1);
             let Ok(mut engine) = fs::create_engine(unit.fs, unit.dev.clone()) else {
                 continue;
@@ -219,7 +267,7 @@ impl ScanController {
             let ctrl = self.ctrl.clone();
             let mut sink = ControllerSink {
                 ctrl: self,
-                tree: &mut tree,
+                tree,
                 phase_percent_range: (lo, hi),
                 path_prefix: unit.prefix.as_deref(),
                 obs_slot: obs,
@@ -227,7 +275,8 @@ impl ScanController {
             match engine.quick_scan(&mut sink, &ctrl) {
                 Ok(_) => {}
                 Err(CoreError::Cancelled) => {
-                    return Ok(self.finish_stopped(tree, units_fs(&units), obs));
+                    self.last_fs_kind = units_fs(&units);
+                    return Err(CoreError::Cancelled);
                 }
                 Err(_) => { /* engine failed — carve still runs */ }
             }
@@ -244,8 +293,12 @@ impl ScanController {
         self.sectors_read = 0;
         let mut done_weight = 0u64;
         for unit in &units {
-            let lo = 0.38 + 0.17 * weight_frac(done_weight, weight_total);
-            let hi = 0.38 + 0.17 * weight_frac(done_weight + unit.sectors.max(1), weight_total);
+            if matches!(unit.fs, FsKind::Raw | FsKind::Unknown) {
+                continue; // carve-only unit: no deep work, no weight
+            }
+            let lo = 0.38 + 0.17 * weight_frac(done_weight, structured_weight);
+            let hi =
+                0.38 + 0.17 * weight_frac(done_weight + unit.sectors.max(1), structured_weight);
             done_weight += unit.sectors.max(1);
             // Deep structured pass (deleted reanimation) when the
             // engine supports it distinctly.
@@ -255,7 +308,7 @@ impl ScanController {
             let ctrl = self.ctrl.clone();
             let mut sink = ControllerSink {
                 ctrl: self,
-                tree: &mut tree,
+                tree,
                 phase_percent_range: (lo, hi),
                 path_prefix: unit.prefix.as_deref(),
                 obs_slot: obs,
@@ -271,7 +324,7 @@ impl ScanController {
             let ctrl = self.ctrl.clone();
             let mut sink = ControllerSink {
                 ctrl: self,
-                tree: &mut tree,
+                tree,
                 phase_percent_range: (0.55, 1.0),
                 path_prefix: None,
                 obs_slot: obs,
@@ -279,7 +332,8 @@ impl ScanController {
             match carver.carve(&mut sink, &ctrl, 0, capacity) {
                 Ok(_) => {}
                 Err(CoreError::Cancelled) => {
-                    return Ok(self.finish_stopped(tree, units_fs(&units), obs));
+                    self.last_fs_kind = units_fs(&units);
+                    return Err(CoreError::Cancelled);
                 }
                 Err(_) => {}
             }
@@ -292,6 +346,12 @@ impl ScanController {
         self.phase = Phase::Organizing;
         obs.on_phase(self.phase);
         self.ctrl.checkpoint()?;
+        // Session 9: the recoverability READABILITY pass (the og
+        // CCheckNodeThread model — `DRWUI-subsystems--assistant-
+        // grading-preview.md` §2): probe deleted files' first
+        // extents; unreadable media downgrades the grade to Poor.
+        // Recoverability stops being confidence arithmetic alone.
+        tree.apply_readability_grades(&*self.dev, READABILITY_PROBE_CAP);
         self.emit(obs, 1.0);
         // (Classification ran incrementally; counters finalize here.)
         // QA-17: the LOGICAL byte total can exceed the scanned device's
@@ -308,16 +368,15 @@ impl ScanController {
         self.files = files;
         self.bytes = bytes;
         self.emit(obs, 1.0);
-        Ok((
-            tree,
-            ScanReport {
-                files_found: files,
-                bytes_found: bytes,
-                duration_sec: self.started.elapsed().as_secs(),
-                stopped: false,
-                fs: units_fs(&units),
-            },
-        ))
+        let kind = units_fs(&units);
+        self.last_fs_kind = kind;
+        Ok(ScanReport {
+            files_found: files,
+            bytes_found: bytes,
+            duration_sec: self.started.elapsed().as_secs(),
+            stopped: false,
+            fs: kind,
+        })
     }
 
     fn finish_stopped(
@@ -344,6 +403,12 @@ impl ScanController {
         )
     }
 }
+
+/// Upper bound on per-file readability probes in the ORGANIZE pass
+/// (one cached first-sector read each; the cap bounds the pass on
+/// pathological million-file trees — beyond it, grades keep their
+/// arithmetic values, which the $Bitmap scoring already informed).
+const READABILITY_PROBE_CAP: usize = 20_000;
 
 /// QA-17: report bytes never exceed the scanned device's capacity.
 /// Sparse metafiles ($LogFile logical size, $MFT growth) and pre-merge
@@ -396,12 +461,19 @@ impl ScanSink for ControllerSink<'_, '_> {
             // the owner watched it climb into TB mid-scan).
             self.ctrl.bytes = self.ctrl.bytes.saturating_add(size).min(self.ctrl.capacity);
         }
-        // Session 8 — progressive results: every 2048 materialized
-        // nodes (>= 350 ms apart) the observer sees the tree so the
-        // results page fills WHILE the scan runs.
+        // Progressive results (session-9 tuning): the FIRST publish
+        // lands at 64 nodes (small volumes stream too — the tour
+        // VHD's 155 files never crossed the old 2048 floor, so the
+        // results page stayed empty the whole scan); steady state
+        // publishes every 512 nodes, >= 350 ms apart (the og's
+        // ~1000-item incremental BuildTree cadence).
         self.ctrl.since_publish = self.ctrl.since_publish.saturating_add(1);
-        if self.ctrl.since_publish >= 2048 && self.ctrl.last_publish.elapsed().as_millis() >= 350 {
+        let threshold = if self.ctrl.ever_published { 512 } else { 64 };
+        if self.ctrl.since_publish >= threshold
+            && self.ctrl.last_publish.elapsed().as_millis() >= 350
+        {
             self.ctrl.since_publish = 0;
+            self.ctrl.ever_published = true;
             self.ctrl.last_publish = Instant::now();
             self.obs_slot.on_tree_update(self.tree);
         }

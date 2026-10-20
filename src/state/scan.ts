@@ -130,6 +130,17 @@ export function attachScanEvents(): void {
   }).catch(() => undefined);
   void listen<ScanDoneInfo>(EV_SCAN_DONE, (info) => {
     useScanStore.setState({ done: info, progress: null });
+    // The session-9 guaranteed final adoption: the poll loop above
+    // dies with `progress: null`, so the LAST delta may never have
+    // landed — the done event itself must trigger one full reload
+    // (since=0 → the backend's complete, freshly-folded tree). This
+    // closes the tour's t99-tour-fail-results-snapshot-null class:
+    // a snapshot that stayed null forever while the backend held a
+    // fully-populated tree.
+    void useResultsStore
+      .getState()
+      .load(info.generation, true)
+      .catch(() => undefined);
   }).catch(() => undefined);
 }
 

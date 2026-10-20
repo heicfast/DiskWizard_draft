@@ -283,10 +283,18 @@ impl ExFatEngine {
                 continue;
             }
             // File set: 0x85 (or deleted 0x05) + secondaries.
+            // Field map per the exFAT spec §7.4 (File Directory
+            // Entry): attributes at 0x04, the three DOS timestamps
+            // at 0x08/0x0C/0x10, 10ms increments at 0x14/0x15 (the
+            // old code read attributes from 0x08 and every
+            // timestamp one field high — "accessed" consumed the
+            // 10ms/offset bytes as a date).
             let allocated = et & ET_ALLOC != 0;
             let secondary_count = data[i + 1] as usize;
-            let attrs = u16::from_le_bytes([data[i + 8], data[i + 9]]);
-            // Timestamps: create/modify/access as (date<<16)|time u32s.
+            let attrs = u16::from_le_bytes([data[i + 4], data[i + 5]]);
+            // Timestamps: (date<<16)|time u32s, local wall clock —
+            // the same interpretation as FAT (displays as stored,
+            // the og behavior) with exFAT's 10ms sub-second rides.
             let t = |off: usize| {
                 let v = u32::from_le_bytes([
                     data[i + off],
@@ -297,9 +305,9 @@ impl ExFatEngine {
                 crate::fs::fat::fat_datetime((v >> 16) as u16, (v & 0xFFFF) as u16)
             };
             let times = Timestamps {
-                created: Some(t(0x0C)),
-                modified: Some(t(0x10)),
-                accessed: Some(t(0x14)),
+                created: Some(t(0x08) + i64::from(data[i + 0x14].min(199)) * 10),
+                modified: Some(t(0x0C) + i64::from(data[i + 0x15].min(199)) * 10),
+                accessed: Some(t(0x10)),
                 changed: None,
                 deleted: None,
             };

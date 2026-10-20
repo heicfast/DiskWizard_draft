@@ -1,8 +1,24 @@
 //! Scan commands — the real engine lifecycle: start (worker thread),
 //! pause/resume/stop, progress events, results snapshots.
+//!
+//! Session-9 architecture (the owner's symptom fixes):
+//! * **Delta publishing** — mid-scan tree snapshots land as APPENDED
+//!   nodes (the old full-copy-per-publish was O(n²) total) with
+//!   cumulative category counters (the old slice-local counters
+//!   clobbered the chips on every append).
+//! * **The guaranteed final adoption** — the worker folds the
+//!   complete tree into the session BEFORE `scan-done` fires, and
+//!   the frontend force-reloads on done: the tour race (the 1.4 s
+//!   poll loop tearing down between the last null poll and the
+//!   final publish → `results-snapshot-null` forever) is closed at
+//!   BOTH ends.
+//! * **The ETA tracker** — a windowed EWMA rate (the old
+//!   `elapsed × (100−p)/p` extrapolation grew monotonically whenever
+//!   progress was sub-linear: "remaining time keeps increasing").
+//! * **Honest units** — quick reports records, deep reports SECTORS.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -16,6 +32,10 @@ use dw_core::tree::TreeNode;
 
 use super::AppState;
 
+/// Fold `appended` into `tree` once it grows past this (bounds the
+/// concat cost; get_scan_results slices stay O(delta)).
+const FOLD_THRESHOLD: usize = 131_072;
+
 /// The live scan state (interior-mutable; the worker thread updates
 /// through the AppHandle's managed state).
 pub struct ScanSession {
@@ -23,7 +43,14 @@ pub struct ScanSession {
     target_id: Mutex<String>,
     target_name: Mutex<String>,
     control: Mutex<ScanControl>,
+    /// The folded base snapshot (immutable once set).
     tree: Mutex<Option<Arc<Vec<TreeNode>>>>,
+    /// Nodes appended since the last fold (live-scan deltas).
+    appended: Mutex<Vec<TreeNode>>,
+    /// Cumulative category counters over base+appended (the chips).
+    categories: Mutex<std::collections::HashMap<String, (u64, u64)>>,
+    /// Builder node count already copied out (delta bookkeeping).
+    taken: AtomicUsize,
     report: Mutex<Option<ScanReport>>,
     phase: Mutex<Phase>,
     started_at: Mutex<Option<Instant>>,
@@ -31,6 +58,8 @@ pub struct ScanSession {
     /// source — the UI polls when events are throttled or missed).
     progress: Mutex<Option<dw_core::scan::Progress>>,
     searching: Mutex<String>,
+    /// The windowed-rate ETA (seconds; the poll endpoint echoes it).
+    eta: Mutex<u64>,
 }
 
 impl Default for ScanSession {
@@ -41,11 +70,15 @@ impl Default for ScanSession {
             target_name: Mutex::new(String::new()),
             control: Mutex::new(ScanControl::new()),
             tree: Mutex::new(None),
+            appended: Mutex::new(Vec::new()),
+            categories: Mutex::new(std::collections::HashMap::new()),
+            taken: AtomicUsize::new(0),
             report: Mutex::new(None),
             phase: Mutex::new(Phase::Preparing),
             started_at: Mutex::new(None),
             progress: Mutex::new(None),
             searching: Mutex::new("Scanning…".into()),
+            eta: Mutex::new(0),
         }
     }
 }
@@ -66,8 +99,110 @@ impl ScanSession {
         *self.target_name.lock() = name.to_string();
     }
 
-    pub fn tree_slot(&self) -> &Mutex<Option<Arc<Vec<TreeNode>>>> {
-        &self.tree
+    /// The COMPLETE results view (base + appended) — the recovery
+    /// queue and preview paths read everything.
+    pub fn snapshot_nodes(&self) -> Option<Arc<Vec<TreeNode>>> {
+        let base = self.tree.lock().clone();
+        let appended = self.appended.lock();
+        match (base, appended.is_empty()) {
+            (None, _) => None,
+            (Some(b), true) => Some(b),
+            (Some(b), false) => {
+                let mut all = Vec::with_capacity(b.len() + appended.len());
+                all.extend_from_slice(&b);
+                all.extend_from_slice(&appended);
+                Some(Arc::new(all))
+            }
+        }
+    }
+
+    /// Total materialized nodes (base + appended).
+    fn node_count(&self) -> usize {
+        let base = self.tree.lock().as_ref().map_or(0, Arc::len);
+        base + self.appended.lock().len()
+    }
+
+    /// Mid-scan progressive publish: copy the builder's APPENDED
+    /// nodes (everything past `taken`), update the cumulative
+    /// category counters, fold when large. The old per-publish full
+    /// copy was O(n) per 2048 nodes → O(n²/2048) total — a 1M-file
+    /// tree spent minutes just copying.
+    ///
+    /// Lock order (the session-wide contract): `tree` → `appended` →
+    /// `categories`, ALL held across the fold so a concurrent poller
+    /// can never observe the new base with the un-cleared delta
+    /// (duplicate nodes) or the old base with a cleared one (lost
+    /// nodes).
+    fn publish_delta(&self, nodes: &[TreeNode]) {
+        let taken = self.taken.load(Ordering::Acquire);
+        if nodes.len() <= taken {
+            return; // no growth (pure re-emits)
+        }
+        let mut base = self.tree.lock();
+        let mut appended = self.appended.lock();
+        let mut cats = self.categories.lock();
+        for n in &nodes[taken..] {
+            if !n.is_dir {
+                let c = cats.entry(n.category.wire().to_string()).or_insert((0, 0));
+                c.0 += 1;
+                c.1 += n.size;
+            }
+        }
+        appended.extend_from_slice(&nodes[taken..]);
+        self.taken.store(nodes.len(), Ordering::Release);
+        if appended.len() >= FOLD_THRESHOLD && base.is_some() {
+            let mut all = Vec::with_capacity(base.as_ref().map_or(0, Arc::len) + appended.len());
+            if let Some(b) = base.as_deref() {
+                all.extend_from_slice(b);
+            }
+            all.extend_from_slice(&appended);
+            *base = Some(Arc::new(all));
+            appended.clear();
+        }
+    }
+
+    /// The final adoption: the COMPLETE tree replaces the session
+    /// state (fresh dir sizes/paths after the finish() fixpoint —
+    /// delta copies could be stale on rolled-up fields), categories
+    /// recompute from the authoritative counters. Called BEFORE
+    /// `scan-done` emits so the done-reload can never race it.
+    fn adopt_final(
+        &self,
+        nodes: Arc<Vec<TreeNode>>,
+        counts: Vec<dw_core::tree::CategoryCountWire>,
+    ) {
+        *self.tree.lock() = Some(nodes);
+        self.appended.lock().clear();
+        self.taken.store(usize::MAX, Ordering::Release);
+        let mut cats = self.categories.lock();
+        cats.clear();
+        for c in counts {
+            cats.insert(c.category.wire().to_string(), (c.count, c.size));
+        }
+    }
+
+    /// Session/resume adoption (the .rsf load path). Counters are
+    /// computed from the parameter BEFORE any lock; the assignment
+    /// holds tree → appended → categories together (the canonical
+    /// order — a concurrent poller sees the adoption atomically).
+    pub fn adopt_loaded(&self, nodes: Arc<Vec<TreeNode>>) {
+        let mut new_cats = std::collections::HashMap::new();
+        for n in nodes.iter() {
+            if !n.is_dir {
+                let c = new_cats
+                    .entry(n.category.wire().to_string())
+                    .or_insert((0, 0));
+                c.0 += 1;
+                c.1 += n.size;
+            }
+        }
+        let mut tree = self.tree.lock();
+        let mut appended = self.appended.lock();
+        let mut cats = self.categories.lock();
+        *tree = Some(nodes);
+        appended.clear();
+        self.taken.store(usize::MAX, Ordering::Release);
+        *cats = new_cats;
     }
 
     pub fn report_slot(&self) -> &Mutex<Option<ScanReport>> {
@@ -88,23 +223,68 @@ impl ScanSession {
         *self.target_name.lock() = display_name.to_string();
         *self.control.lock() = ScanControl::new();
         *self.tree.lock() = None;
+        self.appended.lock().clear();
+        self.categories.lock().clear();
+        self.taken.store(0, Ordering::Release);
         *self.report.lock() = None;
         *self.started_at.lock() = Some(Instant::now());
         next
     }
 }
 
-/// The searching-label ticker (the live "Searching: …" strip).
+/// The searching-label ticker (the live "Searching: …" strip). Quick
+/// phase counts records ("Files Found" — the og's status string);
+/// deep phase reports SECTORS (the og's "Reading sector: X/Y").
 fn searching_label(p: &dw_core::scan::Progress, target: &str) -> String {
     match p.phase {
         Phase::Preparing => format!("Reading {target} — boot sector, partition table…"),
         Phase::Organizing => "Organizing found files…".into(),
-        Phase::Quick | Phase::Deep => format!(
+        Phase::Quick => format!("Quick scanning — {} files found", p.files_found),
+        Phase::Deep => format!(
             "Searching: sector {} / {}",
             p.engine_done,
             p.engine_total.max(1)
         ),
         _ => "Scanning…".into(),
+    }
+}
+
+/// Windowed ETA (session 9): an EWMA over measured percent-per-second
+/// samples — the honest replacement for the old
+/// `elapsed × (100 − p) / p` extrapolation that grew monotonically
+/// while progress was sub-linear (the owner's "remaining time keeps
+/// increasing"). Needs ≥1 s of measured movement before it commits;
+/// clamps to a day so a slow start can't claim weeks.
+#[derive(Default)]
+struct EtaTracker {
+    last: Option<(Instant, f64)>,
+    rate: Option<f64>,
+}
+
+impl EtaTracker {
+    fn update(&mut self, percent: f64) -> u64 {
+        if percent >= 100.0 {
+            return 0;
+        }
+        let now = Instant::now();
+        if let Some((t, p)) = self.last {
+            let dt = now.duration_since(t).as_secs_f64();
+            if dt >= 1.0 {
+                if percent > p {
+                    let inst = (percent - p) / dt;
+                    self.rate = Some(self.rate.map_or(inst, |r| r * 0.7 + inst * 0.3));
+                }
+                // percent <= p: no update (a stall keeps the last
+                // measured rate — honest, and never the old runaway).
+                self.last = Some((now, percent));
+            }
+        } else {
+            self.last = Some((now, percent));
+        }
+        match self.rate {
+            Some(r) if r > 1e-6 => (((100.0 - percent) / r).ceil() as u64).clamp(1, 86_400),
+            _ => 60,
+        }
     }
 }
 
@@ -116,6 +296,7 @@ struct EventObserver {
     target_name: String,
     last_emit: Instant,
     last_percent: f64,
+    eta: EtaTracker,
 }
 
 impl ProgressObserver for EventObserver {
@@ -128,17 +309,14 @@ impl ProgressObserver for EventObserver {
         }
         self.last_emit = Instant::now();
         self.last_percent = p.percent;
+        let eta = self.eta.update(p.percent);
+        let label = searching_label(p, &self.target_name);
         // Refresh the poll slots (single managed state write).
         if let Some(state) = self.app.try_state::<AppState>() {
             *state.scan.progress.lock() = Some(*p);
-            *state.scan.searching.lock() = searching_label(p, &self.target_name);
+            *state.scan.searching.lock() = label.clone();
+            *state.scan.eta.lock() = eta;
         }
-        let rate = if p.percent > 0.0 {
-            (p.elapsed_sec as f64 * (100.0 - p.percent) / p.percent).ceil() as u64
-        } else {
-            60
-        };
-        let remaining = rate.max(1);
         let payload = json!({
             "generation": self.generation,
             "targetId": self.target_id,
@@ -152,8 +330,8 @@ impl ProgressObserver for EventObserver {
                 "sectorsTotal": p.sectors_total,
             },
             "elapsedSec": p.elapsed_sec,
-            "remainingSec": remaining.max(1),
-            "searchingLabel": searching_label(p, &self.target_name),
+            "remainingSec": eta.max(1),
+            "searchingLabel": label,
         });
         let _ = self.app.emit("scan-progress", payload);
     }
@@ -165,24 +343,12 @@ impl ProgressObserver for EventObserver {
         );
     }
 
-    /// Session 8 — progressive results: publish the assembling tree
-    /// into managed state (the UI's `get_scan_results` polls read it;
-    /// the old design delivered the tree only at completion, so a
-    /// slow/stuck scan showed an empty table while the counters
-    /// ticked — exactly the owner's symptom).
+    /// Progressive results: the session stores the builder's APPENDED
+    /// nodes (delta publishing — see [`ScanSession::publish_delta`]);
+    /// the UI's `get_scan_results` polls accumulate them.
     fn on_tree_update(&mut self, tree: &dw_core::tree::TreeBuilder) {
         if let Some(state) = self.app.try_state::<AppState>() {
-            let nodes = tree.nodes();
-            // Skip no-growth publishes (pure re-emits).
-            let grew = state
-                .scan
-                .tree
-                .lock()
-                .as_ref()
-                .is_none_or(|current| current.len() < nodes.len());
-            if grew {
-                *state.scan.tree.lock() = Some(Arc::new(nodes.to_vec()));
-            }
+            state.scan.publish_delta(tree.nodes());
         }
     }
 }
@@ -327,6 +493,12 @@ fn start_scan_common(
     std::thread::Builder::new()
         .name(format!("dw-scan-{generation}"))
         .spawn(move || {
+            // The og's compute-worker posture (priority-7 threads,
+            // `DRWUI-exe--thread-architecture.md`): HIGHEST, not
+            // TIME_CRITICAL — the WebView render thread must keep
+            // painting while we burn cores.
+            #[cfg(windows)]
+            dw_win::raise_thread_priority_highest();
             let mut obs = EventObserver {
                 app: app.clone(),
                 generation,
@@ -334,6 +506,7 @@ fn start_scan_common(
                 target_name: display_name.clone(),
                 last_emit: Instant::now(),
                 last_percent: 0.0,
+                eta: EtaTracker::default(),
             };
             let state: State<'_, AppState> = app.state();
             let mut controller = ScanController::with_control(dev, &display_name, control.clone());
@@ -341,7 +514,14 @@ fn start_scan_common(
             match result {
                 Ok((tree, report)) => {
                     let (files, bytes) = tree.totals();
-                    *state.scan.tree.lock() = Some(Arc::new(tree.nodes().to_vec()));
+                    let counts = tree.category_counts();
+                    // THE GUARANTEED FINAL ADOPTION — before scan-done,
+                    // before the session save: the frontend's poll
+                    // loop dies at done, and its done-handler reload
+                    // (since=0) must find the complete tree waiting.
+                    state
+                        .scan
+                        .adopt_final(Arc::new(tree.nodes().to_vec()), counts);
                     *state.scan.phase.lock() = Phase::Done;
                     *state.scan.report.lock() = Some(report.clone());
                     // Auto-save the .rsf session (the mock contract's
@@ -394,6 +574,13 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
 }
 
@@ -502,7 +689,7 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
     let report = s.scan.report.lock().clone();
     // Prefer the worker's live snapshot; fall back to the final
     // report for done/stopped scans whose events already flushed.
-    let (percent, stats, elapsed, searching) = match (&progress, &report) {
+    let (percent, stats, elapsed, searching, eta) = match (&progress, &report) {
         (Some(p), _) => (
             p.percent,
             (
@@ -513,12 +700,14 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
             ),
             p.elapsed_sec,
             s.scan.searching.lock().clone(),
+            *s.scan.eta.lock(),
         ),
         (None, Some(r)) => (
             if phase == Phase::Done { 100.0 } else { 0.0 },
             (r.files_found, r.bytes_found, 0, 0),
             r.duration_sec,
             "Scanning…".to_string(),
+            if phase == Phase::Done { 0 } else { 60 },
         ),
         (None, None) => (
             if phase == Phase::Done { 100.0 } else { 0.0 },
@@ -529,14 +718,8 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or_default(),
             "Scanning…".to_string(),
+            60,
         ),
-    };
-    let remaining = if percent > 0.0 && percent < 100.0 {
-        ((elapsed as f64 * (100.0 - percent) / percent).ceil() as u64).max(1)
-    } else if percent >= 100.0 {
-        0
-    } else {
-        1
     };
     let (files, bytes, sectors_read, sectors_total) = stats;
     json!({
@@ -552,8 +735,31 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
             "sectorsTotal": sectors_total,
         },
         "elapsedSec": elapsed,
-        "remainingSec": remaining,
+        "remainingSec": eta,
         "searchingLabel": searching,
+    })
+}
+
+/// One wire node (the frozen FileNode shape; timestamps in unix
+/// MILLISECONDS — session 9's precision contract).
+fn wire_node(n: &TreeNode, now_ms: i64) -> Value {
+    json!({
+        "id": n.id,
+        "parentId": n.parent_id,
+        "name": n.name,
+        "isDir": n.is_dir,
+        "category": n.category.wire(),
+        "size": n.size,
+        "modified": n.modified,
+        "origin": n.origin.wire(),
+        "recoverability": n.recoverability.wire(),
+        "path": n.path,
+        "width": n.dimensions.map(|d| d.0),
+        "height": n.dimensions.map(|d| d.1),
+        "deletedAgo": n.timestamps
+            .deleted
+            .map(|t| (now_ms - t) / 86_400_000),
+        "ext": n.name.rsplit('.').next().unwrap_or("").to_string(),
     })
 }
 
@@ -562,44 +768,53 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u
     if s.scan.generation() != generation {
         return Value::Null;
     }
-    let tree = s.scan.tree.lock().clone();
-    let Some(nodes) = tree else {
+    let node_count = s.scan.node_count();
+    if node_count == 0 {
         return Value::Null;
-    };
+    }
     // The delta: entries appended after `since` (clamped — a stale
     // `since` beyond the current tree reads as empty, never panics).
-    let since = since.unwrap_or(0).min(nodes.len() as u64);
-    let mut categories: std::collections::HashMap<String, (u64, u64)> =
-        std::collections::HashMap::new();
-    let now = unix_now();
-    let mut wire_nodes = Vec::with_capacity((nodes.len() - since as usize).max(16));
-    for n in nodes[since as usize..].iter() {
-        if !n.is_dir {
-            let c = categories
-                .entry(n.category.wire().to_string())
-                .or_insert((0, 0));
-            c.0 += 1;
-            c.1 += n.size;
+    let since = since.unwrap_or(0).min(node_count as u64) as usize;
+    let now_ms = unix_now_ms();
+    let mut wire_nodes = Vec::with_capacity(node_count - since);
+    {
+        // tree + appended held TOGETHER (the canonical order): the
+        // fold inside publish_delta mutates both under the same
+        // pair, so this view is atomic — never the new base with an
+        // un-cleared delta (duplicates), never the old base with a
+        // cleared one (lost nodes).
+        let base = s.scan.tree.lock();
+        let appended = s.scan.appended.lock();
+        let base_len = base.as_ref().map_or(0, Arc::len);
+        if since < base_len {
+            if let Some(b) = base.as_deref() {
+                for n in &b[since..] {
+                    wire_nodes.push(wire_node(n, now_ms));
+                }
+            }
+            for n in appended.iter() {
+                wire_nodes.push(wire_node(n, now_ms));
+            }
+        } else {
+            let off = since - base_len;
+            for n in appended.iter().skip(off) {
+                wire_nodes.push(wire_node(n, now_ms));
+            }
         }
-        wire_nodes.push(json!({
-            "id": n.id,
-            "parentId": n.parent_id,
-            "name": n.name,
-            "isDir": n.is_dir,
-            "category": n.category.wire(),
-            "size": n.size,
-            "modified": n.modified,
-            "origin": n.origin.wire(),
-            "recoverability": n.recoverability.wire(),
-            "path": n.path,
-            "width": n.dimensions.map(|d| d.0),
-            "height": n.dimensions.map(|d| d.1),
-            "deletedAgo": n.timestamps
-                .deleted
-                .map(|t| (now - t) / 86_400),
-            "ext": n.name.rsplit('.').next().unwrap_or("").to_string(),
-        }));
     }
+    // Cumulative categories (the chips were clobbered by slice-local
+    // counts on every append — the old mid-scan bug).
+    let categories: Vec<Value> = s
+        .scan
+        .categories
+        .lock()
+        .iter()
+        .map(|(k, (count, size))| {
+            json!({
+                "category": k, "count": count, "size": size,
+            })
+        })
+        .collect();
     let report = s.scan.report.lock().clone();
     json!({
         "generation": generation,
@@ -612,11 +827,42 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u
         // `nodeCount` carries the full-tree size (the frontend
         // accumulates and knows when it has everything).
         "since": since,
-        "nodeCount": nodes.len(),
-        "categories": categories.iter().map(|(k, (count, size))| json!({
-            "category": k, "count": count, "size": size,
-        })).collect::<Vec<_>>(),
+        "nodeCount": node_count,
+        "categories": categories,
         "nodes": wire_nodes,
         "durationSec": report.map(|r| r.duration_sec).unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eta_tracker_never_runs_away_on_stalls() {
+        let mut eta = EtaTracker::default();
+        // First sample: no rate yet → the honest 60 s default.
+        assert_eq!(eta.update(1.0), 60);
+        // Measured movement: 1%/s for 10 s → ~99 s remaining at 1%.
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        let e = eta.update(2.0);
+        assert!(e > 60 && e <= 120, "eta={e}");
+        // A long stall (percent frozen): the estimate must not grow
+        // unboundedly — the old formula would multiply elapsed×99.
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        let e2 = eta.update(2.0);
+        assert!(e2 <= 86_400, "clamped to a day, got {e2}");
+        // Completion zeroes.
+        assert_eq!(eta.update(100.0), 0);
+    }
+
+    #[test]
+    fn eta_tracker_clamps_to_a_day() {
+        let mut eta = EtaTracker::default();
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        // A crawl: 0.001 %/s → the raw math says 10^8 s; the clamp
+        // answers one day.
+        let e = eta.update(1.001);
+        assert!(e <= 86_400, "clamped, got {e}");
+    }
 }

@@ -31,6 +31,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::blockdev::BlockDevice;
 use crate::types::{
     Category, Extent, FileAttrs, FoundEntry, FsKind, NodeOrigin, Recoverability, Timestamps,
 };
@@ -567,6 +568,48 @@ impl TreeBuilder {
             .collect();
         out.sort_by_key(|c| c.category.wire());
         out
+    }
+
+    /// The ORGANIZE-phase recoverability probe (the og
+    /// `CCheckNodeThread` model — research:
+    /// `DRWUI-subsystems--assistant-grading-preview.md` §2): read the
+    /// FIRST sector of up to `cap` deleted files' first extents; a
+    /// read failure means the media cannot serve the content — the
+    /// grade drops to Poor no matter what the arithmetic said.
+    /// Returns the number of nodes probed (diagnostics).
+    ///
+    /// Structured grades below Poor are never raised, only lowered —
+    /// reading the first sector cannot prove the whole file is
+    /// intact, but failing to read it proves the file is not
+    /// recoverable as-is.
+    pub fn apply_readability_grades(&mut self, dev: &dyn BlockDevice, cap: usize) -> usize {
+        let ss = u64::from(dev.sector_size()).max(1);
+        let mut probed = 0usize;
+        for node in &mut self.nodes {
+            if probed >= cap {
+                break;
+            }
+            if node.is_dir || node.origin != NodeOrigin::Deleted || node.extents.is_empty() {
+                continue;
+            }
+            // The resident-marker (zero-length extent at the record
+            // offset) is metadata the MFT walk already read — skip.
+            let Some(first) = node.extents.first() else {
+                continue;
+            };
+            if first.len == 0 {
+                continue;
+            }
+            // One sector through the cache layer: chunk-resident for
+            // neighbors, a single positioned read on the miss path.
+            let mut buf = vec![0u8; ss as usize];
+            let readable = dev.read_sectors(first.offset / ss, &mut buf).is_ok();
+            probed += 1;
+            if !readable && node.recoverability != Recoverability::Poor {
+                node.recoverability = Recoverability::Poor;
+            }
+        }
+        probed
     }
 
     /// Total found (files + bytes).

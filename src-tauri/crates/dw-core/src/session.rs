@@ -28,8 +28,10 @@ use crate::tree::TreeNode;
 
 /// The format magic.
 const MAGIC: [u8; 4] = *b"DWRS";
-/// Current schema version.
-const VERSION: u16 = 1;
+/// Current schema version. v2: timestamps moved to unix MILLISECONDS
+/// (the og's sub-second FILETIME fidelity) — v1 sessions are
+/// rejected cleanly rather than silently misrendering dates.
+const VERSION: u16 = 2;
 /// Record types.
 const RT_HEADER: u8 = 1;
 const RT_DEVICE: u8 = 2;
