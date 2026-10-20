@@ -203,12 +203,10 @@ fn vhd_end_to_end() {
     assert_eq!(report.done_files, 2, "both files recover: {report:?}");
     assert_eq!(report.failed_files, 0);
     // Session-8 diagnosis: what actually landed under the destination.
-    for entry in std::fs::read_dir(&dest_root)
-        .map(|rd| rd.flatten())
-        .unwrap_or_default()
-        .take(20)
-    {
-        eprintln!("diag: dest entry {:?}", entry.file_name());
+    if let Ok(rd) = std::fs::read_dir(&dest_root) {
+        for entry in rd.flatten().take(20) {
+            eprintln!("diag: dest entry {:?}", entry.file_name());
+        }
     }
 
     let original_present = std::fs::read(format!("{letter}:\\present.txt")).expect("seed present");

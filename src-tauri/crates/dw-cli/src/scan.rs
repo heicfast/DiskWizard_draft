@@ -22,6 +22,7 @@ use crate::target;
 /// node set including recovery extents (the UI wire omits them; the
 /// CLI is the engine-side truth).
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CliResults {
     pub target: String,
     pub target_name: String,
@@ -36,6 +37,7 @@ pub struct CliResults {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CliNode {
     pub id: u64,
     pub parent_id: Option<u64>,
