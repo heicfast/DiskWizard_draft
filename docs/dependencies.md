@@ -33,11 +33,30 @@ older transitive crates; Cargo resolves both side-by-side.
 
 ## npm (UI)
 
+Verified 2026-10-21 (session 9): the React-19 upgrade ticket landed in
+session 8 (react 19 + framer-motion 14 + zustand 5 + vite 8), and
+session 9 bumped TypeScript to 7.0.2 (typecheck + all 74 tests green
+on it). The old "pinned to 18" deviation is CLOSED.
+
 | Package | In use | Notes |
 |---|---|---|
-| react / react-dom | ^18.3.1 | **Flagged deviation**: React 19 is the current stable major; the UI pins 18.3 deliberately — the donor (diskgenie-v2) component stack (framer-motion 11, @types/react 18) is tested on 18, and a major upgrade mid-release-hardening is churn risk. Upgrade ticket: swap to 19 + framer-motion 12 + types in one dedicated session with the full tour as the regression gate. |
-| vite | ^6.0.3 | latest major line in the lock at scaffold time; 7 is current — same ticket as React (build-chain bump together) |
-| typescript | ~5.6.3 | pinned minor per donor; TS 5.7+ compatible — rides the same upgrade ticket |
+| react / react-dom | ^19.3.1 | ✅ latest major (the session-8 ticket) |
+| framer-motion | ^14.4.0 | ✅ the React-19-compatible line |
+| zustand | ^5.0.15 | ✅ latest |
+| vite | ^8.3.4 | ✅ latest major |
+| vitest | ^5.0.5 | ✅ latest |
+| typescript | ^7.0.2 | ✅ latest (session 9: 5.9.3 → 7.0.2, clean) |
+
+## Session-9 additions (Rust)
+
+| Crate | Version | Role |
+|---|---|---|
+| chrono | 0.4.x (latest stable line) | FAT/exFAT local-wall-clock interpretation (clock+std only — no oldtime/serde baggage) |
+
+Known follow-up (queued): the license stack's rustls provider is
+aws-lc-rs (via reqwest's rustls-tls) — a ring-provider swap would
+remove the aws-lc-sys build dependency that blocks local
+`--target x86_64-pc-windows-msvc` cross-checks of the app crate.
 | zustand | ^4.5.5 | 5 is current — donor-tested 4.5; same ticket |
 | framer-motion | ^11 | 12 current — pinned to donor-tested line; same ticket |
 | @tanstack/react-virtual | ^3.14.21 | latest major ✅ |

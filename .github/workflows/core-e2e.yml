@@ -335,12 +335,16 @@ jobs:
           Remove-Item -Recurse -Force "V:\seed\Archives"
           $churnDir = "V:\churn"
           New-Item -ItemType Directory -Force -Path $churnDir | Out-Null
-          for ($i = 0; $i -lt 64; $i++) {
+          # 8 MB — proportional to the freed archives (the first run's
+          # 64 MB re-used most of the PERMANENT group's freed clusters
+          # too: honest physics, but this scenario is "a few new files
+          # after deleting", not "filled the disk").
+          for ($i = 0; $i -lt 8; $i++) {
             $bytes = New-Object byte[] (1MB)
             for ($j = 0; $j -lt $bytes.Length; $j += 4096) { $bytes[$j] = $i }
             [IO.File]::WriteAllBytes("$churnDir\block$i.bin", $bytes)
           }
-          Write-Host "Churn-deleted Archives/ + wrote 64 MB of replacement data"
+          Write-Host "Churn-deleted Archives/ + wrote 8 MB of replacement data"
 
           # Style 5 — KEEP: Users\Documents\Work + the odd-numbered
           # pictures survive as EXISTING files (the origin gate).

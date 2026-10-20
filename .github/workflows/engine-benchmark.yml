@@ -132,6 +132,10 @@ jobs:
           }
           $out | ConvertTo-Json -Depth 3 | Set-Content "$evidence\smart-census.json"
           Get-Content "$evidence\smart-census.json"
+          # Evidence collection, not a gate: a virtual disk without
+          # SMART legitimately exits 1 (the honest typed answer) —
+          # never fail the census on it.
+          exit 0
         working-directory: src-tauri
 
       - name: Truth gate + the comparison report
