@@ -90,6 +90,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           Add-Type -AssemblyName System.Drawing
           $seedRoot = "$env:RUNNER_TEMP\seed"
           New-Item -ItemType Directory -Force -Path $seedRoot | Out-Null
@@ -280,6 +282,7 @@ jobs:
       - name: dw-cli recover (everything found)
         run: |
           $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           cargo run --release -p dw-cli -- recover $evidence\results.json --dest C:\dw-recovered --all --log $evidence\recover.log -v
         working-directory: src-tauri
         shell: pwsh
