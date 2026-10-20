@@ -270,11 +270,28 @@ fn ata_smart(dev: &RawHandleDevice, index: u32, model: &str, serial: &str) -> Op
 /// `AdditionalParameters` begins), and the 512-byte log area right
 /// after it. `ProtocolDataOffset` counts from the START of the
 /// protocol-specific structure.
+///
+/// Session 8: the query tries the DEVICE property first
+/// (`StorageDeviceProtocolSpecificProperty` — the documented pattern
+/// for a `\\.\PhysicalDriveN` handle; the adapter variant queries
+/// the HBA and fails or returns junk on many stacks — the owner's
+/// "SMART shows for the first disk only" symptom), with the adapter
+/// property kept as a fallback for older stacks.
 fn nvme_query_health_log(dev: &RawHandleDevice) -> Option<Vec<u8>> {
+    use windows::Win32::System::Ioctl::{
+        StorageAdapterProtocolSpecificProperty, StorageDeviceProtocolSpecificProperty,
+    };
+    nvme_query_health_log_with(dev, StorageDeviceProtocolSpecificProperty)
+        .or_else(|| nvme_query_health_log_with(dev, StorageAdapterProtocolSpecificProperty))
+}
+
+fn nvme_query_health_log_with(
+    dev: &RawHandleDevice,
+    property: windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID,
+) -> Option<Vec<u8>> {
     use windows::Win32::System::Ioctl::{
         IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, ProtocolTypeNvme,
         STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_SPECIFIC_DATA,
-        StorageAdapterProtocolSpecificProperty,
     };
     const HEADER_LEN: usize = 8; // STORAGE_PROPERTY_HEADER (PropertyId + QueryType)
     let ps = std::mem::size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>();
@@ -288,7 +305,7 @@ fn nvme_query_health_log(dev: &RawHandleDevice) -> Option<Vec<u8>> {
         ..Default::default()
     };
     let query = STORAGE_PROPERTY_QUERY {
-        PropertyId: StorageAdapterProtocolSpecificProperty,
+        PropertyId: property,
         QueryType: PropertyStandardQuery,
         AdditionalParameters: [0; 1],
     };

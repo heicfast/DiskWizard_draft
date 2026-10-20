@@ -164,6 +164,27 @@ impl ProgressObserver for EventObserver {
             json!({ "generation": self.generation, "phase": phase.wire() }),
         );
     }
+
+    /// Session 8 — progressive results: publish the assembling tree
+    /// into managed state (the UI's `get_scan_results` polls read it;
+    /// the old design delivered the tree only at completion, so a
+    /// slow/stuck scan showed an empty table while the counters
+    /// ticked — exactly the owner's symptom).
+    fn on_tree_update(&mut self, tree: &dw_core::tree::TreeBuilder) {
+        if let Some(state) = self.app.try_state::<AppState>() {
+            let nodes = tree.nodes();
+            // Skip no-growth publishes (pure re-emits).
+            let grew = state
+                .scan
+                .tree
+                .lock()
+                .as_ref()
+                .is_none_or(|current| current.len() < nodes.len());
+            if grew {
+                *state.scan.tree.lock() = Some(Arc::new(nodes.to_vec()));
+            }
+        }
+    }
 }
 
 /// Resolve a device id → (block device, display name).
@@ -537,7 +558,11 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-pub fn get_scan_results(s: State<'_, AppState>, generation: u64) -> Value {
+pub fn get_scan_results(
+    s: State<'_, AppState>,
+    generation: u64,
+    since: Option<u64>,
+) -> Value {
     if s.scan.generation() != generation {
         return Value::Null;
     }
@@ -545,11 +570,14 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64) -> Value {
     let Some(nodes) = tree else {
         return Value::Null;
     };
+    // The delta: entries appended after `since` (clamped — a stale
+    // `since` beyond the current tree reads as empty, never panics).
+    let since = since.unwrap_or(0).min(nodes.len() as u64);
     let mut categories: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
     let now = unix_now();
-    let mut wire_nodes = Vec::with_capacity(nodes.len());
-    for n in nodes.iter() {
+    let mut wire_nodes = Vec::with_capacity((nodes.len() - since as usize).max(16));
+    for n in nodes[since as usize..].iter() {
         if !n.is_dir {
             let c = categories
                 .entry(n.category.wire().to_string())
@@ -584,6 +612,11 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64) -> Value {
         // to `list_recover_destinations` so source rows are flagged, and
         // `start_recovery` re-derives the same exclusion server-side.
         "deviceId": s.scan.target_id(),
+        // The delta protocol: `since` echoes the request boundary,
+        // `nodeCount` carries the full-tree size (the frontend
+        // accumulates and knows when it has everything).
+        "since": since,
+        "nodeCount": nodes.len(),
         "categories": categories.iter().map(|(k, (count, size))| json!({
             "category": k, "count": count, "size": size,
         })).collect::<Vec<_>>(),

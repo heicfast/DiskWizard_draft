@@ -30,6 +30,7 @@ import type { SmartReport, StorageDevice } from "../../types";
 export function ToolsPage() {
   const inventory = useDevicesStore((s) => s.inventory);
   const smart = useDevicesStore((s) => s.smart);
+  const smartErrors = useDevicesStore((s) => s.smartErrors);
   const loadSmart = useDevicesStore((s) => s.loadSmart);
   const [deviceId, setDeviceId] = useState<string | null>(null);
 
@@ -53,6 +54,7 @@ export function ToolsPage() {
 
   const selected = devices.find((d) => d.id === deviceId) ?? devices[0] ?? null;
   const report: SmartReport | null = selected ? smart[selected.id] ?? null : null;
+  const smartError: string | null = selected ? smartErrors[selected.id] ?? null : null;
 
   return (
     <div className="dw-page dw-page-tools dw-scroll">
@@ -169,6 +171,29 @@ export function ToolsPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </section>
+      )}
+
+      {/* Session 8: the honest unavailable state — the dashboard NEVER
+         silently disappears (the owner's "switch disk → only rescue
+         tools" symptom); the reason rides the card. */}
+      {!report && selected && (
+        <section className="dw-section dw-smart-section" aria-label={`Health of ${selected.name}`}>
+          <div className="dw-card dw-smart-unavailable">
+            <ShieldIcon size={18} />
+            <div>
+              <strong>S.M.A.R.T. data is not available for {selected.name}.</strong>
+              {smartError ? (
+                <p className="dw-smart-unavailable-reason">{smartError}</p>
+              ) : (
+                <p>Reading the disk's health sensors…</p>
+              )}
+              <p>
+                Health monitoring works on drives whose controller exposes sensor data
+                (most SATA, NVMe and SAS disks). Scanning and recovery work regardless.
+              </p>
+            </div>
           </div>
         </section>
       )}

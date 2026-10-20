@@ -88,6 +88,11 @@ pub struct ScanReport {
 pub trait ProgressObserver: Send {
     fn on_progress(&mut self, p: &Progress);
     fn on_phase(&mut self, phase: Phase);
+    /// Session 8 — progressive results: a throttled snapshot of the
+    /// assembling tree (the app layer publishes it so the results page
+    /// fills WHILE the scan runs; the old design delivered the tree
+    /// only at completion, so a stuck scan showed nothing at all).
+    fn on_tree_update(&mut self, _tree: &TreeBuilder) {}
 }
 
 /// A null observer (no-op).
@@ -112,6 +117,9 @@ pub struct ScanController {
     phase: Phase,
     /// Session 8: the device capacity — the LIVE byte-clamp bound.
     capacity: u64,
+    /// Session 8: progressive-publish throttle state.
+    since_publish: u32,
+    last_publish: Instant,
 }
 
 impl ScanController {
@@ -140,6 +148,8 @@ impl ScanController {
             engine_total: 0,
             phase: Phase::Preparing,
             capacity,
+            since_publish: 0,
+            last_publish: Instant::now(),
         }
     }
 
@@ -385,6 +395,15 @@ impl ScanSink for ControllerSink<'_, '_> {
             // QA-17 rule applied during the scan, not only at the end —
             // the owner watched it climb into TB mid-scan).
             self.ctrl.bytes = self.ctrl.bytes.saturating_add(size).min(self.ctrl.capacity);
+        }
+        // Session 8 — progressive results: every 2048 materialized
+        // nodes (>= 350 ms apart) the observer sees the tree so the
+        // results page fills WHILE the scan runs.
+        self.ctrl.since_publish = self.ctrl.since_publish.saturating_add(1);
+        if self.ctrl.since_publish >= 2048 && self.ctrl.last_publish.elapsed().as_millis() >= 350 {
+            self.ctrl.since_publish = 0;
+            self.ctrl.last_publish = Instant::now();
+            self.obs_slot.on_tree_update(self.tree);
         }
     }
 

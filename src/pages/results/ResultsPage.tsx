@@ -187,7 +187,7 @@ export function ResultsPage() {
                   {progress.searchingLabel}
                 </span>
                 <span className="dw-scan-strip-meta dw-num">
-                  {formatBytes((progress.stats.bytesFound / Math.max(1, progress.percent)) * 100)} estimated · remaining {Math.max(1, Math.round(progress.remainingSec))}s
+                  {formatBytes(progress.stats.bytesFound)} found · {Math.max(1, Math.round(progress.remainingSec))}s remaining
                 </span>
               </div>
             </motion.div>

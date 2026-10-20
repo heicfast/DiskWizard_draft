@@ -11,6 +11,10 @@ interface DevicesState {
   inventory: DeviceInventory | null;
   sessions: RecoverySession[];
   smart: Record<string, SmartReport>;
+  /** Session 8: per-device SMART failure reasons — the dashboard
+   * shows an honest "unavailable + why" card instead of silently
+   * hiding (the owner's "switch disk → rescue tools only" symptom). */
+  smartErrors: Record<string, string>;
   refreshing: boolean;
   connecting: boolean;
   load: () => Promise<void>;
@@ -23,6 +27,7 @@ export const useDevicesStore = create<DevicesState>((set, get) => ({
   inventory: null,
   sessions: [],
   smart: {},
+  smartErrors: {},
   refreshing: false,
   connecting: false,
 
@@ -62,15 +67,27 @@ export const useDevicesStore = create<DevicesState>((set, get) => ({
   },
 
   loadSmart: async (deviceId) => {
+    // In-flight dedup: never stack concurrent fetches for one disk.
+    if (inFlightSmart.has(deviceId)) return;
+    inFlightSmart.add(deviceId);
     try {
       const report = await invoke<SmartReport>("smart_report", { deviceId });
-      set({ smart: { ...get().smart, [deviceId]: report } });
-    } catch {
-      // SMART unavailable for this device — leave absent; the UI
-      // shows the unavailable state honestly (no fallback guessing).
+      const { [deviceId]: _err, ...restErrors } = get().smartErrors;
+      void _err;
+      set({ smart: { ...get().smart, [deviceId]: report }, smartErrors: restErrors });
+    } catch (e) {
+      // SMART unavailable for this device — record the REASON so the
+      // UI can say why (transport unsupported, permissions, timing),
+      // never a silent hide.
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ smartErrors: { ...get().smartErrors, [deviceId]: msg } });
+    } finally {
+      inFlightSmart.delete(deviceId);
     }
   },
 }));
+
+const inFlightSmart = new Set<string>();
 
 let attached = false;
 /** Subscribe to device-list invalidations (connect/disconnect/lost). */

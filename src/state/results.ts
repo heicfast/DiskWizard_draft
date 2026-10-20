@@ -142,8 +142,31 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   load: async (generation) => {
     set({ loading: true });
     try {
-      const snap = await invoke<ScanResultsSnapshot>("get_scan_results", { generation });
-      set({ snapshot: snap ?? null, loading: false });
+      // The delta protocol (session 8): ask for everything appended
+      // after what we already hold for THIS generation; the backend
+      // echoes `since` — zero/undefined (the dev mock) means a full
+      // snapshot, anything else is an append batch. Dense arena ids
+      // make appends stable, so accumulation is exact.
+      const current = get().snapshot;
+      const since =
+        current && current.generation === generation ? current.nodes.length : 0;
+      const snap = await invoke<ScanResultsSnapshot>("get_scan_results", {
+        generation,
+        since,
+      });
+      if (!snap) {
+        set({ loading: false });
+        return;
+      }
+      const echoedSince = (snap as { since?: number }).since ?? 0;
+      if (echoedSince === 0 || !current || current.generation !== generation) {
+        set({ snapshot: snap, loading: false });
+      } else {
+        set({
+          snapshot: { ...snap, nodes: [...current.nodes, ...snap.nodes] },
+          loading: false,
+        });
+      }
     } catch {
       set({ loading: false });
     }

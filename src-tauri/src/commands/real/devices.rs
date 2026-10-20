@@ -10,10 +10,10 @@ use super::AppState;
 /* ── Devices & health (SMART = free tier — never gated) ─────────── */
 
 #[tauri::command]
-pub fn list_devices(s: State<'_, AppState>) -> Value {
+pub async fn list_devices() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
     #[cfg(windows)]
     {
-        let _ = &s;
         let inv = dw_win::devices::enumerate_inventory();
         let to_json = |d: &dw_win::devices::DeviceRow| {
             json!({
@@ -33,9 +33,10 @@ pub fn list_devices(s: State<'_, AppState>) -> Value {
     }
     #[cfg(not(windows))]
     {
-        let _ = &s;
         json!({ "localDisks": [], "externalDevices": [], "diskImages": [] })
     }
+    })
+    .map_err(|e| format!("THREAD_POOL. {e}"))
 }
 
 #[tauri::command]
@@ -54,7 +55,8 @@ pub async fn connect_demo_device() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn smart_report(device_id: String) -> Result<Value, String> {
+pub async fn smart_report(device_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     #[cfg(windows)]
     {
         // Device ids: diskN-partM / diskN-lostL / vol-X / usb-X.
