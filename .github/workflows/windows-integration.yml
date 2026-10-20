@@ -90,7 +90,7 @@ jobs:
       # REAL host disks — the ATA/NVMe transports assert their TYPED
       # outcomes, not data availability on virtual hardware).
       - name: Windows-API surface tests (per-call verification)
-        run: cargo test -p dw-win --test win_api_surface --nocapture
+        run: cargo test -p dw-win --test win_api_surface -- --nocapture
         working-directory: src-tauri
         env:
           RUST_BACKTRACE: "1"

@@ -405,9 +405,15 @@ jobs:
           # TRUTH GATE 1b (origin honesty): the KEEP group surfaces as
           # EXISTING (they were never deleted) — the deleted/existing
           # distinction the owner found missing.
-          $keepRels = @($manifest.keep | ForEach-Object { $_.rel })
+          # Node paths are `root\dir\...\file` — match the manifest's
+          # volume-relative path by suffix (the root name differs; the
+          # node's path is hoisted so the inner pipeline's $_ rebinding
+          # can't shadow it).
           $existingHits = @($results.nodes | Where-Object {
-            -not $_.isDir -and $_.origin -eq "existing" -and $keepRels -contains $_.path
+            $p = $_.path
+            -not $_.isDir -and $_.origin -eq "existing" -and (
+              $manifest.keep | Where-Object { $p.EndsWith($_.rel) }
+            )
           })
           Write-Host ("Origin gate: {0}/{1} keep-group files marked existing" -f $existingHits.Count, $keepRels.Count)
           if ($existingHits.Count -lt [Math]::Floor($keepRels.Count * 0.85)) {
@@ -428,7 +434,7 @@ jobs:
           # growth on a 2000-file population).
           Write-Host ("Perf: {0:N1} MiB/s  peak_ws={1:N0} MB  phases: {2}" -f
             $results.throughputMbps, ($results.peakWorkingSet / 1MB),
-            (($results.phaseTimings | ForEach-Object { "$($_.0)=$([math]::Round($_.1,1))s" }) -join " "))
+            (($results.phaseTimings | ForEach-Object { "$($_[0])=$([math]::Round($_[1],1))s" }) -join " "))
           if ($results.peakWorkingSet -gt 768MB) {
             throw "MEMORY_BLOWN: peak working set $([math]::Round($results.peakWorkingSet / 1MB)) MB > 768 MB"
           }

@@ -57,9 +57,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $vhd = "$env:RUNNER_TEMP\bench-small.vhd"
           $script = @(
-            'create vdisk file="' + $vhd + '" maximum=512 type=fixed',
-            'attach vdisk', 'create partition primary',
-            'format fs=ntfs label=BENCHS quick', 'assign letter=S'
+            'create vdisk file="' + $vhd + '" maximum=512 type=fixed'
+            'attach vdisk'
+            'create partition primary'
+            'format fs=ntfs label=BENCHS quick'
+            'assign letter=S'
           ) -join "`r`n"
           Set-Content -Path "$env:RUNNER_TEMP\dps.txt" -Value $script -Encoding ascii
           diskpart /s "$env:RUNNER_TEMP\dps.txt" | Out-Host
@@ -92,9 +94,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $vhd = "$env:RUNNER_TEMP\bench-large.vhd"
           $script = @(
-            'create vdisk file="' + $vhd + '" maximum=2048 type=expandable',
-            'attach vdisk', 'create partition primary',
-            'format fs=ntfs label=BENCHL quick', 'assign letter=L'
+            'create vdisk file="' + $vhd + '" maximum=2048 type=expandable'
+            'attach vdisk'
+            'create partition primary'
+            'format fs=ntfs label=BENCHL quick'
+            'assign letter=L'
           ) -join "`r`n"
           Set-Content -Path "$env:RUNNER_TEMP\dpl.txt" -Value $script -Encoding ascii
           diskpart /s "$env:RUNNER_TEMP\dpl.txt" | Out-Host
@@ -161,7 +165,10 @@ jobs:
         shell: pwsh
         run: |
           foreach ($v in @("bench-small.vhd", "bench-large.vhd")) {
-            $script = @('select vdisk file="' + "$env:RUNNER_TEMP\$v" + '"', 'detach vdisk') -join "`r`n"
+            $script = @(
+              'select vdisk file="' + "$env:RUNNER_TEMP\$v" + '"'
+              'detach vdisk'
+            ) -join "`r`n"
             Set-Content -Path "$env:RUNNER_TEMP\dp-clean.txt" -Value $script -Encoding ascii
             diskpart /s "$env:RUNNER_TEMP\dp-clean.txt" | Out-Null
           }
