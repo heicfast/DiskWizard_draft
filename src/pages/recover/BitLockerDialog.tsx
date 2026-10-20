@@ -46,7 +46,14 @@ export function BitLockerDialog({ device, onClose }: { device: StorageDevice | n
     // The DRWService FVE pipe round-trip, simulated at demo timescale.
     void (async () => {
       try {
-        await invoke("unlock_bitlocker", { deviceId: device.id, mode, value });
+        // The core command's contract (CORE-INTERFACE-GAPS #4):
+        // password / recoveryKey as optional strings — never a mode
+        // discriminator the backend would have to decode.
+        await invoke("unlock_bitlocker", {
+          deviceId: device.id,
+          password: mode === "password" ? value : null,
+          recoveryKey: mode === "key" ? value : null,
+        });
         setBusy(false);
         showToast(`${device.name} unlocked — BitLocker volume mounted`, "shield");
         onClose();
