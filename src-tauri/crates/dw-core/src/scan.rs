@@ -711,6 +711,178 @@ mod tests {
         }
     }
 
+    // ── Session 8: the NTFS end-to-end tree fixture (the coverage gap
+    // that let the VHD integration failure escape) ──────────────────
+
+    /// Build one MFT record: "FILE" magic + a $FILE_NAME (parent ref
+    /// + UTF-16 name) and, for files, a resident $DATA.
+    fn ntfs_record(rec_no: u64, parent: u64, name: &str, is_dir: bool, data: &[u8]) -> Vec<u8> {
+        let mut r = vec![0u8; 512];
+        r[..4].copy_from_slice(b"FILE");
+        r[0x04..0x06].copy_from_slice(&48u16.to_le_bytes()); // usa_off
+        r[0x06..0x08].copy_from_slice(&1u16.to_le_bytes()); // usa_count (USN only)
+        r[0x14..0x16].copy_from_slice(&48u16.to_le_bytes()); // attrs_off
+        let flags: u16 = if is_dir { 0x03 } else { 0x01 }; // in-use + dir
+        r[0x16..0x18].copy_from_slice(&flags.to_le_bytes());
+        r[0x18..0x1C].copy_from_slice(&512u32.to_le_bytes()); // used
+        r[0x20..0x28].copy_from_slice(&0u64.to_le_bytes()); // base ref
+
+        let name_u16: Vec<u16> = name.encode_utf16().collect();
+        // $FILE_NAME (0x30), resident — the CONTENT begins at
+        // attr+0x18: parent ref (u64), times, sizes, flags, then
+        // name_len (+0x40 in-content), namespace (+0x41), UTF-16 name.
+        let content = 0x18usize;
+        let fn_len = content + 0x42 + name_u16.len() * 2;
+        let mut a = vec![0u8; fn_len];
+        a[0x00..0x04].copy_from_slice(&0x30u32.to_le_bytes());
+        a[0x04..0x08].copy_from_slice(&(fn_len as u32).to_le_bytes());
+        a[0x08] = 0; // resident
+        a[0x10..0x14].copy_from_slice(&((fn_len - content) as u32).to_le_bytes());
+        a[0x14..0x16].copy_from_slice(&(content as u16).to_le_bytes());
+        a[content..content + 8].copy_from_slice(&parent.to_le_bytes());
+        a[content + 0x40] = name_u16.len() as u8;
+        a[content + 0x41] = 2; // Win32 namespace
+        for (i, u) in name_u16.iter().enumerate() {
+            a[content + 0x42 + i * 2..content + 0x44 + i * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        r[48..48 + fn_len].copy_from_slice(&a);
+
+        let mut off = 48 + fn_len;
+        if !is_dir && !data.is_empty() {
+            // $DATA (0x80), resident inline (content at attr+0x18).
+            let content = 0x18usize;
+            let d_len = content + data.len();
+            let mut d = vec![0u8; d_len];
+            d[0x00..0x04].copy_from_slice(&0x80u32.to_le_bytes());
+            let total = u32::try_from(d_len).unwrap_or(u32::MAX).to_le_bytes();
+            d[0x04..0x08].copy_from_slice(&total);
+            d[0x08] = 0; // resident
+            d[0x10..0x14].copy_from_slice(&(data.len() as u32).to_le_bytes());
+            d[0x14..0x16].copy_from_slice(&(content as u16).to_le_bytes());
+            d[content..content + data.len()].copy_from_slice(data);
+            r[off..off + d_len].copy_from_slice(&d);
+            off += d_len;
+        }
+        // End marker.
+        r[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let _ = rec_no;
+        r
+    }
+
+    /// A minimal NTFS volume: boot + MFT (records 0-8: $MFT, root
+    /// ".", Docs dir, present.txt at root, note.txt inside Docs).
+    fn ntfs_volume() -> RamDevice {
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let mut boot = vec![0u8; 512];
+        boot[..3].copy_from_slice(b"\xEB\x52\x90");
+        boot[3..11].copy_from_slice(b"NTFS    ");
+        boot[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        boot[0x0D] = 1; // 1 sector/cluster
+        boot[0x28..0x2C].copy_from_slice(&4096u32.to_le_bytes());
+        boot[0x30..0x38].copy_from_slice(&16u64.to_le_bytes()); // MFT @ cluster 16
+        boot[0x40] = 0x01; // 1 cluster per record
+        boot[510..512].copy_from_slice(&[0x55, 0xAA]);
+        ram.data[..512].copy_from_slice(&boot);
+
+        let mft_off = 16 * 512;
+        // Record 0: $MFT with a $DATA runlist covering clusters 16..24.
+        let rec0 = {
+            let mut r = vec![0u8; 512];
+            r[..4].copy_from_slice(b"FILE");
+            r[0x04..0x06].copy_from_slice(&48u16.to_le_bytes());
+            r[0x06..0x08].copy_from_slice(&1u16.to_le_bytes());
+            r[0x14..0x16].copy_from_slice(&48u16.to_le_bytes());
+            r[0x16..0x18].copy_from_slice(&0x01u16.to_le_bytes());
+            r[0x18..0x1C].copy_from_slice(&512u32.to_le_bytes());
+            // $DATA non-resident: runlist at 0x40, one run (8 clusters @ 16).
+            let mut d = [0u8; 0x48];
+            d[0x00..0x04].copy_from_slice(&0x80u32.to_le_bytes());
+            d[0x04..0x08].copy_from_slice(&0x48u32.to_le_bytes());
+            d[0x08] = 1; // non-resident
+            d[0x20..0x22].copy_from_slice(&0x40u16.to_le_bytes()); // run_off
+            d[0x30..0x38].copy_from_slice(&8192u64.to_le_bytes()); // real size (16 × 512)
+            d[0x40] = 0x11; // len_size 1, off_size 1
+            d[0x41] = 16; // 16 clusters (records 0-15 addressable)
+            d[0x42] = 16; // LCN 16
+            r[48..48 + 0x48].copy_from_slice(&d);
+            r[48 + 0x48..48 + 0x48 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+            r
+        };
+        ram.data[mft_off..mft_off + 512].copy_from_slice(&rec0);
+
+        let present_data: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        // (record number, parent record, name, dir, data) — written at
+        // the record's TRUE MFT slot (slot 4 stays empty: $AttrDef).
+        let records: &[(u64, u64, &str, bool, &[u8])] = &[
+            (1, 5, "$MFTMirr", true, &[]),
+            (2, 5, "$LogFile", true, &[]),
+            (3, 5, "$Volume", true, &[]),
+            (5, 5, ".", true, &[]), // the root
+            (6, 5, "Docs", true, &[]),
+            (7, 5, "present.txt", false, &present_data),
+            (8, 6, "note.txt", false, b"the note"),
+        ];
+        for &(rec_no, parent, name, is_dir, data) in records {
+            let rec = ntfs_record(rec_no, parent, name, is_dir, data);
+            let at = mft_off + rec_no as usize * 512;
+            ram.data[at..at + 512].copy_from_slice(&rec);
+        }
+        ram
+    }
+
+    #[test]
+    fn ntfs_tree_resolves_structure_end_to_end() {
+        let ram = ntfs_volume();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let (tree, report) = run_scan(dev, "Test (V:)", &mut NoObserver).expect("scan");
+        assert_eq!(report.fs, FsKind::Ntfs);
+
+        let nodes = tree.nodes();
+        let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
+        // Root-level file: nested at the tree root, NEVER under a
+        // literal '_' dir, 'File Path Lost', or an @mft path.
+        let present = nodes
+            .iter()
+            .find(|n| n.name == "present.txt")
+            .unwrap_or_else(|| {
+                panic!(
+                    "present.txt in: {:?}",
+                    nodes.iter().map(show).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            present.path, "Test (V:)\\present.txt",
+            "the root-level file sits at the volume root (got {})",
+            present.path
+        );
+        // Nested file: inside its resolved dir.
+        let note = nodes
+            .iter()
+            .find(|n| n.name == "note.txt")
+            .expect("note.txt");
+        assert_eq!(note.path, "Test (V:)\\Docs\\note.txt", "got {}", note.path);
+        // The root record NEVER materializes as a dir node.
+        assert!(
+            !nodes.iter().any(|n| n.is_dir && n.name == "."),
+            "no '.' dir node"
+        );
+        assert!(
+            nodes.iter().all(|n| !n.path.contains('@')),
+            "no literal @mft leakage: {:?}",
+            nodes.iter().map(show).collect::<Vec<_>>()
+        );
+        // Recovery queue paths: root-relative, exactly the two files.
+        let ids = [present.id, note.id];
+        let queue = crate::recover::build_queue(nodes, &ids);
+        let mut paths: Vec<String> = queue.iter().map(|i| i.dest_path.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["Docs/note.txt".to_string(), "present.txt".to_string()],
+            "the export queue lands files at their true relative paths"
+        );
+    }
+
     // ── QA-6: the ~65% essential-mode reduction, end to end ───────
 
     /// A small valid BMP whose length rides in the HEADER (u32 at

@@ -251,16 +251,17 @@ impl TreeBuilder {
     }
 
     fn add_directory(&mut self, e: &FoundEntry) {
-        let name = sanitize_name(&e.name);
-        // The NTFS root record: the volume root IS the partition base —
-        // register the mapping, never a "." dir.
-        if name == "." {
+        // The NTFS root record: check the RAW name — sanitize_name
+        // strips the trailing dot and turns "." into "_" (the phantom
+        // '_' dir that swallowed every root-level file on the VHD).
+        if e.name == "." {
             if let Some(rec) = e.record_id {
                 let base = self.ensure_partition(e.partition.as_deref());
                 self.mft_dirs.entry(rec).or_insert(base);
             }
             return;
         }
+        let name = sanitize_name(&e.name);
         match &e.parent_hint {
             // NTFS parent-ref: resolve NOW when the parent dir already
             // materialized; otherwise defer to pending_dirs (pass 2).
