@@ -345,3 +345,70 @@ fn iocp_batch_matches_sequential_on_real_disk() {
         );
     }
 }
+
+/// One process-memory sample: the current working set (bytes).
+fn working_set_now() -> u64 {
+    use windows::Win32::System::ProcessStatus::GetProcessMemoryInfo;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut pmc = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS::default();
+    #[allow(clippy::cast_possible_truncation)] // struct size, bounded
+    let cb = std::mem::size_of::<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS>()
+        as u32;
+    // SAFETY: pseudo-handle + the documented output struct.
+    if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), std::ptr::from_mut(&mut pmc), cb) }
+        .is_err()
+    {
+        return 0;
+    }
+    pmc.WorkingSetSize as u64
+}
+
+/// The memory-stability soak (the owner's "no heap or memory leaks,
+/// crash, stuck" gate): THREE full scan pipelines over the same VHD
+/// in ONE process — the first pass warms every cache/allocator the
+/// engine owns, and the third's working set must sit within a bounded
+/// band of the second's. A leak class (per-window allocations that
+/// never return, node arenas that grow per scan) shows up as a
+/// monotone climb across iterations.
+#[test]
+#[ignore = "requires the DWTEST VHD attached (windows-integration.yml)"]
+fn memory_stability_three_scans() {
+    let _vhd = lock_vhd();
+    let Some(letter) = find_test_volume() else {
+        panic!("DWTEST volume not found — attach the VHD first (see the workflow)");
+    };
+    let mut samples = Vec::new();
+    for round in 0..3 {
+        let dev: Arc<dyn BlockDevice> = Arc::new(
+            dw_win::blockdev::RawHandleDevice::open_volume(letter).expect("open the test volume"),
+        );
+        let mut obs = Quiet;
+        let (tree, report) =
+            run_scan(Arc::clone(&dev), &format!("Soak {round}"), &mut obs).expect("scan");
+        eprintln!(
+            "soak round {round}: {} files / {} bytes / {} s",
+            report.files_found, report.bytes_found, report.duration_sec
+        );
+        assert!(report.files_found > 0, "each round finds the volume");
+        // Drop the tree + device, then sample.
+        let files = tree.totals().0;
+        assert!(files > 0);
+        drop(tree);
+        drop(dev);
+        samples.push(working_set_now());
+        eprintln!(
+            "soak round {round}: working set {} MB",
+            samples[round] / (1024 * 1024)
+        );
+    }
+    let second = samples[1];
+    let third = samples[2];
+    // The band: the third scan's RSS may exceed the second's by at
+    // most 48 MB (allocator high-water artifacts) — a real leak shows
+    // MBs-to-GBs of climb per iteration.
+    let delta = third.saturating_sub(second);
+    assert!(
+        delta < 48 * 1024 * 1024,
+        "LEAK_CLASS: working set climbed {delta} bytes between identical scans ({second} → {third})"
+    );
+}

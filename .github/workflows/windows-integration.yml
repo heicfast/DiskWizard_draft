@@ -95,6 +95,15 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
 
+      # Session 9: the memory-stability soak — three full scan
+      # pipelines in one process; the working-set band between
+      # rounds 2 and 3 gates the leak class.
+      - name: Memory-stability soak (3 scans, 1 process)
+        run: cargo test -p dw-win --test integration -- --ignored --nocapture memory_stability
+        working-directory: src-tauri
+        env:
+          RUST_BACKTRACE: "1"
+
       - name: Detach + clean the VHD
         if: always()
         shell: pwsh

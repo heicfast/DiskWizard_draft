@@ -829,3 +829,48 @@ Owner symptoms → root causes (all verified in code before fixing):
 Gates: fmt clean; clippy -D warnings clean; 159 dw-core + 27
 dw-license tests; 74 web tests; tsc clean. The app crate compiles on
 CI (local box lacks GTK — documented).
+
+### Session 9 batch 3 — the runner-caught defect cycle
+
+The batch passthrough ENGAGED the IOCP path in real scans for the
+first time — and it immediately caught a sleeping race (the F14
+lesson repeating: a surface that never ran hides its defects):
+
+**The IOCP stale-completion panic** ("completion for an unknown
+OVERLAPPED" — vhd_end_to_end + core-e2e runner evidence): once the
+device handle is port-associated, EVERY overlapped read queues a
+packet — including the single positioned reads validators/recovery
+issue between batches; the next batch's harvest popped the stale
+stack OVERLAPPED and died. Fixed at both ends: single reads set the
+documented hEvent low bit (event-signaled, NO port packet — the port
+stays batch-only), and the harvest DROPS unknown packets instead of
+panicking.
+
+New evidence surfaces this cycle:
+- `win_api_surface.rs` (dw-win integration): every Win32 call the
+  core makes, one independent assertion per call against the real
+  host — opens, geometry, raw reads, the batch≡sequential identity,
+  the ATA/NVMe transports' TYPED outcomes, the bus table, the memory
+  counters, the thread-priority raise.
+- `memory_stability_three_scans`: the leak-class gate — three full
+  pipelines in one process; round 3's working set must sit within
+  48 MB of round 2's.
+- `engine-benchmark.yml`: multi-volume speed evidence (512 MB dense /
+  2 GB sparse VHDs) with environment recording, per-phase timings,
+  throughput + memory gates, and the comparison record against the
+  og's DOCUMENTED numbers (quick ≈21 s / 129 GB; ≈170 MB/s aggregate).
+- core-e2e upgraded: 2200+ real-content files, the five-style
+  deletion matrix (keep/permanent/recycle-bin/same-name-overwrite/
+  cluster-reuse churn), origin-honesty gates (existing vs deleted),
+  perf/memory gates, hash-fallback verification for recycle renames.
+- The lost-partition sweep WIRED into scan_units — a deleted
+  partition's surviving volume is discovered and reconstructed
+  structured (regression test included), not carve-only.
+- dw-cli: phase timings, MiB/s, peak working set, environment header
+  (cores/RAM/geometry) in every scan log + JSON.
+
+Local gates upgraded: the msvc cross-check now covers dw-win +
+dw-cli + their tests locally (the app crate still rides CI — aws-lc-sys
+blocks the cross-check; a ring-provider swap is queued as follow-up).
+TypeScript 7; Cargo.lock refreshed; `docs/dependencies.md` update
+pending with the next docs pass.
