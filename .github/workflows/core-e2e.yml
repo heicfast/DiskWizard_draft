@@ -292,7 +292,7 @@ jobs:
             $script:groups["keep"].Count, $script:groups["permanent"].Count,
             $script:groups["recycle"].Count, $script:groups["overwrite"].Count, $script:groups["churn"].Count)
 
-      - name: Stage + apply the deletion matrix (5 real-world styles)
+      - name: Stage + apply the deletion matrix (5 lane-ordered styles)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -301,44 +301,45 @@ jobs:
           Write-Host "Staged $count files on V:\"
           Write-VolumeCache -DriveLetter V
           Start-Sleep -Seconds 1
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          Add-Type -AssemblyName System.Drawing
 
-          # Style 1 — PERMANENT (Shift+Delete semantics): Remove-Item
-          # bypasses the recycle bin; NTFS marks the MFT records free.
-          Remove-Item -Recurse -Force "V:\seed\Projects", "V:\seed\Data", "V:\seed\Users\Videos", "V:\seed\Formats"
-          Write-Host "Permanent-deleted Projects/ Data/ Videos/ Formats/"
+          # LANE ORDER (runner-proven physics): NTFS allocates
+          # lowest-free-first, so each style's replacement writes must
+          # land in ITS OWN freed space — delete → write → next lane.
+          # The first run deleted permanent FIRST and the overwrite +
+          # churn writes consumed its clusters (267/1084 — the engine
+          # honestly returned zeros for physically-gone data).
 
-          # Style 2 — RECYCLE BIN (the Explorer delete path: rename to
-          # $R/$I pairs, then the bin empties — two-name records).
-          Add-Type -AssemblyName Microsoft.VisualBasic
-          Get-ChildItem -Recurse -File "V:\seed\Media" | ForEach-Object {
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($_.FullName, "OnlyErrorDialogs", "SendToRecycleBin")
-          }
-          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-          Write-Host "Recycle-deleted + emptied Media/"
-
-          # Style 3 — SAME-NAME OVERWRITE (delete, then new content
-          # under the same path — MFT record reuse + Versions case).
+          # Lane 1 — SAME-NAME OVERWRITE (delete, then new content
+          # under the same path; the NEW content is what recovery must
+          # return — hashed into its own manifest at write time).
           $even = Get-ChildItem -Recurse -File "V:\seed\Users\Pictures" | Where-Object { $_.BaseName -match '(\d+)$' -and ([int]$Matches[1] % 2 -eq 0) }
           $even | ForEach-Object { Remove-Item -Force $_.FullName }
           $rnd2 = [System.Random]::new(99)
+          $newManifest = @()
           foreach ($f in $even) {
             $bmp = [System.Drawing.Bitmap]::new(200, 150)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.Clear([System.Drawing.Color]::FromArgb($rnd2.Next(256), 10, 10)); $g.Dispose()
             $bmp.Save($f.FullName, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose()
+            $newManifest += [pscustomobject]@{
+              rel = $f.FullName.Substring(8) # V:\seed → rel
+              sha256 = (Get-FileHash -Algorithm SHA256 -Path $f.FullName).Hash
+              size = (Get-Item $f.FullName).Length
+            }
           }
-          Write-Host "Overwrote $($even.Count) pictures with new content (same names)"
+          $m = Get-Content "$evidence\manifest.json" -Raw | ConvertFrom-Json
+          $m | Add-Member -NotePropertyName overwriteNew -NotePropertyValue $newManifest -Force
+          $m | ConvertTo-Json -Depth 4 | Set-Content "$evidence\manifest.json"
+          Write-Host "Overwrote $($even.Count) pictures with new content (same names, hashed)"
 
-          # Style 4 — CLUSTER-REUSE CHURN (delete the archives, then
-          # copy fresh data so the freed clusters get re-allocated —
-          # the QA-4 destroy/partial paths under real allocation).
+          # Lane 2 — CLUSTER-REUSE CHURN (delete the archives, then
+          # fresh data reuses the freed clusters — the QA-4 destroy/
+          # partial paths under real allocation).
           Remove-Item -Recurse -Force "V:\seed\Archives"
           $churnDir = "V:\churn"
           New-Item -ItemType Directory -Force -Path $churnDir | Out-Null
-          # 8 MB — proportional to the freed archives (the first run's
-          # 64 MB re-used most of the PERMANENT group's freed clusters
-          # too: honest physics, but this scenario is "a few new files
-          # after deleting", not "filled the disk").
           for ($i = 0; $i -lt 8; $i++) {
             $bytes = New-Object byte[] (1MB)
             for ($j = 0; $j -lt $bytes.Length; $j += 4096) { $bytes[$j] = $i }
@@ -346,7 +347,22 @@ jobs:
           }
           Write-Host "Churn-deleted Archives/ + wrote 8 MB of replacement data"
 
-          # Style 5 — KEEP: Users\Documents\Work + the odd-numbered
+          # Lane 3 — RECYCLE BIN (the Explorer delete path: rename to
+          # $R/$I pairs, then the bin empties — metadata-only after,
+          # the $R names carry the intact bytes).
+          Add-Type -AssemblyName Microsoft.VisualBasic
+          Get-ChildItem -Recurse -File "V:\seed\Media" | ForEach-Object {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($_.FullName, "OnlyErrorDialogs", "SendToRecycleBin")
+          }
+          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+          Write-Host "Recycle-deleted + emptied Media/"
+
+          # Lane 4 — PERMANENT, LAST (Shift+Delete semantics; nothing
+          # writes after it — the ≥75% byte-identity gate is honest).
+          Remove-Item -Recurse -Force "V:\seed\Projects", "V:\seed\Data", "V:\seed\Users\Videos", "V:\seed\Formats"
+          Write-Host "Permanent-deleted Projects/ Data/ Videos/ Formats/ (last)"
+
+          # Lane 5 — KEEP: Users\Documents\Work + the odd-numbered
           # pictures survive as EXISTING files (the origin gate).
 
           Write-VolumeCache -DriveLetter V
@@ -419,9 +435,10 @@ jobs:
               $manifest.keep | Where-Object { $p.EndsWith($_.rel) }
             )
           })
-          Write-Host ("Origin gate: {0}/{1} keep-group files marked existing" -f $existingHits.Count, $keepRels.Count)
-          if ($existingHits.Count -lt [Math]::Floor($keepRels.Count * 0.85)) {
-            throw "ORIGIN_LIES: only $($existingHits.Count)/$($keepRels.Count) never-deleted files marked existing"
+          $keepCount = @($manifest.keep).Count
+          Write-Host ("Origin gate: {0}/{1} keep-group files marked existing" -f $existingHits.Count, $keepCount)
+          if ($existingHits.Count -lt [Math]::Floor($keepCount * 0.85)) {
+            throw "ORIGIN_LIES: only $($existingHits.Count)/$keepCount never-deleted files marked existing"
           }
           # TRUTH GATE 1c (deleted found): the PERMANENT group surfaces
           # with a deleted-class origin.
@@ -496,6 +513,11 @@ jobs:
             $report[$group] = [pscustomobject]@{ identical = $ok; missed = $missed; different = $different; total = $n }
             Write-Host ("Byte-verify [{0}]: {1} identical / {2} missed / {3} different (of {4})" -f $group, $ok, $missed, $different, $n)
           }
+          # The overwrite group verifies against its NEW-content
+          # manifest (the current on-disk bytes are the truth a
+          # recovery tool must return — the originals are gone BY
+          # DESIGN under the same names).
+          $manifest | Add-Member -NotePropertyName overwrite -NotePropertyValue $manifest.overwriteNew -Force
           foreach ($group in @("keep","permanent","recycle","overwrite")) {
             $n = $manifest.$group.Count
             if ($report[$group].identical -lt [Math]::Floor($n * 0.75)) {
