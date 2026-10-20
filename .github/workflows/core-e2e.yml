@@ -50,8 +50,6 @@ jobs:
     name: Real recovery (VHD seed → delete → scan → recover → verify)
     runs-on: windows-latest
     timeout-minutes: 50
-    env:
-      EVIDENCE: ${{ runner.temp }}\dwevidence
     steps:
       - uses: actions/checkout@v4
 
@@ -84,7 +82,8 @@ jobs:
           diskpart /s "$env:RUNNER_TEMP\dp.txt" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
           Start-Sleep -Seconds 3
-          New-Item -ItemType Directory -Force -Path $env:EVIDENCE | Out-Null
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           Write-Host "VHD attached at V: (512 MB, NTFS)"
 
       - name: Seed 100+ files across every format family
@@ -235,7 +234,7 @@ jobs:
             Save-Hash $p
           }
 
-          $script:manifest | ConvertTo-Json | Set-Content -Path "$env:EVIDENCE\manifest.json"
+          $script:manifest | ConvertTo-Json | Set-Content -Path "$evidence\manifest.json"
           Write-Host ("Seeded {0} files ({1} bytes total) + manifest" -f $script:manifest.Count, (($script:manifest | Measure-Object -Property size -Sum).Sum))
 
       - name: Stage seeds onto the volume, then delete completely
@@ -254,28 +253,34 @@ jobs:
           Write-Host "Deleted V:\seed completely (recycle bin emptied)"
 
       - name: dw-cli devices (enumeration smoke)
-        run: cargo run --release -p dw-cli -- devices --json > $env:EVIDENCE\devices.json
+        run: |
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          cargo run --release -p dw-cli -- devices --json > $evidence\devices.json
         working-directory: src-tauri
         shell: pwsh
 
       - name: dw-cli smart (disk0 smoke, tolerate virtual disks)
-        run: cargo run --release -p dw-cli -- smart disk0 > $env:EVIDENCE\smart.json
+        run: |
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          cargo run --release -p dw-cli -- smart disk0 > $evidence\smart.json
         working-directory: src-tauri
         shell: pwsh
         continue-on-error: true
 
       - name: dw-cli scan (the production engine, full logs)
-        run: >
-          cargo run --release -p dw-cli -- scan vol-V
-          --out $env:EVIDENCE\results.json --log $env:EVIDENCE\scan.log -v
-          --max-seconds 600
+        run: |
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          cargo run --release -p dw-cli -- scan vol-V --out $evidence\results.json --log $evidence\scan.log -v --max-seconds 600
         working-directory: src-tauri
         shell: pwsh
 
       - name: dw-cli recover (everything found)
-        run: >
-          cargo run --release -p dw-cli -- recover $env:EVIDENCE\results.json
-          --dest C:\dw-recovered --all --log $env:EVIDENCE\recover.log -v
+        run: |
+          $evidence = "$env:RUNNER_TEMP\dwevidence"
+          cargo run --release -p dw-cli -- recover $evidence\results.json --dest C:\dw-recovered --all --log $evidence\recover.log -v
         working-directory: src-tauri
         shell: pwsh
 
@@ -283,8 +288,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $results = Get-Content "$env:EVIDENCE\results.json" -Raw | ConvertFrom-Json
-          $manifest = Get-Content "$env:EVIDENCE\manifest.json" -Raw | ConvertFrom-Json
+          $results = Get-Content "$evidence\results.json" -Raw | ConvertFrom-Json
+          $manifest = Get-Content "$evidence\manifest.json" -Raw | ConvertFrom-Json
           Write-Host ("Scan: {0} files / {1} bytes / {2}s / fs={3} / nodes={4}" -f
             $results.filesFound, $results.bytesFound, $results.durationSec, $results.fs, $results.nodes.Count)
 
@@ -330,7 +335,7 @@ jobs:
             throw "RECOVERY_UNDERPERFORMS: only $ok/$($manifest.Count) byte-identical"
           }
           [pscustomobject]@{ identical = $ok; missed = $missed; different = $different; total = $manifest.Count } |
-            ConvertTo-Json | Set-Content "$env:EVIDENCE\verify.json"
+            ConvertTo-Json | Set-Content "$evidence\verify.json"
           Write-Host "ALL TRUTH GATES PASSED"
 
       - name: Detach + clean the VHD
