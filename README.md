@@ -21,9 +21,8 @@ Rust core + **Tauri 2 (WebView2)** + **React/TypeScript**. No Electron, no brows
 
 - **Cherry-blossom design system** — the Blossom palette (blush cream surfaces, rose ink gradients, white cards) plus Light / Dark / Ember / Tide, all crossfading app-wide via View Transitions. The brand mark's tile background is painted from the live theme gradient — switch theme, the logo follows.
 - **Recover Data** — local disks, external devices, quick actions (Recycle Bin / Desktop / Select Folder / Disk Image) and recent sessions; TRIM, BitLocker and lost-partition states surfaced on the cards.
-- **Scan Results** — the scan runs *inside* the results page: live searching strip, progressive tree fill, pause/stop, category tabs, folders/types tree, virtualized file table with **recoverability indicators** (Excellent / Good / Poor), inline preview panel with the recovery-chances gauge, essential-vs-complete result modes (the ~65% noise reduction), and the full recovery funnel (destination picker with Local/Cloud tabs, enable-file-repair, space gates).
-- **Disk Tools** — S.M.A.R.T. dashboard (free forever — the Monitor-tier analog): per-disk health verdicts, temperature, wear, and the full attribute table; SD Card Rescue, lost-partition guidance, BitLocker unlock and disk imaging as licensed rescue tools.
-- **Cloud Recovery** — iCloud, Google Drive, Dropbox, OneDrive sign-in → scan → recover, with the no-records-kept trust copy.
+- **Scan Results** — the scan runs *inside* the results page: live searching strip, progressive tree fill, pause/stop, category tabs, folders/types tree, virtualized file table with **recoverability indicators** (Excellent / Good / Poor), inline preview panel with the recovery-chances gauge, essential-vs-complete result modes (the ~65% noise reduction), and the full recovery funnel (destination picker, enable-file-repair, space gates).
+- **Disk Tools** — S.M.A.R.T. dashboard (free forever — the Monitor-tier analog): per-disk health verdicts, temperature, wear, and the full attribute table, with an honest per-disk "unavailable + reason" state when a controller exposes no sensors; SD Card Rescue, lost-partition guidance, BitLocker unlock and disk imaging as licensed rescue tools.
 - **Licensing (DiskGenie architecture)** — paid app: every capability except disk health requires activation. Postures (unlicensed / pro / grace / degraded), typed server-error copy, Pro status card, command-layer `ACTIVATION_REQUIRED` gates, `DB-XXXXX-XXXXX-XXXXX-XXXXX` keys.
 - **Elevated + maximized** — the app requests administrator (raw-disk access; `requireAdministrator` manifest) and opens maximized by default.
 
@@ -34,6 +33,20 @@ npm install
 npm run dev            # browser mode — the TS mock backend drives the whole UI
 npm run tauri dev      # desktop mode — the REAL Rust core serves the commands
 ```
+
+### The headless core junction (CI + power users)
+
+```bash
+cargo run -p dw-cli -- selftest                       # fixture → scan → recover → byte-compare
+cargo run -p dw-cli -- devices --json                 # enumeration
+cargo run -p dw-cli -- scan vol-C --out r.json --log s.log -v
+cargo run -p dw-cli -- recover r.json --dest D:\out --all --log rec.log -v
+```
+
+The CLI drives the SAME production engine (dw-core + dw-win) with full
+verbose logs and JSON outputs — the `core-e2e` workflow uses it to
+prove real recovery on Windows runners (VHD → seed 100+ files →
+delete → scan → recover → byte-verify).
 
 Browser mode auto-installs the mock backend (`src/mock`) behind a DEV gate — it never ships in a bundle. The desktop app defaults to the **real engine** (`src-tauri/src/commands/real`); `npm run tauri dev -- --features sim` swaps in the Rust simulation core for tour/screenshot work (release builds never enable it).
 

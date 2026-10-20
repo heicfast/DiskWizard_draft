@@ -661,3 +661,59 @@ run evidence (docs/QA-REGISTER.md §3).
   investigated.
 - This is intentionally not a server activation and must be removed before
   any public distribution or commercial release.
+
+## Session 8 (2026-10-21) — the owner's symptom triage: the engine was lying
+
+Owner symptoms: scan "very very slow", stuck, estimated size climbing
+into TB on a 320 GB disk, results table empty while counters ticked,
+SMART showing for the first disk only, Cloud Recovery to be removed.
+
+Root causes (all verified in code, each fixed + regression-tested):
+
+1. **Carver weak-validation fallbacks** carved up to multi-GiB spans
+   per accidental magic (JPEG FFD8FF = 1 hit / 16 MiB of binary data
+   × 64 MiB fallback = PB-scale logical bytes; WAV/OLE2 fell back to
+   the full 2 GiB limit; PST carved 512 KiB per `!BDN`). The walks
+   themselves crawled through tiny cached reads — the "stuck" scan.
+   FIX: per-signature probe_cap + fallback_cap + MAX_WALK_STEPS +
+   a shared 64 MiB validator budget per window, scratch-buffered
+   Prober, cooperative checkpoints inside walks, research-accurate
+   validators (PST 0x0E/0x17, MP4 brand check, GIF87a/89a, OLE2
+   geometry, WAV/MP3/OGG/SQLite rejects), weak hits grade Poor.
+2. **No progressive results** — the tree landed only at completion.
+   FIX: on_tree_update observer (2048 nodes / 350 ms) publishes
+   Arc snapshots; get_scan_results speaks a delta protocol
+   (since/nodeCount); the frontend accumulates.
+3. **NTFS folder collapse** — @mft refs never resolved; partition
+   prefixes corrupted refs into literal path dirs. FIX: record_id +
+   partition fields, mft_dirs map, pending buffers + fixpoint at
+   unit/phase boundaries, finish() lands leftovers on the lost
+   branch; root record 5 maps to the partition base.
+4. **Live counter clamp** — bytes clamped to device capacity
+   continuously (was end-only); the extrapolated "estimated" line
+   replaced with the honest found-bytes counter.
+5. **SMART** — sync commands ran on the MAIN thread (the prefetch's
+   10 s ATA timeouts froze the window); the NVMe query used the
+   adapter property instead of the device property. FIX: async +
+   spawn_blocking, StorageDeviceProtocolSpecificProperty first, and
+   an honest per-disk "unavailable + reason" card (the dashboard
+   never silently disappears).
+6. **Cloud Recovery removed completely** (owner directive): backend
+   commands, mock data, page, sidebar, destination tab, tour step,
+   types, CSS.
+7. **FAT name mangling** (found by the new selftest): the 8.3
+   formatter lowercased + ~-prefixed LIVE names; now case-preserving
+   with '_' for the deleted 0xE5 marker.
+
+New surfaces:
+- **dw-cli** — the headless core junction: scan (full logs + JSON +
+  .rsf + watchdog), recover (--ids/--origin/--all), devices, smart,
+  selftest (cross-platform fixture → scan → recover → byte-compare).
+- **core-e2e workflow** — Windows runners: VHD → 100+ real files
+  across every format family → permanent delete → CLI scan → recover
+  → four truth gates (population ≥ 75%, bytes within the volume,
+  structure resolved with no @mft leakage, ≥ 60% byte-identical) →
+  30-day evidence artifacts. Plus the ubuntu core-proof job.
+- Dependency bumps: react 19, zustand 5, framer-motion 14, vite 8,
+  vitest 5, tauri 2.12 stack; 155 dw-core + 27 dw-license tests, 74
+  web tests, all green.

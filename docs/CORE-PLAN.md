@@ -38,7 +38,7 @@ features that never enter release builds.
 | Licensing: paid app, DW- keys, Ed25519 entitlements | P0 | M1 |
 | Recoverability indicators (Excellent/Good/Poor) | P0 | M1 |
 | File repair (photo/doc/video) | next priority | see TODO.md |
-| Cloud recovery (OAuth2 drives) | P2 | M3+ |
+| ~~Cloud recovery~~ | removed | session 8 (owner directive) |
 
 **Explicitly excluded for now**: AI features, robo mascot, AI pop-ups
 (owner directive — ignore any such surfaces in the research corpus).
@@ -130,7 +130,7 @@ Every IPC command from `docs/ARCHITECTURE.md` maps to a real engine call:
 | `sdr_diagnose` | partition-table sanity check + guided repair (M2: RawFixer-lite) |
 | `unlock_bitlocker` | dw-win::bitlocker (password / recovery key / FVE auto-unlock) |
 | `start_scan` / `start_folder_scan` / `start_disk_image_scan` | dw-core::scan controller over the resolved BlockDevice |
-| `start_cloud_scan` | M3 (OAuth2 clients); M1 returns typed NOT_AVAILABLE |
+| `start_cloud_scan` | REMOVED (session 8 — owner directive: local recovery only) |
 | `pause/resume/stop_scan` | controller pause token / cancel flag |
 | `get_scan_progress` | controller snapshot (phase machine preserved) |
 | `get_scan_results` | tree snapshot (generation-guarded) |

@@ -30,14 +30,12 @@ between UI and core. The production engine implements exactly these:
 | `start_scan` | `deviceId` → `{generation}` | yes |
 | `start_folder_scan` | `label` → `{generation}` | yes |
 | `start_disk_image_scan` | `imagePath` → `{generation}` | yes |
-| `start_cloud_scan` | `driveId` → `{generation}` | yes |
 | `pause_scan` / `resume_scan` / `stop_scan` | → `{ok}` | no (state ops) |
 | `get_scan_progress` | → `ScanProgress \| null` | no |
 | `get_scan_results` | `generation` → `ScanResultsSnapshot \| null` | no |
 | `list_sessions` / `resume_session` | → sessions / `{generation}` | yes (resume) |
 | `list_recover_destinations` | `sourceDeviceId?` → destinations | no |
 | `start_recovery` | `fileCount, bytes, destinationName, enableRepair` | yes |
-| `list_cloud_drives` / `cloud_sign_in` | → drives / `{ok, account}` | no / no |
 | `license_status` / `activate_license` / `deactivate_license` / `validate_now` | → `LicenseStatus` | no |
 | `license_sim_set` | `pro` → `LicenseStatus` (tour/CI) | no |
 | `get_settings` / `set_settings` | → settings | no |
@@ -101,7 +99,7 @@ mock; the lib/state tests stay.
 
 ```
 Shell (TitleBar, Sidebar, boot: splash → elevation → app)
-Pages: recover | results (scan-in-page) | tools | cloud | settings | help
+Pages: recover | results (scan-in-page) | tools | settings | help
 Stores: devices, scan, results, license, settings, view
 Theme: tokens.css + themes.ts + useTheme (View-Transition crossfade)
 Mock:  src/mock/commands.ts (TS) ─┐
@@ -118,7 +116,7 @@ Key decisions cross-linked from the research:
   check-node grading pass visualized.
 - Essential/Complete results modes = the ~65% noise-reduction
   feature ("users can switch to complete scan results at any time").
-- Destination picker: Local/Cloud tabs, enable-file-repair (ON),
+- Destination picker: local destinations, enable-file-repair (ON),
   source-partition block + insufficient-space gate.
 
 ## 5. Release

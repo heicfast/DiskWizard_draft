@@ -1,5 +1,9 @@
 # UI/UX Gap Register — Core Interface Session (for the parallel UI/UX agents)
 
+> **Session-8 status**: items 1-3 are CLOSED (verified in code); item 4
+> (BitLocker args) and 5 (scan-phase adoption) remain as-is; item 6
+> verified. The register stays for the remaining P1/P2 polish.
+
 > **Source**: the core-interface session's audit of the shipped UI
 > against (a) the frozen IPC contract in `docs/ARCHITECTURE.md`, (b)
 > the research artifacts (UIUX deep-dives, especially
@@ -14,7 +18,7 @@
 
 ## P0 — Contract extensions the real core adds (frontend must adopt)
 
-### 1. `start_recovery` needs to send the selected node IDs
+### 1. `start_recovery` needs to send the selected node IDs — CLOSED (results.ts sends nodeIds + generation)
 - **Today**: `beginRecovery(nodeIds, bytes)` sends only
   `fileCount: nodeIds.length` + `bytes` — the core cannot know WHICH
   files to recover.
@@ -33,7 +37,7 @@
   `generation: Option<u64>, node_ids: Option<Vec<u64>>` (plus the
   legacy fields — backward compatible).
 
-### 2. Real previews via `preview_file`
+### 2. Real previews via `preview_file` — CLOSED (PreviewPanel invokes preview_file with generation+nodeId)
 - **Today**: `PreviewPanel` renders bundled sample photos +
   procedural sakura art (mock realism).
 - **Change** (`src/pages/results/PreviewPanel.tsx`): when
@@ -50,7 +54,7 @@
 - Optional: keep the bundled samples ONLY in browser-dev mode
   (mock backend), never when a real core generation exists.
 
-### 3. Resume-session flow shows the adopted tree
+### 3. Resume-session flow shows the adopted tree — CLOSED (scan store resumeSession → get_scan_results → results page)
 - `resume_session` now loads the real `.rsf` and returns
   `{generation, deviceName}` with the tree already adopted — the UI
   just navigates to results (no scan-in-progress state). Verify the
@@ -76,7 +80,7 @@
   adopt it for instant phase flips (optional — `scan-progress`
   already carries `phase`).
 
-### 6. Smart report device ids
+### 6. Smart report device ids — CLOSED (row ids pass through; per-disk errors surface in the unavailable card)
 - `smart_report(deviceId)` accepts the inventory row's `id`
   (`disk0-part2` etc.). The tools page's per-disk rows already carry
   ids — verify the mapping passes the ROW id (not a synthetic one).
