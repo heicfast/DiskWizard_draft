@@ -15,7 +15,12 @@ rust-version = "1.99"
 # `dw-win` is only wired on Windows targets; the app crate itself stays
 # cross-compilable for core-side CI.
 [workspace]
-members = ["crates/dw-core", "crates/dw-license", "crates/dw-win"]
+members = [
+    "crates/dw-core",
+    "crates/dw-license",
+    "crates/dw-win",
+    "crates/dw-cli",
+]
 resolver = "2"
 
 [lib]

@@ -1,0 +1,32 @@
+[package]
+name = "dw-cli"
+version = "0.1.0"
+description = "DiskWizard headless core junction — the same production engine the app runs, driven from a terminal: enumerate, scan, recover, self-test, with verbose logs and JSON outputs for CI validation."
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+dw-core = { path = "../dw-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+dw-win = { path = "../dw-win" }
+# Volume labels + free-space queries (same windows-rs family as dw-win).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+# Win32 calls carry audited unsafe blocks (SAFETY-commented, same
+# discipline as dw-win); the rest of the crate stays unsafe-free.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"

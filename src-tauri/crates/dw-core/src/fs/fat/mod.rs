@@ -507,22 +507,33 @@ impl ScanEngine for FatEngine {
     }
 }
 
-/// The 8.3 name formatter (with the deleted-first-byte marker).
+/// The 8.3 name formatter — case preserved, spaces trimmed. A
+/// deleted entry's first byte (0xE5) lost the real first character,
+/// so the marker becomes '_' (the honest recovery convention; the old
+/// unconditional `~name` lower-case mangling corrupted LIVE names
+/// too).
 fn short_name(entry: &[u8]) -> String {
-    let base: String = entry[0..8]
+    let deleted_marker = entry[0] == 0xE5;
+    let mut base: String = entry[0..8]
         .iter()
         .take_while(|&&b| b != b' ')
         .map(|&b| b as char)
         .collect();
+    if deleted_marker {
+        // The 0xE5 first byte decodes as 'å' through `as char` —
+        // replace that first CHAR on its UTF-8 boundary.
+        let first_len = base.chars().next().map_or(0, char::len_utf8);
+        base.replace_range(..first_len, "_");
+    }
     let ext: String = entry[8..11]
         .iter()
         .take_while(|&&b| b != b' ')
         .map(|&b| b as char)
         .collect();
     if ext.is_empty() {
-        format!("~{}", base.to_lowercase())
+        base
     } else {
-        format!("~{}.{}", base.to_lowercase(), ext.to_lowercase())
+        format!("{base}.{ext}")
     }
 }
 
@@ -694,7 +705,7 @@ mod tests {
         let readme = sink
             .0
             .iter()
-            .find(|e| e.name == "~readme.txt")
+            .find(|e| e.name == "README.TXT")
             .expect("readme");
         assert_eq!(readme.origin, NodeOrigin::Existing);
         assert_eq!(readme.size, 100);
@@ -703,13 +714,13 @@ mod tests {
         let gone = sink
             .0
             .iter()
-            .find(|e| e.name.starts_with('~') && e.name.contains("one"))
+            .find(|e| e.name.starts_with('_') && e.name.to_lowercase().contains("one"))
             .expect("deleted gone.log");
         assert_eq!(gone.origin, NodeOrigin::Deleted);
         assert_eq!(gone.size, 40);
         assert_eq!(gone.confidence, 80);
         // Directory recursed.
-        assert!(sink.0.iter().any(|e| e.is_dir && e.name == "~docs"));
+        assert!(sink.0.iter().any(|e| e.is_dir && e.name == "DOCS"));
         // LFN reassembled.
         assert!(sink.0.iter().any(|e| e.name == "Report Final.txt"));
     }
@@ -719,7 +730,7 @@ mod tests {
         // Unit-check the short-name formatter.
         let mut e = [0u8; 32];
         e[..11].copy_from_slice(b"ABC     TXT");
-        assert_eq!(short_name(&e), "~abc.txt");
+        assert_eq!(short_name(&e), "ABC.TXT");
     }
 
     #[test]
