@@ -30,13 +30,13 @@ name = "diskwizard_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 dw-core = { path = "crates/dw-core" }
 dw-license = { path = "crates/dw-license" }
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2"
+tauri = { version = "2.12", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
@@ -46,7 +46,7 @@ thiserror = "2"
 dw-win = { path = "crates/dw-win" }
 # Direct Win32 calls in the app command layer (volume labels, free
 # space) — same windows-rs family as dw-win.
-windows = { version = "0.62", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }

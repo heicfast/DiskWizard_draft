@@ -14,7 +14,7 @@ serde_json = "1"
 [target.'cfg(windows)'.dependencies]
 dw-win = { path = "../dw-win" }
 # Volume labels + free-space queries (same windows-rs family as dw-win).
-windows = { version = "0.62", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }

@@ -11,31 +11,35 @@ use super::AppState;
 
 #[tauri::command]
 pub async fn list_devices() -> Result<Value, String> {
+    // Enumeration opens every volume, parses tables and sweeps lost
+    // partitions — heavy blocking IO that must NEVER run on the main
+    // thread (Tauri 2 runs SYNC commands there; the UI froze).
     tauri::async_runtime::spawn_blocking(|| {
-    #[cfg(windows)]
-    {
-        let inv = dw_win::devices::enumerate_inventory();
-        let to_json = |d: &dw_win::devices::DeviceRow| {
+        #[cfg(windows)]
+        {
+            let inv = dw_win::devices::enumerate_inventory();
+            let to_json = |d: &dw_win::devices::DeviceRow| {
+                json!({
+                    "id": d.id, "name": d.name, "letter": d.letter,
+                    "kind": d.kind, "fileSystem": d.file_system,
+                    "used": d.used, "total": d.total,
+                    "health": d.health, "bitLocker": d.bit_locker,
+                    "trim": d.trim, "isSystem": d.is_system,
+                    "diskIndex": d.disk_index,
+                })
+            };
             json!({
-                "id": d.id, "name": d.name, "letter": d.letter,
-                "kind": d.kind, "fileSystem": d.file_system,
-                "used": d.used, "total": d.total,
-                "health": d.health, "bitLocker": d.bit_locker,
-                "trim": d.trim, "isSystem": d.is_system,
-                "diskIndex": d.disk_index,
+                "localDisks": inv.local_disks.iter().map(to_json).collect::<Vec<_>>(),
+                "externalDevices": inv.external_devices.iter().map(to_json).collect::<Vec<_>>(),
+                "diskImages": [],
             })
-        };
-        json!({
-            "localDisks": inv.local_disks.iter().map(to_json).collect::<Vec<_>>(),
-            "externalDevices": inv.external_devices.iter().map(to_json).collect::<Vec<_>>(),
-            "diskImages": [],
-        })
-    }
-    #[cfg(not(windows))]
-    {
-        json!({ "localDisks": [], "externalDevices": [], "diskImages": [] })
-    }
+        }
+        #[cfg(not(windows))]
+        {
+            json!({ "localDisks": [], "externalDevices": [], "diskImages": [] })
+        }
     })
+    .await
     .map_err(|e| format!("THREAD_POOL. {e}"))
 }
 
@@ -56,51 +60,58 @@ pub async fn connect_demo_device() -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn smart_report(device_id: String) -> Result<Value, String> {
+    // SMART IOCTLs carry 10 s timeouts and the ToolsPage prefetch
+    // fires one call per disk — spawn_blocking keeps every one off
+    // the main thread.
     tauri::async_runtime::spawn_blocking(move || {
-    #[cfg(windows)]
-    {
-        // Device ids: diskN-partM / diskN-lostL / vol-X / usb-X.
-        let disk = dw_win::volume::parse_device_id(&device_id)
-            .map(|t| match t {
-                dw_win::volume::DeviceTarget::WholeDisk(n)
-                | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
-                | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
-                dw_win::volume::DeviceTarget::Volume(letter) => {
-                    dw_win::blockdev::RawHandleDevice::open_volume(letter)
-                        .ok()
-                        .and_then(|d| d.device_number().ok().map(|(n, _)| n))
-                }
-            })
-            .flatten();
-        let Some(index) = disk else {
-            return Err(format!("UNKNOWN_DEVICE. {device_id}"));
-        };
-        let report = dw_win::smart::report_for_disk(index)
-            .map_err(|e| format!("SMART_UNAVAILABLE. Disk health data could not be read: {e}"))?;
-        Ok(json!({
-            "deviceId": device_id,
-            "deviceName": report.device_name,
-            "model": report.model,
-            "firmware": report.firmware,
-            "serial": report.serial,
-            "health": report.health,
-            "temperature": report.temperature,
-            "powerOnHours": report.power_on_hours,
-            "powerCycles": report.power_cycles,
-            "totalWrites": report.total_writes,
-            "interface": report.interface,
-            "attributes": report.attributes.iter().map(|a| json!({
-                "id": a.id, "name": a.name, "current": a.current,
-                "worst": a.worst, "threshold": a.threshold,
-                "rawValue": a.raw_value, "status": a.status,
-            })).collect::<Vec<_>>(),
-        }))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = device_id;
-        Err("SMART_UNAVAILABLE. Disk health requires Windows.".into())
-    }
+        #[cfg(windows)]
+        {
+            // Device ids: diskN-partM / diskN-lostL / vol-X / usb-X.
+            let disk = dw_win::volume::parse_device_id(&device_id)
+                .map(|t| match t {
+                    dw_win::volume::DeviceTarget::WholeDisk(n)
+                    | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
+                    | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
+                    dw_win::volume::DeviceTarget::Volume(letter) => {
+                        dw_win::blockdev::RawHandleDevice::open_volume(letter)
+                            .ok()
+                            .and_then(|d| d.device_number().ok().map(|(n, _)| n))
+                    }
+                })
+                .flatten();
+            let Some(index) = disk else {
+                return Err(format!("UNKNOWN_DEVICE. {device_id}"));
+            };
+            let report = dw_win::smart::report_for_disk(index).map_err(|e| {
+                format!("SMART_UNAVAILABLE. Disk health data could not be read: {e}")
+            })?;
+            Ok(json!({
+                "deviceId": device_id,
+                "deviceName": report.device_name,
+                "model": report.model,
+                "firmware": report.firmware,
+                "serial": report.serial,
+                "health": report.health,
+                "temperature": report.temperature,
+                "powerOnHours": report.power_on_hours,
+                "powerCycles": report.power_cycles,
+                "totalWrites": report.total_writes,
+                "interface": report.interface,
+                "attributes": report.attributes.iter().map(|a| json!({
+                    "id": a.id, "name": a.name, "current": a.current,
+                    "worst": a.worst, "threshold": a.threshold,
+                    "rawValue": a.raw_value, "status": a.status,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &device_id;
+            Err("SMART_UNAVAILABLE. Disk health requires Windows.".into())
+        }
+    })
+    .await
+    .map_err(|e| format!("THREAD_POOL. {e}"))?
 }
 
 #[tauri::command]

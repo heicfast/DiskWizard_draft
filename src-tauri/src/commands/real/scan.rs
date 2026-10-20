@@ -558,11 +558,7 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-pub fn get_scan_results(
-    s: State<'_, AppState>,
-    generation: u64,
-    since: Option<u64>,
-) -> Value {
+pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u64>) -> Value {
     if s.scan.generation() != generation {
         return Value::Null;
     }
