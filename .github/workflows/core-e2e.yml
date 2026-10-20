@@ -1,0 +1,363 @@
+name: Core E2E (real recovery, CLI junction)
+
+# The owner's session-8 validation loop, automated: a REAL Windows
+# runner creates a VHD, seeds 100+ files across every format family,
+# deletes them (incl. recycle bin), then drives the production engine
+# through the headless dw-cli junction — scan → recover → byte-compare
+# — collecting every log and result for analysis. Plus the
+# cross-platform core proof (cargo test + selftest) on Linux.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: core-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EVIDENCE: ${{ runner.temp }}\dwevidence
+
+jobs:
+  cross-platform-core:
+    name: Core tests + selftest (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: dw-core tests
+        run: cargo test -p dw-core
+        working-directory: src-tauri
+      - name: dw-license tests (client)
+        run: cargo test -p dw-license
+        working-directory: src-tauri
+      - name: dw-cli selftest (fixture → scan → recover → byte-compare)
+        run: cargo run --release -p dw-cli -- selftest -v
+        working-directory: src-tauri
+      - name: Clippy gate
+        run: cargo clippy -p dw-core -p dw-cli --all-targets -- -D warnings
+        working-directory: src-tauri
+      - name: fmt gate
+        run: cargo fmt --all -- --check
+        working-directory: src-tauri
+
+  windows-real-recovery:
+    name: Real recovery (VHD seed → delete → scan → recover → verify)
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build dw-cli (release)
+        run: cargo build --release -p dw-cli
+        working-directory: src-tauri
+
+      - name: Create + format the test VHD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vhd = "$env:RUNNER_TEMP\dwcore.vhd"
+          # No PowerShell here-strings (the session-2 YAML lesson).
+          $script = @(
+            'create vdisk file="' + $vhd + '" maximum=512 type=fixed'
+            'attach vdisk'
+            'create partition primary'
+            'format fs=ntfs label=DWCORE quick'
+            'assign letter=V'
+          ) -join "`r`n"
+          Set-Content -Path "$env:RUNNER_TEMP\dp.txt" -Value $script -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\dp.txt" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed" }
+          Start-Sleep -Seconds 3
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE | Out-Null
+          Write-Host "VHD attached at V: (512 MB, NTFS)"
+
+      - name: Seed 100+ files across every format family
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.Drawing
+          $seedRoot = "$env:RUNNER_TEMP\seed"
+          New-Item -ItemType Directory -Force -Path $seedRoot | Out-Null
+          foreach ($d in @("Photos", "Videos", "Music", "Docs", "Archives", "Bin", "Mixed\Nested\Deep")) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $seedRoot $d) | Out-Null
+          }
+          $script:manifest = @()
+          $rnd = [System.Random]::new(20261021)
+
+          function Save-Hash([string]$path) {
+            $script:manifest += [pscustomobject]@{
+              rel = $path.Substring($seedRoot.Length + 1)
+              sha256 = (Get-FileHash -Algorithm SHA256 -Path $path).Hash
+              size = (Get-Item $path).Length
+            }
+          }
+          # LE byte-array copy at an offset.
+          function Copy-LE([byte[]]$src, [byte[]]$dst, [int]$at) {
+            for ($i = 0; $i -lt $src.Length; $i++) { $dst[$at + $i] = $src[$i] }
+          }
+          # BE byte-array copy at an offset (BitConverter emits LE).
+          function Copy-BE([byte[]]$src, [byte[]]$dst, [int]$at) {
+            for ($i = 0; $i -lt $src.Length; $i++) { $dst[$at + $i] = $src[$src.Length - 1 - $i] }
+          }
+
+          # 40 real JPEGs/PNGs/BMPs via System.Drawing (varied sizes).
+          for ($i = 0; $i -lt 16; $i++) {
+            $bmp = New-Object System.Drawing.Bitmap(160 + $i * 8, 120 + $i * 4)
+            for ($x = 0; $x -lt $bmp.Width; $x += 7) {
+              for ($y = 0; $y -lt $bmp.Height; $y += 7) {
+                $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($rnd.Next(256), $rnd.Next(256), $rnd.Next(256)))
+              }
+            }
+            $p = "$seedRoot\Photos\photo$i.jpg"
+            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose(); Save-Hash $p
+            $bmp2 = New-Object System.Drawing.Bitmap(96 + $i * 4, 64)
+            $g = [System.Drawing.Graphics]::FromImage($bmp2)
+            $g.Clear([System.Drawing.Color]::FromArgb($rnd.Next(256), 200, 100)); $g.Dispose()
+            $p2 = "$seedRoot\Photos\graphic$i.png"
+            $bmp2.Save($p2, [System.Drawing.Imaging.ImageFormat]::Png); $bmp2.Dispose(); Save-Hash $p2
+          }
+          for ($i = 0; $i -lt 8; $i++) {
+            $bmp = New-Object System.Drawing.Bitmap(64 + $i * 16, 48)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(100, $rnd.Next(256), 200)); $g.Dispose()
+            $p = "$seedRoot\Photos\image$i.bmp"
+            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Bmp); $bmp.Dispose(); Save-Hash $p
+          }
+
+          # 12 MP4s (valid ftyp/free/mdat box chains, 8-100 KB).
+          for ($i = 0; $i -lt 12; $i++) {
+            $mdatLen = 8192 * (1 + $i)
+            $bytes = New-Object byte[] (24 + 8 + $mdatLen)
+            Copy-BE ([BitConverter]::GetBytes([UInt32]24)) $bytes 0
+            [Text.Encoding]::ASCII.GetBytes("ftypisom") | Copy-LE -dst $bytes -at 4
+            Copy-BE ([BitConverter]::GetBytes([UInt32]8)) $bytes 24
+            [Text.Encoding]::ASCII.GetBytes("free") | Copy-LE -dst $bytes -at 28
+            Copy-BE ([BitConverter]::GetBytes([UInt32]$mdatLen)) $bytes 32
+            [Text.Encoding]::ASCII.GetBytes("mdat") | Copy-LE -dst $bytes -at 36
+            for ($j = 40; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
+            $p = "$seedRoot\Videos\clip$i.mp4"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+          }
+
+          # 10 MP3s (ID3v2.3 headers with syncsafe sizes).
+          for ($i = 0; $i -lt 10; $i++) {
+            $tagLen = 4096 * (1 + $i)
+            $bytes = New-Object byte[] (10 + $tagLen)
+            [Text.Encoding]::ASCII.GetBytes("ID3") | Copy-LE -dst $bytes -at 0
+            $bytes[3] = 3
+            $bytes[6] = [byte](($tagLen -shr 21) -band 0x7F)
+            $bytes[7] = [byte](($tagLen -shr 14) -band 0x7F)
+            $bytes[8] = [byte](($tagLen -shr 7) -band 0x7F)
+            $bytes[9] = [byte]($tagLen -band 0x7F)
+            for ($j = 10; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
+            $p = "$seedRoot\Music\track$i.mp3"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+          }
+
+          # 8 WAVs (RIFF + PCM payloads).
+          for ($i = 0; $i -lt 8; $i++) {
+            $dataLen = 2048 * (1 + $i)
+            $bytes = New-Object byte[] (44 + $dataLen)
+            [Text.Encoding]::ASCII.GetBytes("RIFF") | Copy-LE -dst $bytes -at 0
+            Copy-LE ([BitConverter]::GetBytes([UInt32](36 + $dataLen))) $bytes 4
+            [Text.Encoding]::ASCII.GetBytes("WAVEfmt ") | Copy-LE -dst $bytes -at 8
+            Copy-LE ([BitConverter]::GetBytes([UInt32]16)) $bytes 16
+            $bytes[20] = 1; $bytes[22] = 1
+            Copy-LE ([BitConverter]::GetBytes([UInt32]44100)) $bytes 24
+            Copy-LE ([BitConverter]::GetBytes([UInt32]88200)) $bytes 28
+            $bytes[34] = 16
+            [Text.Encoding]::ASCII.GetBytes("data") | Copy-LE -dst $bytes -at 36
+            Copy-LE ([BitConverter]::GetBytes([UInt32]$dataLen)) $bytes 40
+            for ($j = 44; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
+            $p = "$seedRoot\Music\sound$i.wav"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
+          }
+
+          # 10 minimal-but-valid PDFs.
+          for ($i = 0; $i -lt 10; $i++) {
+            $body = "%PDF-1.4`n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj`n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj`n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>endobj`ntrailer<</Root 1 0 R>>`n" + ("pdf filler content line $i " * (30 * ($i + 1))) + "`n%%EOF"
+            $p = "$seedRoot\Docs\document$i.pdf"; [IO.File]::WriteAllText($p, $body); Save-Hash $p
+          }
+
+          # 10 real ZIPs (compressed text payloads).
+          for ($i = 0; $i -lt 10; $i++) {
+            $tmp = "$env:RUNNER_TEMP\ziptmp$i"; New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            1..5 | ForEach-Object { [IO.File]::WriteAllText("$tmp\file$_.txt", "archive $i content " * (50 * $_)) }
+            $p = "$seedRoot\Archives\bundle$i.zip"
+            Compress-Archive -Path "$tmp\*" -DestinationPath $p -Force
+            Remove-Item -Recurse -Force $tmp
+            Save-Hash $p
+          }
+
+          # 6 DOCX (real OPC zips).
+          for ($i = 0; $i -lt 6; $i++) {
+            $tmp = "$env:RUNNER_TEMP\docxtmp$i"
+            New-Item -ItemType Directory -Force -Path "$tmp\_rels" | Out-Null
+            New-Item -ItemType Directory -Force -Path "$tmp\word" | Out-Null
+            [IO.File]::WriteAllText("$tmp\[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+            [IO.File]::WriteAllText("$tmp\_rels\.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+            [IO.File]::WriteAllText("$tmp\word\document.xml", "<w:document xmlns:w=`"http://schemas.openxmlformats.org/wordprocessingml/2006/main`"><w:body><w:p><w:r><w:t>Report $i</w:t></w:r></w:p></w:body></w:document>")
+            $p = "$seedRoot\Docs\report$i.docx"
+            Compress-Archive -Path "$tmp\*" -DestinationPath $p -Force
+            Remove-Item -Recurse -Force $tmp
+            Save-Hash $p
+          }
+
+          # 6 real EXEs (system binaries — the .exe format family).
+          $i = 0
+          foreach ($name in @("where.exe", "sort.exe", "hostname.exe", "tasklist.exe", "mode.com", "more.com")) {
+            $src = "C:\Windows\System32\$name"
+            if (Test-Path $src) {
+              $p = "$seedRoot\Bin\tool$i.exe"; Copy-Item $src $p; Save-Hash $p; $i++
+            }
+          }
+
+          # 14 text-family files (txt/csv/json/log/md), incl. deep nesting.
+          1..14 | ForEach-Object {
+            $exts = @("txt", "csv", "json", "log", "md")
+            $ext = $exts[($_ - 1) % $exts.Count]
+            $sub = if ($_ -le 7) { "Docs" } else { "Mixed\Nested\Deep" }
+            $p = "$seedRoot\$sub\note$_.$ext"
+            [IO.File]::WriteAllText($p, "DiskWizard seed file $_ " * (100 * $_))
+            Save-Hash $p
+          }
+
+          $script:manifest | ConvertTo-Json | Set-Content -Path "$env:EVIDENCE\manifest.json"
+          Write-Host ("Seeded {0} files ({1} bytes total) + manifest" -f $script:manifest.Count, (($script:manifest | Measure-Object -Property size -Sum).Sum))
+
+      - name: Stage seeds onto the volume, then delete completely
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item -Recurse -Force "$env:RUNNER_TEMP\seed" "V:\seed"
+          $count = (Get-ChildItem -Recurse -File V:\seed).Count
+          Write-Host "Staged $count files on V:\"
+          Write-VolumeCache -DriveLetter V
+          Start-Sleep -Seconds 1
+          # DELETE — Remove-Item bypasses the recycle bin (permanent
+          # delete; NTFS marks the MFT records free).
+          Remove-Item -Recurse -Force "V:\seed"
+          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+          Write-Host "Deleted V:\seed completely (recycle bin emptied)"
+
+      - name: dw-cli devices (enumeration smoke)
+        run: cargo run --release -p dw-cli -- devices --json > $env:EVIDENCE\devices.json
+        working-directory: src-tauri
+        shell: pwsh
+
+      - name: dw-cli smart (disk0 smoke, tolerate virtual disks)
+        run: cargo run --release -p dw-cli -- smart disk0 > $env:EVIDENCE\smart.json
+        working-directory: src-tauri
+        shell: pwsh
+        continue-on-error: true
+
+      - name: dw-cli scan (the production engine, full logs)
+        run: >
+          cargo run --release -p dw-cli -- scan vol-V
+          --out $env:EVIDENCE\results.json --log $env:EVIDENCE\scan.log -v
+          --max-seconds 600
+        working-directory: src-tauri
+        shell: pwsh
+
+      - name: dw-cli recover (everything found)
+        run: >
+          cargo run --release -p dw-cli -- recover $env:EVIDENCE\results.json
+          --dest C:\dw-recovered --all --log $env:EVIDENCE\recover.log -v
+        working-directory: src-tauri
+        shell: pwsh
+
+      - name: Assert + byte-verify (the truth gate)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $results = Get-Content "$env:EVIDENCE\results.json" -Raw | ConvertFrom-Json
+          $manifest = Get-Content "$env:EVIDENCE\manifest.json" -Raw | ConvertFrom-Json
+          Write-Host ("Scan: {0} files / {1} bytes / {2}s / fs={3} / nodes={4}" -f
+            $results.filesFound, $results.bytesFound, $results.durationSec, $results.fs, $results.nodes.Count)
+
+          # TRUTH GATE 1: the scan found a meaningful fraction of the
+          # deleted population (MFT records survive deletion).
+          $expectedMin = [Math]::Floor($manifest.Count * 0.75)
+          if ($results.filesFound -lt $expectedMin) {
+            throw "SCAN_UNDERPERFORMS: found $($results.filesFound), expected >= $expectedMin of $($manifest.Count)"
+          }
+          # TRUTH GATE 2: bytes stay physical (the session-8 clamp).
+          if ($results.bytesFound -gt 512MB) {
+            throw "BYTES_INFLATED: $($results.bytesFound) > the 512 MB volume"
+          }
+          # TRUTH GATE 3: the folder structure resolved (no @mft
+          # collapse onto File Path Lost).
+          $structured = @($results.nodes | Where-Object { $_.path -notmatch 'File Path Lost|Tags Extracted' -and -not $_.isDir })
+          $lost = @($results.nodes | Where-Object { $_.path -match 'File Path Lost|Tags Extracted' -and -not $_.isDir })
+          Write-Host ("Structure: {0} structured / {1} lost-branch files" -f $structured.Count, $lost.Count)
+          if ($structured.Count -lt [Math]::Floor($manifest.Count / 2)) {
+            throw "TREE_COLLAPSED: only $($structured.Count) structured files (NTFS @mft resolution regression?)"
+          }
+          if (@($results.nodes | Where-Object { $_.name -match '@mft' -or $_.path -match '@mft' }).Count -gt 0) {
+            throw "LITERAL_MFT_LEAK: '@mft' leaked into node names/paths"
+          }
+
+          # TRUTH GATE 4: byte-identity of recovered content.
+          $recoveredRoot = "C:\dw-recovered"
+          $ok = 0; $missed = 0; $different = 0
+          foreach ($m in $manifest) {
+            $name = [IO.Path]::GetFileName($m.rel)
+            $hits = @(Get-ChildItem -Recurse -File $recoveredRoot -Filter $name -ErrorAction SilentlyContinue)
+            if ($hits.Count -eq 0) { $missed++; continue }
+            $match = $false
+            foreach ($h in $hits) {
+              if ((Get-FileHash -Algorithm SHA256 -Path $h.FullName).Hash -eq $m.sha256) { $match = $true; break }
+            }
+            if ($match) { $ok++ } else { $different++ }
+          }
+          Write-Host ("Byte-verify: {0} identical / {1} missed / {2} different (of {3})" -f $ok, $missed, $different, $manifest.Count)
+          # Threshold: >= 60% byte-identical (runner storage may TRIM
+          # parts of the VHD backing; the log carries the full census).
+          if ($ok -lt [Math]::Floor($manifest.Count * 0.60)) {
+            throw "RECOVERY_UNDERPERFORMS: only $ok/$($manifest.Count) byte-identical"
+          }
+          [pscustomobject]@{ identical = $ok; missed = $missed; different = $different; total = $manifest.Count } |
+            ConvertTo-Json | Set-Content "$env:EVIDENCE\verify.json"
+          Write-Host "ALL TRUTH GATES PASSED"
+
+      - name: Detach + clean the VHD
+        if: always()
+        shell: pwsh
+        run: |
+          $vhd = "$env:RUNNER_TEMP\dwcore.vhd"
+          $script = @(
+            'select vdisk file="' + $vhd + '"'
+            'detach vdisk'
+          ) -join "`r`n"
+          Set-Content -Path "$env:RUNNER_TEMP\dp-clean.txt" -Value $script -Encoding ascii
+          # Retry the detach (the volume can take a moment to settle).
+          $ok = $false
+          foreach ($i in 1..5) {
+            diskpart /s "$env:RUNNER_TEMP\dp-clean.txt" | Out-Host
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) { Write-Host "WARN: vdisk detach failed (cleanup only)" }
+
+      - name: Upload evidence (logs, results, manifest, verification)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-e2e-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}\dwevidence
+          if-no-files-found: warn
+          retention-days: 30
