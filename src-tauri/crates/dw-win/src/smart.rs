@@ -112,34 +112,22 @@ pub fn report_for_disk(index: u32) -> Result<SmartReport, String> {
         // smartmontools/CrystalDiskInfo posture — many storport
         // stacks reject pass-through on read-only handles). The
         // RAII wrapper closes it exactly once.
-        if let Some(handle) = open_pass_through_handle(index) {
-            let handle = RawPassThroughHandle(Some(handle));
-            if let Some(mut rep) = ata_smart(
-                handle.0.as_ref().expect("just wrapped"),
-                index,
-                &model,
-                &serial,
-            ) {
-                finalize_verdict(&mut rep);
-                return Ok(rep);
-            }
+        if let Some(mut rep) =
+            with_pass_through(index, |handle| ata_smart(handle, index, &model, &serial))
+        {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
         }
         // Last resort on mis-reported buses: try both transports.
         if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
             finalize_verdict(&mut rep);
             return Ok(rep);
         }
-        if let Some(handle) = open_pass_through_handle(index) {
-            let handle = RawPassThroughHandle(Some(handle));
-            if let Some(mut rep) = ata_smart(
-                handle.0.as_ref().expect("just wrapped"),
-                index,
-                &model,
-                &serial,
-            ) {
-                finalize_verdict(&mut rep);
-                return Ok(rep);
-            }
+        if let Some(mut rep) =
+            with_pass_through(index, |handle| ata_smart(handle, index, &model, &serial))
+        {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
         }
     }
     Err(format!(
@@ -181,9 +169,24 @@ impl Drop for RawPassThroughHandle {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
             // SAFETY: h came from CreateFileW, closed exactly once.
-            unsafe { windows::Win32::Foundation::CloseHandle(h) };
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(h) };
         }
     }
+}
+
+/// Open a READ|WRITE pass-through handle, run `f` with it, close it
+/// exactly once. `None` propagates both a failed open and `f`'s
+/// None — the caller treats them identically (transport
+/// unavailable).
+fn with_pass_through<F>(index: u32, f: F) -> Option<SmartReport>
+where
+    F: FnOnce(&windows::Win32::Foundation::HANDLE) -> Option<SmartReport>,
+{
+    let mut owned = RawPassThroughHandle(open_pass_through_handle(index));
+    let handle = owned.0.take()?;
+    let out = f(&handle);
+    owned.0 = Some(handle); // returned to the wrapper for the close
+    out
 }
 
 /// The distilled ATA SMART READ DATA sector.

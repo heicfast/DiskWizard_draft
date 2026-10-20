@@ -11,6 +11,7 @@
 
 #![cfg(windows)]
 #![allow(clippy::unwrap_used)] // integration tests: fail loud
+#![allow(clippy::assert_is_empty)] // the project's idiomatic test form
 
 use std::sync::Arc;
 
@@ -80,7 +81,7 @@ fn ioctl_batch_read_completes_identically() {
         .read_sectors_sparse_batch(&mut batch)
         .expect("batch reads");
     assert!(
-        bad.iter().all(|v| v.is_empty()),
+        bad.iter().all(std::vec::Vec::is_empty),
         "no bad ranges on a healthy disk"
     );
     assert_eq!(a1, a2, "batch ≡ sequential (window A)");
@@ -117,11 +118,14 @@ fn nvme_query_on_non_nvme_is_graceful() {
     // (the adapter-fallback hazard removed in session 9).
     let (_, _, bus) = dw_win::devices::disk_identity(DISK);
     if bus != "NVMe" {
-        let dev = dw_win::blockdev::RawHandleDevice::open_physical(DISK).unwrap();
         // Through the public surface: a non-NVMe disk's NVMe path
-        // yields the typed unavailable, verified above; the direct
-        // check is the bus string itself mapping to a real value.
-        assert!(!bus.is_empty());
+        // yields the typed unavailable (verified in the ATA test
+        // above); the direct check is the bus string itself mapping
+        // to a real STORAGE_BUS_TYPE name (the disk_identity test).
+        assert!(matches!(
+            bus.as_str(),
+            "SCSI" | "SATA" | "RAID" | "Other" | "USB" | "Virtual"
+        ));
     }
 }
 
@@ -190,14 +194,11 @@ fn memory_counters_are_nonzero() {
     use windows::Win32::System::ProcessStatus::GetProcessMemoryInfo;
     use windows::Win32::System::Threading::GetCurrentProcess;
     let mut pmc = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS::default();
-    let ok = unsafe {
-        GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut pmc,
-            std::mem::size_of::<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS>()
-                as u32,
-        )
-    };
+    #[allow(clippy::cast_possible_truncation)] // struct size, bounded
+    let cb = std::mem::size_of::<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS>()
+        as u32;
+    // SAFETY: pseudo-handle + the documented output struct.
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), std::ptr::from_mut(&mut pmc), cb) };
     assert!(ok.is_ok(), "GetProcessMemoryInfo answers");
     assert!(pmc.WorkingSetSize > 0, "the test process has memory");
 }

@@ -41,6 +41,7 @@ pub mod volume;
 /// TIME_CRITICAL: the WebView render thread must keep painting while
 /// the scan burns cores. Returns success (false = best-effort skip —
 /// priority is an optimization, never a gate).
+#[must_use]
 pub fn raise_thread_priority_highest() -> bool {
     use windows::Win32::System::Threading::{
         GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
