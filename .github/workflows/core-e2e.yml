@@ -117,7 +117,7 @@ jobs:
 
           # 40 real JPEGs/PNGs/BMPs via System.Drawing (varied sizes).
           for ($i = 0; $i -lt 16; $i++) {
-            $bmp = New-Object System.Drawing.Bitmap(160 + $i * 8, 120 + $i * 4)
+            $bmp = [System.Drawing.Bitmap]::new(160 + $i * 8, 120 + $i * 4)
             for ($x = 0; $x -lt $bmp.Width; $x += 7) {
               for ($y = 0; $y -lt $bmp.Height; $y += 7) {
                 $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($rnd.Next(256), $rnd.Next(256), $rnd.Next(256)))
@@ -125,14 +125,14 @@ jobs:
             }
             $p = "$seedRoot\Photos\photo$i.jpg"
             $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose(); Save-Hash $p
-            $bmp2 = New-Object System.Drawing.Bitmap(96 + $i * 4, 64)
+            $bmp2 = [System.Drawing.Bitmap]::new(96 + $i * 4, 64)
             $g = [System.Drawing.Graphics]::FromImage($bmp2)
             $g.Clear([System.Drawing.Color]::FromArgb($rnd.Next(256), 200, 100)); $g.Dispose()
             $p2 = "$seedRoot\Photos\graphic$i.png"
             $bmp2.Save($p2, [System.Drawing.Imaging.ImageFormat]::Png); $bmp2.Dispose(); Save-Hash $p2
           }
           for ($i = 0; $i -lt 8; $i++) {
-            $bmp = New-Object System.Drawing.Bitmap(64 + $i * 16, 48)
+            $bmp = [System.Drawing.Bitmap]::new(64 + $i * 16, 48)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.Clear([System.Drawing.Color]::FromArgb(100, $rnd.Next(256), 200)); $g.Dispose()
             $p = "$seedRoot\Photos\image$i.bmp"
@@ -144,11 +144,11 @@ jobs:
             $mdatLen = 8192 * (1 + $i)
             $bytes = New-Object byte[] (24 + 8 + $mdatLen)
             Copy-BE ([BitConverter]::GetBytes([UInt32]24)) $bytes 0
-            [Text.Encoding]::ASCII.GetBytes("ftypisom") | Copy-LE -dst $bytes -at 4
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("ftypisom")) $bytes 4
             Copy-BE ([BitConverter]::GetBytes([UInt32]8)) $bytes 24
-            [Text.Encoding]::ASCII.GetBytes("free") | Copy-LE -dst $bytes -at 28
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("free")) $bytes 28
             Copy-BE ([BitConverter]::GetBytes([UInt32]$mdatLen)) $bytes 32
-            [Text.Encoding]::ASCII.GetBytes("mdat") | Copy-LE -dst $bytes -at 36
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("mdat")) $bytes 36
             for ($j = 40; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
             $p = "$seedRoot\Videos\clip$i.mp4"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p
           }
@@ -157,7 +157,7 @@ jobs:
           for ($i = 0; $i -lt 10; $i++) {
             $tagLen = 4096 * (1 + $i)
             $bytes = New-Object byte[] (10 + $tagLen)
-            [Text.Encoding]::ASCII.GetBytes("ID3") | Copy-LE -dst $bytes -at 0
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("ID3")) $bytes 0
             $bytes[3] = 3
             $bytes[6] = [byte](($tagLen -shr 21) -band 0x7F)
             $bytes[7] = [byte](($tagLen -shr 14) -band 0x7F)
@@ -171,15 +171,15 @@ jobs:
           for ($i = 0; $i -lt 8; $i++) {
             $dataLen = 2048 * (1 + $i)
             $bytes = New-Object byte[] (44 + $dataLen)
-            [Text.Encoding]::ASCII.GetBytes("RIFF") | Copy-LE -dst $bytes -at 0
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("RIFF")) $bytes 0
             Copy-LE ([BitConverter]::GetBytes([UInt32](36 + $dataLen))) $bytes 4
-            [Text.Encoding]::ASCII.GetBytes("WAVEfmt ") | Copy-LE -dst $bytes -at 8
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("WAVEfmt ")) $bytes 8
             Copy-LE ([BitConverter]::GetBytes([UInt32]16)) $bytes 16
             $bytes[20] = 1; $bytes[22] = 1
             Copy-LE ([BitConverter]::GetBytes([UInt32]44100)) $bytes 24
             Copy-LE ([BitConverter]::GetBytes([UInt32]88200)) $bytes 28
             $bytes[34] = 16
-            [Text.Encoding]::ASCII.GetBytes("data") | Copy-LE -dst $bytes -at 36
+            Copy-LE ([Text.Encoding]::ASCII.GetBytes("data")) $bytes 36
             Copy-LE ([BitConverter]::GetBytes([UInt32]$dataLen)) $bytes 40
             for ($j = 44; $j -lt $bytes.Length; $j++) { $bytes[$j] = $rnd.Next(256) }
             $p = "$seedRoot\Music\sound$i.wav"; [IO.File]::WriteAllBytes($p, $bytes); Save-Hash $p

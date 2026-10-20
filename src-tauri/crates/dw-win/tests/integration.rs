@@ -184,6 +184,13 @@ fn vhd_end_to_end() {
     // Recover BOTH and byte-compare against the seeds.
     let ids = [present.id, gone.id];
     let queue = build_queue(nodes, &ids);
+    // Session-8 diagnosis: the exact export destinations.
+    for item in &queue {
+        eprintln!(
+            "diag: queue id={} name={:?} path={:?} → dest {:?}",
+            item.node.id, item.node.name, item.node.path, item.dest_path
+        );
+    }
     let dest_root = std::env::temp_dir().join("dw-vhd-recovered");
     let _ = std::fs::remove_dir_all(&dest_root);
     let mut dest = DirDest {
@@ -195,6 +202,10 @@ fn vhd_end_to_end() {
         run_recovery(&*source, &queue, &mut dest, &ScanControl::new(), |_| {}).expect("recovery");
     assert_eq!(report.done_files, 2, "both files recover: {report:?}");
     assert_eq!(report.failed_files, 0);
+    // Session-8 diagnosis: what actually landed under the destination.
+    for entry in std::fs::read_dir(&dest_root).flatten().take(20) {
+        eprintln!("diag: dest entry {:?}", entry.file_name());
+    }
 
     let original_present = std::fs::read(format!("{letter}:\\present.txt")).expect("seed present");
     let recovered_present =
