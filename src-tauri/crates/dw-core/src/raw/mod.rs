@@ -8,15 +8,42 @@
 //! tree's lost-path/lost-name branches and are cross-correlated with
 //! structured results during the merge phase.
 //!
-//! Memory discipline: windows are fixed-size (8 MiB), grammar walks
-//! stream through bounded chunks ([`Prober`]) — no validator ever
-//! materializes a whole file, so a 4 GiB `max_size` bound costs a few
-//! hundred KiB, not gigabytes (the caps are LENGTH bounds, not
-//! allocations).
+//! ## Session-8 discipline (the owner's TB-inflation + stuck-scan fix)
+//!
+//! The vendor model ("signature hit" ≠ "recoverable file with size"):
+//! a magic match is only a CANDIDATE; the grammar decides. Three hard
+//! bounds now govern every validator, because a 320 GB disk of binary
+//! data contains thousands of accidental magics:
+//!
+//! * **probe cap** — the maximum number of DEVICE bytes a validator
+//!   may read for one hit ([`Signature::probe_cap`]). A JPEG hunt
+//!   stops after 8 MiB, an ISO-BMFF box walk after 64 MiB — never
+//!   the old multi-GiB spans that made the sweep look wedged.
+//! * **fallback cap** — the maximum carve LENGTH a WEAK validation may
+//!   claim ([`Signature::fallback_cap`]; 0 = reject). Grammar-verified
+//!   lengths are trusted; "probably truncated" hits carve a small
+//!   recoverable prefix, never their full probe span. The old code
+//!   carved up to 2 GiB per false hit — thousands of those produced
+//!   the TB-scale `bytes_found` the owner saw.
+//! * **window budget** — a shared byte budget ([`VALIDATOR_BUDGET`])
+//!   limiting TOTAL validator reads per carve window; exhaustion
+//!   skips further validations in that window (the sweep always moves
+//!   forward).
+//!
+//! Validators also checkpoint the cooperative [`ScanControl`] inside
+//! their walks (pause/stop answer mid-hit, not mid-window), and the
+//! `Prober` reuses one scratch buffer instead of allocating a fresh
+//! `Vec` per 4-byte field read.
+//!
+//! Memory discipline: windows are fixed-size (≤16 MiB), grammar walks
+//! stream through bounded chunks — no validator ever materializes a
+//! whole file, so a 4 GiB `max_size` bound costs a few hundred KiB,
+//! not gigabytes (the caps are LENGTH bounds, not allocations).
 //!
 //! Analyser set (research: `artifacts/SearchDLL/
-//! rawsearchdll--analyser-registry-census.md`): JPEG, PNG, GIF, BMP,
-//! ZIP (central-directory walk), RAR4/5, PDF, MP4/MOV/HEIC
+//! rawsearchdll--analyser-registry-census.md`,
+//! `analyser-granular-batch1--pst-rar-mkv-heic.md`): JPEG, PNG, GIF,
+//! BMP, ZIP (central-directory walk), RAR4/5, PDF, MP4/MOV/HEIC
 //! (ISO-BMFF), MKV (EBML), MP3, WAV, OGG, FLAC, OLE2 (doc/xls/ppt),
 //! SQLite, PST.
 
@@ -32,7 +59,6 @@ use crate::fs::{ScanControl, ScanSink, ScanStats};
 use std::collections::HashSet;
 
 use crate::types::{Category, Extent, FoundEntry, FsKind, NodeOrigin};
-
 /// FNV-1a content prefix hash + length (the duplicate key).
 fn content_hash(prefix: &[u8], length: u64) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -58,6 +84,17 @@ const CARVE_OVERLAP: usize = 64 * 1024;
 /// Prober chunk: the fixed ceiling of any single validator scratch
 /// allocation.
 const PROBE_CHUNK: usize = 1024 * 1024;
+
+/// Shared validator read budget per carve window (session 8): the
+/// sum of all grammar-walk device reads for one window. A window
+/// full of hostile signature candidates can never spend more than
+/// this on validation before the sweep moves on.
+const VALIDATOR_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Maximum grammar-walk steps (boxes / blocks / markers) per hit —
+/// garbage data that chains minimum-size structures terminates the
+/// walk instead of iterating for millions of steps.
+const MAX_WALK_STEPS: u64 = 65_536;
 
 /// The carve result for one hit.
 pub struct CarvedHit {
@@ -136,6 +173,9 @@ impl RawCarver {
         let mut bufs: Vec<AlignedBuf> = (0..depth)
             .map(|_| AlignedBuf::zeroed(window, self.dev.preferred_read_alignment()))
             .collect();
+        // The validators' shared scratch (reused across every hit —
+        // no per-read allocations).
+        let mut scratch: Vec<u8> = Vec::with_capacity(PROBE_CHUNK);
         // Positions already emitted this carve (absolute): "first
         // signature wins a position" — while the SAME signature keeps
         // scanning for further hits (one file per signature PER
@@ -189,7 +229,9 @@ impl RawCarver {
                     &finders,
                     &mut emitted,
                     &mut stats,
-                );
+                    &mut scratch,
+                    ctrl,
+                )?;
                 sink.on_progress(off + take as u64 - start_byte, end - start_byte);
             }
             let (last_off, last_take) = *plan.last().expect("plan has a window");
@@ -208,6 +250,10 @@ impl RawCarver {
     /// scans fully), grammar validation, entry emission. Extracted
     /// from the sequential loop so the batched pipeline reuses the
     /// exact per-window semantics.
+    ///
+    /// # Errors
+    /// [`CoreError::Cancelled`] propagates from validator
+    /// checkpoints (the sweep stops; emitted entries stand).
     #[allow(clippy::too_many_arguments)] // one window-scan state pass
     fn scan_window(
         &self,
@@ -220,7 +266,9 @@ impl RawCarver {
         finders: &[(usize, &Signature, memmem::Finder<'static>)],
         emitted: &mut HashSet<u64>,
         stats: &mut ScanStats,
-    ) {
+        scratch: &mut Vec<u8>,
+        ctrl: &ScanControl,
+    ) -> CoreResult<()> {
         let take = buf.len();
         // New-hit region: everything except the overlap tail (the
         // final window scans fully — there is no next window).
@@ -230,6 +278,8 @@ impl RawCarver {
             take.saturating_sub(CARVE_OVERLAP)
         };
         let hay = &buf[..scan_end];
+        // Session 8: the shared validator budget for THIS window.
+        let mut budget: u64 = VALIDATOR_BUDGET;
         for (_, sig, finder) in finders {
             let mut from = 0usize;
             while let Some(rel) = finder.find(&hay[from..]) {
@@ -253,7 +303,7 @@ impl RawCarver {
                 if emitted.contains(&abs) {
                     continue; // an earlier signature already won here
                 }
-                if let Some(mut h) = self.validate_hit(sig, abs, end) {
+                if let Some(mut h) = self.validate_hit(sig, abs, end, scratch, &mut budget, ctrl)? {
                     h.category = sig.category;
                     if h.length >= sig.min_size {
                         let name = format!("{}_{abs:08X}{}", sig.name_prefix, sig.ext);
@@ -269,21 +319,23 @@ impl RawCarver {
                         entry.confidence = h.confidence;
                         entry.category_hint = Some(h.category);
                         entry.dimensions = h.dimensions;
-                        // Same-content key from the DEVICE bytes —
-                        // deterministic regardless of window geometry
-                        // (hashing window-relative bytes would make
-                        // the key depend on where window boundaries
-                        // fell). One bounded 4 KiB read per EMITTED
-                        // candidate, never per raw hit; duplicate
-                        // copies of one file share their true on-disk
-                        // prefix and the tree marks repeats as
-                        // Version — the essential-mode dedup.
+                        // Same-content key — deterministic regardless
+                        // of window geometry. Prefer the WINDOW bytes
+                        // we already hold (no device read); fall back
+                        // to one bounded read when the prefix crosses
+                        // the window tail.
                         let want = (h.length as usize).min(4096);
                         if want > 0 {
-                            let mut prefix = vec![0u8; want];
-                            if self.dev.read_bytes(abs, &mut prefix).is_ok() {
-                                entry.content_key = Some(content_hash(&prefix, h.length));
-                            }
+                            let in_window = file_rel + want <= buf.len();
+                            entry.content_key = if in_window {
+                                Some(content_hash(&buf[file_rel..file_rel + want], h.length))
+                            } else {
+                                let mut prefix = vec![0u8; want];
+                                self.dev
+                                    .read_bytes(abs, &mut prefix)
+                                    .ok()
+                                    .map(|()| content_hash(&prefix, h.length))
+                            };
                         }
                         entry.source = FsKind::Raw;
                         stats.entries += 1;
@@ -296,106 +348,157 @@ impl RawCarver {
                 }
             }
         }
+        Ok(())
     }
 
     /// Validate a signature hit: apply the format grammar and derive
     /// the length. `None` = the grammar rejected the magic (false
-    /// positive) — several arms propagate inner `None`s.
-    #[allow(clippy::unnecessary_wraps)] // mixed arms: Option propagates rejects
-    fn validate_hit(&self, sig: &Signature, at: u64, end: u64) -> Option<CarvedHit> {
-        let max_probe = sig.max_size.min(end.saturating_sub(at));
-        let prober = Prober {
+    /// positive) — several arms propagate inner `None`s. Weak /
+    /// truncated validations fall back to
+    /// [`Signature::fallback_cap`] (0 = reject), NEVER the probe span
+    /// (the session-8 TB-inflation fix).
+    ///
+    /// # Errors
+    /// [`CoreError::Cancelled`] from walk checkpoints.
+    fn validate_hit(
+        &self,
+        sig: &Signature,
+        at: u64,
+        end: u64,
+        scratch: &mut Vec<u8>,
+        budget: &mut u64,
+        ctrl: &ScanControl,
+    ) -> CoreResult<Option<CarvedHit>> {
+        // Length-math cap (never above the remaining device span).
+        let limit = sig.max_size.min(end.saturating_sub(at));
+        // Read cap: the session-8 probe bound.
+        let read_cap = sig.probe_cap.min(end.saturating_sub(at));
+        let mut prober = Prober {
             dev: &*self.dev,
             base: at,
-            limit: max_probe,
+            limit: read_cap,
+            length_cap: limit,
+            scratch,
+            budget,
         };
-        let hit = match sig.id {
-            SignatureId::Jpeg => prober.size_jpeg(),
-            SignatureId::Png => prober.size_tail(b"IEND", 8),
-            SignatureId::Gif => prober.size_tail(&[0x3B], 1),
-            SignatureId::Zip => prober.size_zip()?,
-            SignatureId::Rar4 | SignatureId::Rar5 => prober.size_rar(),
-            SignatureId::Pdf => prober.size_pdf(),
-            SignatureId::Mp4 | SignatureId::Mov | SignatureId::Heic => prober.size_isobmff(),
-            SignatureId::Mkv => prober.size_ebml(),
+        let hit: Option<CarvedHit> = match sig.id {
+            SignatureId::Jpeg => Some(prober.size_jpeg(ctrl)?),
+            SignatureId::Png => prober.size_tail(b"IEND", 8, 256 * 1024, ctrl)?,
+            SignatureId::Gif => prober.size_gif(ctrl)?,
+            SignatureId::Zip => prober.size_zip(ctrl)?,
+            SignatureId::Rar4 | SignatureId::Rar5 => Some(prober.size_rar(ctrl)?),
+            SignatureId::Pdf => Some(prober.size_pdf(ctrl)?),
+            SignatureId::Mp4 | SignatureId::Mov | SignatureId::Heic => {
+                Some(prober.size_isobmff(ctrl)?)
+            }
+            SignatureId::Mkv => Some(prober.size_ebml(ctrl)?),
             SignatureId::Mp3 => prober.size_mp3(),
-            SignatureId::Wav => prober.size_riff()?,
-            SignatureId::Ogg => prober.size_ogg()?,
-            SignatureId::Flac => prober.size_flac()?,
-            SignatureId::Ole2 => prober.size_ole2(),
-            SignatureId::Sqlite => prober.size_sqlite()?,
-            SignatureId::Bmp => prober.size_bmp()?,
-            SignatureId::Pst => CarvedHit {
-                length: 512 * 1024, // PST grows in 512 KiB pages
-                confidence: sig.confidence,
-                category: Category::Email,
-                dimensions: None,
-            },
+            SignatureId::Wav => prober.size_riff(),
+            SignatureId::Ogg => prober.size_ogg(),
+            SignatureId::Flac => prober.size_flac(),
+            SignatureId::Ole2 => Some(prober.size_ole2()),
+            SignatureId::Sqlite => prober.size_sqlite(),
+            SignatureId::Bmp => prober.size_bmp(),
+            SignatureId::Pst => Some(prober.size_pst()),
         };
         // Confidence never exceeds the signature's own bound.
-        Some(CarvedHit {
+        Ok(hit.map(|hit| CarvedHit {
             length: hit.length,
             confidence: hit.confidence.min(sig.confidence),
             category: hit.category,
             dimensions: hit.dimensions,
-        })
+        }))
     }
 }
 
 /// Bounded random-access probe helper for grammar walks: small
-/// structured reads plus chunked pattern scans. Every allocation is
-/// capped at [`PROBE_CHUNK`] — the `limit` bounds a LENGTH, never a
-/// buffer.
+/// structured reads plus chunked pattern scans. One REUSED scratch
+/// buffer (owned by the carver, shared per window) — no per-read
+/// allocations — and every read decrements the window's shared
+/// [`VALIDATOR_BUDGET`]; an exhausted budget reads as zeros-and-stop
+/// (validators see short reads and reject/fall back).
 struct Prober<'a> {
     dev: &'a dyn BlockDevice,
     /// Absolute offset of the carved candidate (the hit).
     base: u64,
-    /// Maximum probe span (bytes from `base`).
+    /// Maximum probe span (bytes from `base`) — the READ bound.
     limit: u64,
+    /// Maximum carve LENGTH (the signature's max_size, bounded by the
+    /// device tail) — grammar-verified lengths may use it, weak
+    /// fallbacks may not.
+    length_cap: u64,
+    scratch: &'a mut Vec<u8>,
+    budget: &'a mut u64,
 }
 
 impl Prober<'_> {
-    /// Read `n` bytes at `base + rel` (damage-tolerant: unreadable
-    /// regions read as zeros, like the old full-buffer behavior).
-    fn read(&self, rel: u64, n: usize) -> Vec<u8> {
+    /// Read `n` bytes at `base + rel` into the scratch and return
+    /// them as a borrowed slice (damage-tolerant: unreadable regions
+    /// read as zeros, like the old full-buffer behavior). `None` when
+    /// past the probe cap or the window budget is exhausted.
+    fn read(&mut self, rel: u64, n: usize) -> Option<&[u8]> {
         let n = n.min(PROBE_CHUNK);
         let avail = self.limit.saturating_sub(rel).min(n as u64) as usize;
-        let mut buf = vec![0u8; avail];
-        let _ = self.dev.read_bytes(self.base + rel, &mut buf);
-        buf
+        if avail == 0 || *self.budget == 0 {
+            return None;
+        }
+        let spend = (avail as u64).min(*self.budget) as usize;
+        *self.budget -= spend as u64;
+        self.scratch.clear();
+        self.scratch.resize(spend, 0);
+        let _ = self
+            .dev
+            .read_bytes(self.base + rel, &mut self.scratch[..spend]);
+        Some(&self.scratch[..spend])
     }
 
     /// Big-endian u32 at `base + rel` (0 when unreadable).
-    fn u32be(&self, rel: u64) -> u32 {
+    fn u32be(&mut self, rel: u64) -> u32 {
         let b = self.read(rel, 4);
-        if b.len() == 4 {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            0
-        }
+        b.map_or(0, |b| {
+            if b.len() == 4 {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                0
+            }
+        })
     }
 
     /// Little-endian u32 at `base + rel` (0 when unreadable).
-    fn u32le(&self, rel: u64) -> u32 {
+    fn u32le(&mut self, rel: u64) -> u32 {
         let b = self.read(rel, 4);
-        if b.len() == 4 {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            0
-        }
+        b.map_or(0, |b| {
+            if b.len() == 4 {
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                0
+            }
+        })
     }
 
     /// Scan `[from, to)` (relative) in bounded chunks for `needle`;
     /// return the LAST match end (rel + needle.len()), tracking at
     /// most one chunk in memory at a time.
-    fn find_last(&self, needle: &[u8], from: u64, to: u64) -> Option<u64> {
+    ///
+    /// # Errors
+    /// [`CoreError::Cancelled`] from walk checkpoints.
+    fn find_last(
+        &mut self,
+        needle: &[u8],
+        from: u64,
+        to: u64,
+        ctrl: &ScanControl,
+    ) -> CoreResult<Option<u64>> {
         let mut last = None;
         let mut pos = from;
+        let finder = memmem::Finder::new(needle);
         while pos < to {
+            ctrl.checkpoint()?;
             let take = (to - pos).min(PROBE_CHUNK as u64) as usize;
-            let chunk = self.read(pos, take + needle.len() - 1);
+            let Some(chunk) = self.read(pos, take + needle.len() - 1) else {
+                break;
+            };
             if chunk.len() >= needle.len() {
-                let finder = memmem::Finder::new(needle);
                 let mut from2 = 0usize;
                 while let Some(rel) = finder.find(&chunk[from2..]) {
                     let rel = from2 + rel;
@@ -405,19 +508,21 @@ impl Prober<'_> {
             }
             pos += take as u64;
         }
-        last
+        Ok(last)
     }
 
     /// Scan `[from, to)` for `needle`; return (count, last match end).
-    fn count_last(&self, needle: &[u8], from: u64, to: u64) -> (u32, Option<u64>) {
+    fn count_last(&mut self, needle: &[u8], from: u64, to: u64) -> (u32, Option<u64>) {
         let mut last = None;
         let mut count = 0u32;
         let mut pos = from;
+        let finder = memmem::Finder::new(needle);
         while pos < to {
             let take = (to - pos).min(PROBE_CHUNK as u64) as usize;
-            let chunk = self.read(pos, take + needle.len() - 1);
+            let Some(chunk) = self.read(pos, take + needle.len() - 1) else {
+                break; // budget/probe-cap exhaustion stops the count
+            };
             if chunk.len() >= needle.len() {
-                let finder = memmem::Finder::new(needle);
                 let mut from2 = 0usize;
                 while let Some(rel) = finder.find(&chunk[from2..]) {
                     let rel = from2 + rel;
@@ -441,13 +546,25 @@ impl Prober<'_> {
     /// chunk-by-chunk with a seam overlap so markers straddling chunk
     /// boundaries are never missed — returns the first match found
     /// scanning backwards (i.e. the LAST occurrence).
-    fn rfind_from(&self, needle: &[u8], from: u64, to: u64) -> Option<u64> {
+    ///
+    /// # Errors
+    /// [`CoreError::Cancelled`] from walk checkpoints.
+    fn rfind_from(
+        &mut self,
+        needle: &[u8],
+        from: u64,
+        to: u64,
+        ctrl: &ScanControl,
+    ) -> CoreResult<Option<u64>> {
         let mut hi = to;
+        let finder = memmem::Finder::new(needle);
         while hi > from {
+            ctrl.checkpoint()?;
             let lo = hi.saturating_sub(64 * 1024).max(from);
-            let chunk = self.read(lo, (hi - lo) as usize + needle.len() - 1);
+            let Some(chunk) = self.read(lo, (hi - lo) as usize + needle.len() - 1) else {
+                break;
+            };
             if chunk.len() >= needle.len() {
-                let finder = memmem::Finder::new(needle);
                 let mut best = None;
                 let mut from2 = 0usize;
                 while let Some(rel) = finder.find(&chunk[from2..]) {
@@ -456,71 +573,112 @@ impl Prober<'_> {
                     from2 = rel + 1;
                 }
                 if let Some(rel) = best {
-                    return Some(rel);
+                    return Ok(Some(rel));
                 }
             }
             hi = lo;
         }
-        None
+        Ok(None)
     }
 
-    /// PNG/GIF: last tail-marker within the cap (streamed).
-    fn size_tail(&self, tail: &[u8], pad: u64) -> CarvedHit {
-        const CAP: u64 = 256 * 1024 * 1024;
-        let span = self.limit.min(CAP);
-        match self.find_last(tail, 0, span) {
-            Some(end) => hit(end + pad, 95, Category::Images, None),
-            None => hit(span + pad, 55, Category::Images, None),
+    /// PNG/GIF-class: last tail-marker within the probe cap
+    /// (streamed). Weak fallback: a small recoverable prefix, never
+    /// the walked span.
+    fn size_tail(
+        &mut self,
+        tail: &[u8],
+        pad: u64,
+        fallback: u64,
+        ctrl: &ScanControl,
+    ) -> CoreResult<Option<CarvedHit>> {
+        let span = self.limit;
+        match self.find_last(tail, 0, span, ctrl)? {
+            Some(end) => Ok(Some(hit(end + pad, 95, Category::Images, None))),
+            None => Ok(Some(hit(
+                span.min(fallback).min(self.length_cap),
+                45,
+                Category::Images,
+                None,
+            ))),
         }
+    }
+
+    /// GIF: the header must say GIF87a/GIF89a, then the trailer
+    /// (0x3B) hunt. Anything else rejects — "GIF8" alone is far too
+    /// common in arbitrary data.
+    fn size_gif(&mut self, ctrl: &ScanControl) -> CoreResult<Option<CarvedHit>> {
+        let head = self.read(0, 6).map(<[u8]>::to_vec);
+        let Some(head) = head else {
+            return Ok(None);
+        };
+        if head.len() < 6 || (&head[..6] != b"GIF87a" && &head[..6] != b"GIF89a") {
+            return Ok(None);
+        }
+        self.size_tail(&[0x3B], 1, 256 * 1024, ctrl)
     }
 
     /// ZIP (research: `rawsearchdll--zip-analyser-carving.md`):
     /// index-first — find the EOCD near the archive tail, validate
-    /// the central-directory offsets, size = EOCD end. Archives with
-    /// no EOCD (local-header-only streams) carve as a bounded
-    /// low-confidence span.
-    fn size_zip(&self) -> Option<CarvedHit> {
-        const CAP: u64 = 1024 * 1024 * 1024;
-        let span = self.limit.min(CAP);
-        // The EOCD lives within the last ~66 KiB of a zip — scan
-        // backward from the end, bounded to that window.
+    /// the central-directory offsets, size = EOCD end. The EOCD scan
+    /// is bounded to the last ~66 KiB of the probe span (the
+    /// documented EOCD parking zone), so even a 1 GiB-length candidate
+    /// costs one bounded read set.
+    fn size_zip(&mut self, ctrl: &ScanControl) -> CoreResult<Option<CarvedHit>> {
+        // Length math may consider up to the length cap; the EOCD
+        // READ stays inside the probe cap's tail window.
+        let span = self.length_cap;
         let search_from = span.saturating_sub(66_000);
-        let eocd = self.rfind_from(b"PK\x05\x06", search_from, span)?;
+        let Some(eocd) = self.rfind_from(b"PK\x05\x06", search_from, span, ctrl)? else {
+            // No EOCD: local-header-only stream — reject (the old
+            // bounded low-confidence span became the fallback below).
+            return Ok(None);
+        };
         let cd_size = u64::from(self.u32le(eocd + 12));
         let cd_off = u64::from(self.u32le(eocd + 16));
         if cd_off + cd_size <= eocd {
-            return Some(hit(eocd + 22, 96, Category::Archives, None));
+            return Ok(Some(hit(eocd + 22, 96, Category::Archives, None)));
         }
-        // Structurally invalid EOCD: bounded low-confidence carve.
-        Some(hit(
-            span.min(64 * 1024 * 1024),
+        // Structurally invalid EOCD: small bounded low-confidence carve.
+        Ok(Some(hit(
+            self.limit.min(1024 * 1024).min(self.length_cap),
             40,
             Category::Archives,
             None,
-        ))
+        )))
     }
 
     /// RAR4/RAR5: block walk to the end-of-archive marker (each block
-    /// header read on demand — never the whole archive).
-    fn size_rar(&self) -> CarvedHit {
-        const CAP: u64 = 2 * 1024 * 1024 * 1024;
-        let span = self.limit.min(CAP);
+    /// header read on demand — never the whole archive). Step-capped
+    /// and probe-capped; garbage chains terminate fast.
+    fn size_rar(&mut self, ctrl: &ScanControl) -> CoreResult<CarvedHit> {
+        let span = self.limit;
         let mut pos = 7u64; // past the marker
-        while pos + 11 <= span {
-            let btype = self.read(pos + 2, 1).first().copied().unwrap_or(0);
-            let fl = self.read(pos + 3, 2);
+        let mut steps = 0u64;
+        while pos + 11 <= span && steps < MAX_WALK_STEPS {
+            steps += 1;
+            if steps.is_multiple_of(256) {
+                ctrl.checkpoint()?;
+            }
+            let btype = self.read(pos + 2, 1).map_or(0, |b| b[0]);
+            let Some(fl) = self.read(pos + 3, 2).map(<[u8]>::to_vec) else {
+                break;
+            };
             if fl.len() < 2 {
                 break;
             }
             let flags = u16::from_le_bytes([fl[0], fl[1]]);
-            let sz = self.read(pos + 5, 2);
+            let Some(sz) = self.read(pos + 5, 2).map(<[u8]>::to_vec) else {
+                break;
+            };
             if sz.len() < 2 {
                 break;
             }
             let mut size = u64::from(u16::from_le_bytes([sz[0], sz[1]]));
             if flags & 0x8000 != 0 {
-                let hi = self.read(pos + 7, 4);
-                if hi.len() == 4 {
+                let hi = self.read(pos + 7, 4).map(<[u8]>::to_vec);
+                if let Some(hi) = hi
+                    && hi.len() == 4
+                {
                     size += u64::from(u32::from_le_bytes([hi[0], hi[1], hi[2], hi[3]])) << 16;
                 }
             }
@@ -530,33 +688,61 @@ impl Prober<'_> {
             pos += size;
             if btype == 0x7B {
                 // End-of-archive block.
-                return hit(pos, 90, Category::Archives, None);
+                return Ok(hit(pos, 90, Category::Archives, None));
             }
         }
-        hit(span, 50, Category::Archives, None)
+        Ok(hit(
+            span.min(1024 * 1024).min(self.length_cap),
+            45,
+            Category::Archives,
+            None,
+        ))
     }
 
     /// PDF: %PDF → last %%EOF (streamed backward from the cap).
-    fn size_pdf(&self) -> CarvedHit {
-        const CAP: u64 = 2 * 1024 * 1024 * 1024;
-        let span = self.limit.min(CAP);
-        match self.rfind_from(b"%%EOF", 0, span) {
-            Some(end) => hit(end + 5, 94, Category::Documents, None),
-            None => hit(span, 45, Category::Documents, None),
+    fn size_pdf(&mut self, ctrl: &ScanControl) -> CoreResult<CarvedHit> {
+        let span = self.limit;
+        match self.rfind_from(b"%%EOF", 0, span, ctrl)? {
+            Some(end) => Ok(hit(end + 5, 94, Category::Documents, None)),
+            None => Ok(hit(
+                span.min(256 * 1024).min(self.length_cap),
+                45,
+                Category::Documents,
+                None,
+            )),
         }
     }
 
     /// ISO-BMFF (MP4/MOV/HEIC): 32/64-bit box walk — each box header
     /// is an 8-16 byte read; jumps are arithmetic, not allocations.
-    fn size_isobmff(&self) -> CarvedHit {
-        const CAP: u64 = 4 * 1024 * 1024 * 1024;
-        let span = self.limit.min(CAP);
+    /// The `ftyp` brand must be plausible ASCII (the "ftyp" magic
+    /// alone rides inside arbitrary text). Step- and probe-capped.
+    fn size_isobmff(&mut self, ctrl: &ScanControl) -> CoreResult<CarvedHit> {
+        let span = self.limit;
+        // Brand sanity: the 4 brand bytes AFTER the "ftyp" magic
+        // (file+8) must be plausible ASCII (the "ftyp" magic alone
+        // rides inside arbitrary text).
+        let brand = self.read(8, 4).map(<[u8]>::to_vec);
+        let brand_ok = brand.is_some_and(|b| {
+            b.len() == 4
+                && b.iter()
+                    .all(|&c| c.is_ascii_alphanumeric() || c == b' ' || c == b'-')
+        });
+        if !brand_ok {
+            return Ok(hit(0, 0, Category::Videos, None)); // rejected by min_size
+        }
         let mut pos = 0u64;
         let mut sane = false;
-        while pos + 8 <= span {
+        let mut steps = 0u64;
+        while pos + 8 <= span && steps < MAX_WALK_STEPS {
+            steps += 1;
+            if steps.is_multiple_of(256) {
+                ctrl.checkpoint()?;
+            }
             let size = u64::from(self.u32be(pos));
             let box_size = if size == 1 && pos + 16 <= span {
-                let b = self.read(pos + 8, 8);
+                let b = self.read(pos + 8, 8).map(<[u8]>::to_vec);
+                let Some(b) = b else { break };
                 if b.len() < 8 {
                     break;
                 }
@@ -574,21 +760,29 @@ impl Prober<'_> {
             sane = true;
             pos += box_size;
         }
-        hit(pos, if sane { 90 } else { 40 }, Category::Videos, None)
+        if sane {
+            Ok(hit(pos, 90, Category::Videos, None))
+        } else {
+            Ok(hit(
+                span.min(4 * 1024 * 1024).min(self.length_cap),
+                40,
+                Category::Videos,
+                None,
+            ))
+        }
     }
 
     /// EBML (MKV/WebM): vint-sized element walk (header reads on
-    /// demand).
-    fn size_ebml(&self) -> CarvedHit {
-        const CAP: u64 = 4 * 1024 * 1024 * 1024;
-        let span = self.limit.min(CAP);
-        let vint = |p: &Self, pos: u64| -> Option<(u64, usize)> {
-            let first = p.read(pos, 1).first().copied()?;
+    /// demand). Step- and probe-capped.
+    fn size_ebml(&mut self, ctrl: &ScanControl) -> CoreResult<CarvedHit> {
+        let span = self.limit;
+        let vint = |p: &mut Self, pos: u64| -> Option<(u64, usize)> {
+            let first = p.read(pos, 1).map_or(0, |b| b[0]);
             let len = first.leading_ones() as usize;
             if len == 0 || len > 8 || pos + len as u64 > span {
                 return None;
             }
-            let rest = p.read(pos + 1, len - 1);
+            let rest = p.read(pos + 1, len - 1).map(<[u8]>::to_vec)?;
             if rest.len() < len - 1 {
                 return None;
             }
@@ -600,7 +794,12 @@ impl Prober<'_> {
         };
         let mut pos = 0u64;
         let mut sane = false;
-        while pos < span {
+        let mut steps = 0u64;
+        while pos < span && steps < MAX_WALK_STEPS {
+            steps += 1;
+            if steps.is_multiple_of(256) {
+                ctrl.checkpoint()?;
+            }
             let Some((_, id_len)) = vint(self, pos) else {
                 break;
             };
@@ -608,56 +807,81 @@ impl Prober<'_> {
                 break;
             };
             let elem_len = id_len as u64 + size_len as u64 + size;
-            if pos + elem_len > span {
+            if pos.checked_add(elem_len).is_none_or(|e| e > span) {
                 break;
             }
             sane = true;
             pos += elem_len;
         }
-        hit(pos, if sane { 85 } else { 40 }, Category::Videos, None)
+        if sane {
+            Ok(hit(pos, 85, Category::Videos, None))
+        } else {
+            Ok(hit(
+                span.min(4 * 1024 * 1024).min(self.length_cap),
+                40,
+                Category::Videos,
+                None,
+            ))
+        }
     }
 
-    /// MP3: ID3v2 header size or a bounded frame-sync estimate.
-    fn size_mp3(&self) -> CarvedHit {
-        let data = self.read(0, 4096);
+    /// MP3: ID3v2 header size (version-validated). No ID3 → reject
+    /// (the old 16 MiB fallback carved a span per ASCII "ID3" text
+    /// hit — the session-8 lesson).
+    fn size_mp3(&mut self) -> Option<CarvedHit> {
+        let data = self.read(0, 16).map(<[u8]>::to_vec)?;
         if data.len() > 10 && &data[..3] == b"ID3" {
+            let ver = data[3];
+            if !(2..=5).contains(&ver) {
+                return None;
+            }
             let sz = (u64::from(data[6]) << 21)
                 | (u64::from(data[7]) << 14)
                 | (u64::from(data[8]) << 7)
                 | u64::from(data[9]);
-            return hit(sz + 10, 85, Category::Audio, None);
+            if sz == 0 {
+                return None;
+            }
+            return Some(hit(
+                (sz + 10).min(self.length_cap),
+                85,
+                Category::Audio,
+                None,
+            ));
         }
-        hit(self.limit.min(16 * 1024 * 1024), 55, Category::Audio, None)
+        None
     }
 
-    /// RIFF/WAV: the header's own size field.
-    fn size_riff(&self) -> Option<CarvedHit> {
-        let data = self.read(0, 4096);
-        if data.len() >= 8 {
+    /// RIFF/WAV: the header's own size field (invalid → reject).
+    fn size_riff(&mut self) -> Option<CarvedHit> {
+        let data = self.read(0, 16).map(<[u8]>::to_vec)?;
+        if data.len() >= 8 && &data[..4] == b"RIFF" {
             let riff_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
             let total = u64::from(riff_size) + 8;
-            if total >= 44 && total <= self.limit {
+            if total >= 44 && total <= self.length_cap {
                 return Some(hit(total, 92, Category::Audio, None));
             }
-            return Some(hit(self.limit, 40, Category::Audio, None));
         }
         None
     }
 
     /// OGG page-walk / repeated-marker scan (≥2 markers = a stream).
-    fn size_ogg(&self) -> Option<CarvedHit> {
-        const CAP: u64 = 256 * 1024 * 1024;
-        let span = self.limit.min(CAP);
+    fn size_ogg(&mut self) -> Option<CarvedHit> {
+        let span = self.limit;
         let (count, last) = self.count_last(b"OggS", 0, span);
         (count >= 2).then(|| hit(last.unwrap_or(span), 80, Category::Audio, None))
     }
 
-    /// FLAC: STREAMINFO harvest + metadata-block walk.
-    fn size_flac(&self) -> Option<CarvedHit> {
-        let data = self.read(0, 4096);
+    /// FLAC: STREAMINFO harvest + metadata-block walk. The walk ends
+    /// at the last-block flag → exact length; unterminated → a small
+    /// fallback prefix (the old code carved up to 128 MiB).
+    fn size_flac(&mut self) -> Option<CarvedHit> {
+        let data = self.read(0, 4096).map(<[u8]>::to_vec)?;
         if data.len() > 4 && &data[..4] == b"fLaC" {
             let mut pos = 4usize;
             let mut dims = None;
+            let mut total = 4u64;
+            let mut terminated = false;
             while pos + 4 <= data.len() {
                 let last = data[pos] & 0x80 != 0;
                 let btype = data[pos] & 0x7F;
@@ -671,13 +895,18 @@ impl Prober<'_> {
                     dims = Some((rate, channels));
                 }
                 pos += 4 + blen;
+                total += 4 + blen as u64;
                 if last {
+                    terminated = true;
                     break;
                 }
             }
+            if terminated && total <= self.length_cap {
+                return Some(hit(total, 88, Category::Audio, dims));
+            }
             return Some(hit(
-                self.limit.min(128 * 1024 * 1024),
-                88,
+                total.min(256 * 1024).min(self.length_cap),
+                45,
                 Category::Audio,
                 dims,
             ));
@@ -685,24 +914,39 @@ impl Prober<'_> {
         None
     }
 
-    /// OLE2 (doc/xls/ppt): the CFB header's FAT-sector bound.
-    fn size_ole2(&self) -> CarvedHit {
-        let data = self.read(0, 4096);
-        if data.len() >= 0x34 {
+    /// OLE2 (doc/xls/ppt): the CFB header's FAT-sector bound
+    /// (invalid geometry → reject; the old `limit` fallback carved up
+    /// to 2 GiB per false hit).
+    fn size_ole2(&mut self) -> CarvedHit {
+        let data = self.read(0, 64).map(<[u8]>::to_vec);
+        if let Some(data) = data
+            && data.len() >= 0x34
+        {
             let sector_shift = u16::from_le_bytes([data[0x1E], data[0x1F]]);
             let num_fat = u32::from_le_bytes([data[0x2C], data[0x2D], data[0x2E], data[0x2F]]);
-            let ss = 1u64 << u64::from(sector_shift).clamp(9, 12);
-            let bound = (u64::from(num_fat) + 128) * ss;
-            if bound > 0 && bound <= self.limit {
-                return hit(bound, 85, Category::Documents, None);
+            // Real CFB: 512 or 4096 byte sectors, at least one FAT
+            // sector, a sane FAT count. The shift is computed ONLY
+            // inside the guard (a garbage shift value must never
+            // reach the `<<`).
+            if (sector_shift == 9 || sector_shift == 10) && (1..=1_000_000).contains(&num_fat) {
+                let ss = 1u64 << u64::from(sector_shift);
+                let bound = (u64::from(num_fat) + 128) * ss;
+                if bound > 0 && bound <= self.length_cap {
+                    return hit(bound, 85, Category::Documents, None);
+                }
+                if bound > self.length_cap {
+                    // Larger than the cap: trust the header up to the cap.
+                    return hit(self.length_cap, 85, Category::Documents, None);
+                }
             }
         }
-        hit(self.limit, 40, Category::Documents, None)
+        hit(0, 0, Category::Documents, None) // rejected by min_size
     }
 
-    /// SQLite: page_size × page_count from the header.
-    fn size_sqlite(&self) -> Option<CarvedHit> {
-        let data = self.read(0, 4096);
+    /// SQLite: page_size × page_count from the header (invalid →
+    /// reject).
+    fn size_sqlite(&mut self) -> Option<CarvedHit> {
+        let data = self.read(0, 40).map(<[u8]>::to_vec)?;
         if data.len() >= 32 {
             let page_size = u16::from_be_bytes([data[16], data[17]]);
             let page_size = if page_size == 1 {
@@ -710,26 +954,32 @@ impl Prober<'_> {
             } else {
                 u64::from(page_size)
             };
+            if !page_size.is_power_of_two() || page_size < 512 {
+                return None;
+            }
             let pages = u32::from_be_bytes([data[28], data[29], data[30], data[31]]);
-            let total = page_size * u64::from(pages.max(1));
-            if total <= self.limit {
+            if pages == 0 {
+                return None;
+            }
+            let total = page_size.saturating_mul(u64::from(pages));
+            if total <= self.length_cap {
                 return Some(hit(total, 90, Category::Other, None));
             }
-            return Some(hit(self.limit, 55, Category::Other, None));
+            return Some(hit(self.length_cap, 55, Category::Other, None));
         }
         None
     }
 
     /// BMP: file-size field + DIB dimension validation.
-    fn size_bmp(&self) -> Option<CarvedHit> {
-        let data = self.read(0, 4096);
+    fn size_bmp(&mut self) -> Option<CarvedHit> {
+        let data = self.read(0, 40).map(<[u8]>::to_vec)?;
         if data.len() >= 26 {
             let file_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
             let header_size = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
             let w = i32::from_le_bytes([data[18], data[19], data[20], data[21]]);
             let h = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
             if file_size >= 26
-                && u64::from(file_size) <= self.limit
+                && u64::from(file_size) <= self.length_cap
                 && header_size >= 40
                 && (0..=100_000).contains(&w)
                 && (-100_000..=100_000).contains(&h)
@@ -745,21 +995,58 @@ impl Prober<'_> {
         None
     }
 
+    /// PST (research: `analyser-granular-batch1--pst-rar-mkv-heic.md`
+    /// §1 — FilePSTAnalyser): the format byte at +0x0A discriminates
+    /// ANSI (0x0E, size at +0xA8) from Unicode (0x17, size at +0xB8);
+    /// unknown versions floor at 1 MiB. `!BDN` alone is far too weak.
+    fn size_pst(&mut self) -> CarvedHit {
+        let ver = self.read(0x0A, 1).map_or(0, |b| b[0]);
+        let size_field = match ver {
+            0x0E => self.u32le(0xA8),
+            0x17 => self.u32le(0xB8),
+            _ => 0,
+        };
+        if ver != 0x0E && ver != 0x17 {
+            // Unknown version: the vendor's 1 MiB floor.
+            return hit(1024 * 1024, 60, Category::Email, None);
+        }
+        // Known generation: the header's own total-size field
+        // (clamped to the carve cap — a garbage size field must never
+        // inflate the counters).
+        hit(
+            u64::from(size_field.max(1)).min(self.length_cap),
+            60,
+            Category::Email,
+            None,
+        )
+    }
+
     /// JPEG: FFD8 start → FFD9 EOI walk (SOF dimension harvest,
     /// restart-marker aware, truncated-tolerant) — streamed in 64 KiB
     /// chunks with a 4-byte straddle carry so markers spanning chunk
-    /// edges parse correctly.
-    fn size_jpeg(&self) -> CarvedHit {
-        const CAP: u64 = 64 * 1024 * 1024;
-        let span = self.limit.min(CAP);
+    /// edges parse correctly. Probe-capped; a truncated (no-EOI) walk
+    /// carves a bounded prefix, never the full walked span.
+    fn size_jpeg(&mut self, ctrl: &ScanControl) -> CoreResult<CarvedHit> {
+        let span = self.limit;
         let mut dims = None;
         let mut chunk_base = 2u64; // past SOI
+        let mut steps = 0u64;
         loop {
+            ctrl.checkpoint()?;
             let take = (span - chunk_base).min(64 * 1024) as usize;
             if take == 0 {
                 break;
             }
-            let data = self.read(chunk_base, take + 3.min(take));
+            steps += 1;
+            if steps > MAX_WALK_STEPS {
+                break;
+            }
+            let data = self
+                .read(chunk_base, take + 3.min(take))
+                .map(<[u8]>::to_vec);
+            let Some(data) = data else {
+                break;
+            };
             let mut i = 0usize;
             while i + 4 <= data.len() {
                 if data[i] != 0xFF {
@@ -773,8 +1060,10 @@ impl Prober<'_> {
                     && marker != 0xCC
                 {
                     // SOF: precision(1) height(2) width(2).
-                    let sof = self.read(chunk_base + i as u64 + 4, 5);
-                    if sof.len() >= 5 {
+                    let sof = self.read(chunk_base + i as u64 + 4, 5).map(<[u8]>::to_vec);
+                    if let Some(sof) = sof
+                        && sof.len() >= 5
+                    {
                         let h = u16::from_be_bytes([sof[1], sof[2]]);
                         let w = u16::from_be_bytes([sof[3], sof[4]]);
                         if w > 0 && h > 0 {
@@ -786,12 +1075,12 @@ impl Prober<'_> {
                 }
                 if marker == 0xD9 {
                     // EOI — the end of the image.
-                    return hit(
+                    return Ok(hit(
                         chunk_base + i as u64 + 2,
                         if dims.is_some() { 92 } else { 88 },
                         Category::Images,
                         dims,
-                    );
+                    ));
                 }
                 if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
                     i += 2; // standalone markers
@@ -810,8 +1099,14 @@ impl Prober<'_> {
                 break;
             }
         }
-        // Truncated (no EOI within the cap): carve what we walked.
-        hit(span, 55, Category::Images, dims)
+        // Truncated (no EOI within the cap): carve a bounded prefix
+        // at Poor-grade confidence (an honest "maybe partial" signal).
+        Ok(hit(
+            span.min(1024 * 1024).min(self.length_cap),
+            45,
+            Category::Images,
+            dims,
+        ))
     }
 }
 
@@ -1029,6 +1324,198 @@ mod tests {
         let mut ram = RamDevice::new(512 * 64, 512);
         ram.bad_lba = Some(10);
         let (stats, _) = carve_ram(ram, 512 * 64);
+        assert_eq!(stats.entries, 0);
+    }
+
+    // ── Session 8: the TB-inflation + stuck-scan regressions ───────
+
+    /// A deterministic pseudo-random byte stream (xorshift64*) — the
+    /// "binary soup" a real unallocated region looks like. Seed the
+    /// FIRST bytes with signature magics to force false-positive hits.
+    fn hostile_soup(size: usize, seeds: &[(usize, &[u8])]) -> RamDevice {
+        let mut ram = RamDevice::new(size, 512);
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for b in &mut ram.data {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            *b = (x.wrapping_mul(0x2545F4914F6CDD1D) >> 56) as u8;
+        }
+        for &(at, magic) in seeds {
+            ram.data[at..at + magic.len()].copy_from_slice(magic);
+        }
+        ram
+    }
+
+    #[test]
+    fn hostile_garbage_stays_bounded_bytes() {
+        // The owner's symptom: thousands of accidental magics × huge
+        // fallback carves = TB-scale bytes_found on a small disk.
+        // A 4 MiB soup with several false JPEG/MP3/RIFF/!BDN magics
+        // must produce bounded total carved bytes (< 25% of the soup).
+        let seeds: Vec<(usize, &[u8])> = vec![
+            (512, b"\xFF\xD8\xFF\xE0"),                       // JPEG false hit
+            (512 * 40, b"\xFF\xD8\xFF\xDB"),                  // another, no EOI ever
+            (512 * 90, b"ID3\x04\x00\x00\x00\x00\x00\x0A"),   // ID3v2.4, tiny
+            (512 * 130, b"RIFF"),                             // RIFF garbage
+            (512 * 170, b"!BDN"),                             // PST garbage
+            (512 * 210, b"GIF8zz"),                           // GIF8 without 87a/89a
+            (512 * 250, b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"), // OLE2 garbage
+            (512 * 290, b"ftyp"),                             // ftyp at wrong offset (no brand)
+        ];
+        let ram = hostile_soup(512 * 8192, &seeds); // 4 MiB
+        let (stats, entries) = carve_ram(ram, 512 * 8192);
+        let total: u64 = entries.iter().map(|e| e.size).sum();
+        assert_eq!(stats.bytes, total);
+        // Seeded weak hits (2 JPEG + 1 PST floor) are each capped at
+        // their 1 MiB fallback; total must stay a small fraction of
+        // the soup — never the multi-GiB spans of the old code.
+        assert!(
+            total <= 8 * 1024 * 1024,
+            "carved bytes stay bounded, got {total} over {} entries",
+            entries.len()
+        );
+        for e in &entries {
+            assert!(
+                e.size <= 4 * 1024 * 1024,
+                "entry {} carved {}",
+                e.name,
+                e.size
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_jpeg_carves_bounded_prefix() {
+        // A JPEG SOI with NO EOI anywhere: the walk covers the probe
+        // cap but the CARVE is the small fallback prefix.
+        let mut ram = RamDevice::new(512 * 8192, 512); // 4 MiB < 8 MiB probe
+        ram.data[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        let (_, entries) = carve_ram(ram, 512 * 8192);
+        assert!(!entries.is_empty(), "truncated JPEG still surfaces");
+        let e = &entries[0];
+        assert!(e.name.ends_with(".jpg"));
+        assert!(
+            e.size <= 1024 * 1024,
+            "fallback carve bounded, got {}",
+            e.size
+        );
+        assert!(e.confidence <= 60, "weak validation carries low confidence");
+    }
+
+    #[test]
+    fn garbage_id3_text_hit_rejects() {
+        // "ID3" as literal text (no valid header after) → reject.
+        let mut ram = RamDevice::new(512 * 8, 512);
+        let text = b"ID3 - the tag format docs mention ID3 here...";
+        ram.data[..text.len()].copy_from_slice(text);
+        let (stats, _) = carve_ram(ram, 512 * 8);
+        assert_eq!(stats.entries, 0, "text 'ID3' is not an MP3");
+    }
+
+    #[test]
+    fn real_id3_mp3_carves_exact_size() {
+        let mut ram = RamDevice::new(512 * 64, 512);
+        // ID3v2.3 header: syncsafe size = 0x00 0x00 0x20 0x00 → 4096.
+        ram.data[..10].copy_from_slice(b"ID3\x03\x00\x00\x00\x00\x20\x00");
+        ram.data[10..10 + 4096].fill(0xAB);
+        let (_, entries) = carve_ram(ram, 512 * 64);
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].size, 4096 + 10);
+        assert_eq!(entries[0].confidence, 85);
+    }
+
+    #[test]
+    fn garbage_bdn_rejects_valid_pst_carves() {
+        // !BDN + ANSI version byte 0x0E + size field 0x20000 (128 KiB).
+        let mut ram = RamDevice::new(512 * 4096, 512); // 2 MiB
+        ram.data[..4].copy_from_slice(b"!BDN");
+        ram.data[0x0A] = 0x0E;
+        ram.data[0xA8..0xAC].copy_from_slice(&0x8_0000u32.to_le_bytes()); // 512 KiB
+        let (_, entries) = carve_ram(ram, 512 * 4096);
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].size, 0x8_0000);
+
+        // And the bare magic without a valid version → the 1 MiB floor.
+        let mut ram2 = RamDevice::new(512 * 4096, 512);
+        ram2.data[..4].copy_from_slice(b"!BDN");
+        let (_, entries2) = carve_ram(ram2, 512 * 4096);
+        assert_eq!(entries2.len(), 1);
+        assert_eq!(entries2[0].size, 1024 * 1024);
+    }
+
+    #[test]
+    fn garbage_ftyp_rejects_brand_checked() {
+        // A box-sized ftyp whose brand bytes are non-alnum garbage →
+        // rejected. File layout: [size u32 BE][ftyp][brand][…].
+        let mut ram = RamDevice::new(512 * 64, 512);
+        ram.data[0..4].copy_from_slice(&24u32.to_be_bytes());
+        ram.data[4..8].copy_from_slice(b"ftyp");
+        ram.data[8..12].copy_from_slice(&[0xFF, 0x00, 0xFE, 0x01]);
+        let (stats, _) = carve_ram(ram, 512 * 64);
+        assert_eq!(stats.entries, 0, "non-ASCII brand is not an MP4");
+    }
+
+    #[test]
+    fn real_ftyp_box_chain_carves() {
+        // ftyp + one 8-byte free box + a 4 KiB mdat (past min_size).
+        let mut ram = RamDevice::new(512 * 256, 512);
+        let mut f = Vec::new();
+        f.extend_from_slice(&24u32.to_be_bytes()); // box size
+        f.extend_from_slice(b"ftypisom"); // type + brand
+        f.extend_from_slice(&[0u8; 12]); // minor version (4) + compat (8)
+        f.extend_from_slice(&8u32.to_be_bytes());
+        f.extend_from_slice(b"free");
+        f.extend_from_slice(&4096u32.to_be_bytes());
+        f.extend_from_slice(b"mdat");
+        f.extend_from_slice(&[0u8; 4088]);
+        ram.data[..f.len()].copy_from_slice(&f);
+        let (_, entries) = carve_ram(ram, 512 * 256);
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].size, 24 + 8 + 4096);
+        // The signature's base confidence (85) caps the grammar's 90.
+        assert_eq!(entries[0].confidence, 85);
+    }
+
+    #[test]
+    fn validator_budget_bounds_window_work() {
+        // A window full of candidate magics: the shared budget keeps
+        // total validator reads bounded and the sweep completes fast
+        // (the hostile-garbage stuck-scan regression).
+        let mut seeds = Vec::new();
+        for i in 0..64usize {
+            seeds.push((i * 8192 + 17, &b"\xFF\xD8\xFF\xE0"[..]));
+        }
+        let ram = hostile_soup(2 * 1024 * 1024, &seeds);
+        let start = std::time::Instant::now();
+        let (_, entries) = carve_ram(ram, 2 * 1024 * 1024);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 30,
+            "hostile window completes, took {elapsed:?}"
+        );
+        // Every entry stays within the device bounds (grammar-
+        // verified BMP hits may claim their on-disk size; weak
+        // fallbacks stay at their caps).
+        assert!(entries.iter().all(|e| e.size <= 2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn wav_garbage_rejects_valid_carves() {
+        let mut ram = RamDevice::new(512 * 64, 512); // 32 KiB
+        // Valid: RIFF + size 16 KiB + WAVE.
+        ram.data[..4].copy_from_slice(b"RIFF");
+        ram.data[4..8].copy_from_slice(&(16 * 1024u32 - 8).to_le_bytes());
+        ram.data[8..12].copy_from_slice(b"WAVE");
+        let (_, entries) = carve_ram(ram, 512 * 64);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].size, 16 * 1024);
+
+        // Garbage size → reject.
+        let mut ram2 = RamDevice::new(512 * 64, 512);
+        ram2.data[..4].copy_from_slice(b"RIFF");
+        ram2.data[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let (stats, _) = carve_ram(ram2, 512 * 64);
         assert_eq!(stats.entries, 0);
     }
 
