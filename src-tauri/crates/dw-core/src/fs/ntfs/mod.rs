@@ -805,6 +805,9 @@ impl NtfsEngine {
                 let display_name = name.clone();
                 let mut entry = FoundEntry::structured(display_name, is_dir, FsKind::Ntfs);
                 entry.parent_hint = Some(format!("@mft:{parent}"));
+                // Session 8: the record number is the tree's pass-2
+                // resolution key (dirs register record → node).
+                entry.record_id = Some(record_no);
                 entry.attrs = FileAttrs(dos_attrs);
                 entry.timestamps = times;
                 entry.origin = origin;
@@ -819,6 +822,8 @@ impl NtfsEngine {
                                 None => name.clone(),
                             },
                             parent_hint: Some(format!("@mft:{parent}")),
+                            record_id: Some(record_no),
+                            partition: None,
                             is_dir: false,
                             size: *size,
                             attrs: FileAttrs(dos_attrs),

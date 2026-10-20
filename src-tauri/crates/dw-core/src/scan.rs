@@ -110,6 +110,8 @@ pub struct ScanController {
     engine_done: u64,
     engine_total: u64,
     phase: Phase,
+    /// Session 8: the device capacity — the LIVE byte-clamp bound.
+    capacity: u64,
 }
 
 impl ScanController {
@@ -124,6 +126,7 @@ impl ScanController {
     #[must_use]
     pub fn with_control(dev: Arc<dyn BlockDevice>, root_name: &str, ctrl: ScanControl) -> Self {
         let sectors = dev.total_sectors();
+        let capacity = sectors.saturating_mul(u64::from(dev.sector_size()));
         Self {
             dev: Arc::new(CachedDevice::new(dev)),
             root_name: root_name.to_string(),
@@ -136,6 +139,7 @@ impl ScanController {
             engine_done: 0,
             engine_total: 0,
             phase: Phase::Preparing,
+            capacity,
         }
     }
 
@@ -217,6 +221,11 @@ impl ScanController {
                 }
                 Err(_) => { /* engine failed — carve still runs */ }
             }
+            // Session 8: pass-2 at the unit boundary — the MFT refs
+            // this unit emitted resolve before the next engine runs
+            // (structured entries must populate the merge maps before
+            // carving absorbs their carved duplicates).
+            tree.resolve_pending();
         }
 
         // ── DEEP ───────────────────────────────────────────────────
@@ -242,6 +251,7 @@ impl ScanController {
                 obs_slot: obs,
             };
             let _ = engine.deep_scan(&mut sink, &ctrl);
+            tree.resolve_pending();
         }
         // RAW carving sweep over the WHOLE device (partitions +
         // unallocated space).
@@ -266,6 +276,9 @@ impl ScanController {
         }
 
         // ── ORGANIZE ───────────────────────────────────────────────
+        // Session 8: the final pass-2 — leftovers land on the honest
+        // lost branches, counters see every materialized node.
+        tree.finish();
         self.phase = Phase::Organizing;
         obs.on_phase(self.phase);
         self.ctrl.checkpoint()?;
@@ -299,12 +312,13 @@ impl ScanController {
 
     fn finish_stopped(
         &mut self,
-        tree: TreeBuilder,
+        mut tree: TreeBuilder,
         fs_kind: FsKind,
         obs: &mut dyn ProgressObserver,
     ) -> (TreeBuilder, ScanReport) {
         self.phase = Phase::Stopped;
         obs.on_phase(self.phase);
+        tree.finish();
         let (files, bytes) = tree.totals();
         // QA-17 (same clamp as the Done path — stopped scans report too).
         let bytes = clamp_report_bytes(bytes, self.dev.capacity_bytes());
@@ -343,18 +357,34 @@ struct ControllerSink<'a, 'o> {
 
 impl ScanSink for ControllerSink<'_, '_> {
     fn on_entry(&mut self, mut entry: FoundEntry) {
+        // Session 8: partition prefixes NEVER corrupt `@mft:` refs —
+        // they ride the dedicated partition field (the old string
+        // munging turned refs into literal "Partition 1\\@mft:1234"
+        // paths, one garbage dir per record).
         if let Some(prefix) = self.path_prefix {
-            entry.parent_hint = Some(match entry.parent_hint.take() {
-                Some(h) if !h.is_empty() => format!("{prefix}/{h}"),
-                _ => prefix.to_string(),
-            });
+            match entry.parent_hint.as_deref() {
+                Some(h) if h.starts_with('@') => {
+                    entry.partition = Some(prefix.to_string());
+                }
+                Some(h) if !h.is_empty() => {
+                    entry.parent_hint = Some(format!("{prefix}/{h}"));
+                }
+                Some(_) => {
+                    // Volume-root entry on a partition unit.
+                    entry.parent_hint = Some(prefix.to_string());
+                }
+                None => {}
+            }
         }
         let is_file = !entry.is_dir;
         let size = entry.size;
         self.tree.add(entry);
         if is_file {
             self.ctrl.files += 1;
-            self.ctrl.bytes += size;
+            // Session 8: the LIVE counter is clamped continuously (the
+            // QA-17 rule applied during the scan, not only at the end —
+            // the owner watched it climb into TB mid-scan).
+            self.ctrl.bytes = self.ctrl.bytes.saturating_add(size).min(self.ctrl.capacity);
         }
     }
 

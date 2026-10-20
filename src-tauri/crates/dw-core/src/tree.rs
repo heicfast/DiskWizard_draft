@@ -7,6 +7,19 @@
 //! the tree, and carved entries attach to the "File Path Lost" /
 //! synthesized-name branches (`artifacts/UIUX/09-results-phase-deep-dive.md`).
 //!
+//! ## Session 8 — the NTFS folder-structure fix
+//!
+//! The old builder never resolved `@mft:<record>` parent refs (the
+//! "resolved later (pass 2)" that didn't exist): every NTFS file
+//! collapsed onto "File Path Lost" and whole-disk partition prefixes
+//! corrupted the refs into literal `Partition 1\@mft:1234` path
+//! dirs. The builder now keeps an MFT-record → dir-node map, defers
+//! unresolvable entries to pending buffers, and runs a fixpoint
+//! resolution ([`TreeBuilder::resolve_pending`]) at unit/phase
+//! boundaries + [`TreeBuilder::finish`] (leftovers → the honest
+//! lost branch). Partition prefixes nest via `FoundEntry::partition`
+//! (never string-munged into refs).
+//!
 //! Merge policy: a structured entry absorbs a carved duplicate when
 //! their first extents coincide (the ~65% essential-mode noise
 //! reduction: carved copies of files the FS engine already found are
@@ -21,6 +34,9 @@ use serde::{Deserialize, Serialize};
 use crate::types::{
     Category, Extent, FileAttrs, FoundEntry, FsKind, NodeOrigin, Recoverability, Timestamps,
 };
+
+/// The NTFS root-directory MFT record (self-parented).
+const MFT_ROOT_RECORD: u64 = 5;
 
 /// One node in the results tree (the wire shape mirrors the UI's
 /// `FileNode` — dense `id` = arena index).
@@ -66,6 +82,14 @@ pub struct TreeBuilder {
     /// Per-category live counters.
     counts: HashMap<Category, (u64, u64)>,
     root_name: String,
+    /// Session 8: MFT record → materialized dir node id (NTFS).
+    mft_dirs: HashMap<u64, u64>,
+    /// Session 8: partition label → dir node id (whole-disk scans).
+    partitions: HashMap<String, u64>,
+    /// Session 8: entries whose `@mft:` parent hasn't materialized
+    /// yet — resolved by the fixpoint at phase boundaries / finish.
+    pending_files: Vec<FoundEntry>,
+    pending_dirs: Vec<FoundEntry>,
 }
 
 impl Default for TreeBuilder {
@@ -90,6 +114,10 @@ impl TreeBuilder {
             by_content_key: HashMap::new(),
             counts: HashMap::new(),
             root_name: root_name.to_string(),
+            mft_dirs: HashMap::new(),
+            partitions: HashMap::new(),
+            pending_files: Vec::new(),
+            pending_dirs: Vec::new(),
         };
         // Node 0 = the synthetic root.
         b.push_dir(None, root_name.to_string(), NodeOrigin::Existing);
@@ -129,6 +157,22 @@ impl TreeBuilder {
             self.add_directory(&e);
             return;
         }
+        // `@mft:` parent refs that can't resolve YET defer to the
+        // pending buffer (pass 2 / finish materializes them) — the
+        // session-8 folder-structure fix.
+        if let Some(hint) = e.parent_hint.as_deref()
+            && hint.starts_with('@')
+            && self.resolve_mft_dir(e.partition.as_deref(), hint).is_none()
+        {
+            self.pending_files.push(e);
+            return;
+        }
+        self.materialize_file(e);
+    }
+
+    /// Materialize one file entry against the CURRENT tree state
+    /// (merge maps, classification, roll-up).
+    fn materialize_file(&mut self, e: FoundEntry) {
         // Merge: same first extent + already structured → absorbed.
         // Same first extent + same size + already carved → absorbed
         // too (the same on-disk region carved twice is redundant,
@@ -207,46 +251,279 @@ impl TreeBuilder {
     }
 
     fn add_directory(&mut self, e: &FoundEntry) {
-        let (parent_id, name, synthetic) = match &e.parent_hint {
+        let name = sanitize_name(&e.name);
+        // The NTFS root record: the volume root IS the partition base —
+        // register the mapping, never a "." dir.
+        if name == "." {
+            if let Some(rec) = e.record_id {
+                let base = self.ensure_partition(e.partition.as_deref());
+                self.mft_dirs.entry(rec).or_insert(base);
+            }
+            return;
+        }
+        match &e.parent_hint {
+            // NTFS parent-ref: resolve NOW when the parent dir already
+            // materialized; otherwise defer to pending_dirs (pass 2).
             Some(hint) if hint.starts_with('@') => {
-                // NTFS parent-ref: resolved later (pass 2) or lost.
-                let _ = hint;
-                (0u64, sanitize_name(&e.name), true)
+                if self.resolve_mft_dir(e.partition.as_deref(), hint).is_some()
+                    || e.record_id.is_none()
+                {
+                    self.materialize_mft_dir(e, &name);
+                } else {
+                    self.pending_dirs.push(e.clone());
+                }
             }
             Some(hint) if !hint.is_empty() => {
                 let parent = self.ensure_dir_path(hint);
-                (parent, sanitize_name(&e.name), false)
+                let key = format!("{parent}\\{name}");
+                if self.dirs.contains_key(&key) {
+                    return;
+                }
+                let id = self.push_dir(Some(parent), name, e.origin);
+                self.dirs.insert(key, id);
+                self.nodes[id as usize].timestamps = e.timestamps;
             }
-            _ => (0u64, sanitize_name(&e.name), false),
+            _ => {
+                let key = format!("0\\{name}");
+                if self.dirs.contains_key(&key) {
+                    return;
+                }
+                let id = self.push_dir(Some(0), name, e.origin);
+                self.dirs.insert(key, id);
+                self.nodes[id as usize].timestamps = e.timestamps;
+            }
+        }
+    }
+
+    /// Materialize a directory whose `@mft:` parent RESOLVED (or is
+    /// root-salvage): create under the resolved parent, register the
+    /// record → node map.
+    fn materialize_mft_dir(&mut self, e: &FoundEntry, name: &str) {
+        let parent = self
+            .resolve_mft_dir(
+                e.partition.as_deref(),
+                e.parent_hint.as_deref().unwrap_or(""),
+            )
+            .unwrap_or_else(|| self.ensure_partition(e.partition.as_deref()));
+        let key = format!("{parent}\\{name}");
+        let id = if let Some(&id) = self.dirs.get(&key) {
+            id
+        } else {
+            let id = self.push_dir(Some(parent), name.to_string(), e.origin);
+            self.dirs.insert(key, id);
+            self.nodes[id as usize].timestamps = e.timestamps;
+            id
         };
-        if name == "." {
-            return; // the root re-entry
+        if let Some(rec) = e.record_id {
+            self.mft_dirs.entry(rec).or_insert(id);
         }
-        if synthetic {
-            // Directories with unresolvable parents still surface
-            // under their own name at root level (salvage).
-            let _ = parent_id;
+    }
+
+    /// Resolve an `@mft:<record>` parent hint (session 8): the root
+    /// record (5) maps to the partition base (the volume root),
+    /// materialized records to their dirs, `None` when not (yet)
+    /// resolvable — the fixpoint retries those.
+    fn resolve_mft_dir(&mut self, partition: Option<&str>, hint: &str) -> Option<u64> {
+        let rec = hint.strip_prefix("@mft:")?.parse::<u64>().ok()?;
+        if let Some(&id) = self.mft_dirs.get(&rec) {
+            return Some(id);
         }
-        let key = format!("{parent_id}\\{name}");
-        if self.dirs.contains_key(&key) {
-            return;
+        // The root record self-references (parent 5 == record 5) and
+        // everything parented at it: the partition base (tree root
+        // for single-volume scans).
+        if rec == MFT_ROOT_RECORD {
+            return Some(self.ensure_partition(partition));
         }
-        let id = self.push_dir(Some(parent_id), name, e.origin);
-        self.dirs.insert(key, id);
-        self.nodes[id as usize].timestamps = e.timestamps;
+        None
+    }
+
+    /// Materialize the partition dir (whole-disk scans) — lazily
+    /// created, stable id; `None` = the tree root.
+    fn ensure_partition(&mut self, partition: Option<&str>) -> u64 {
+        let Some(p) = partition else { return 0 };
+        if let Some(&id) = self.partitions.get(p) {
+            return id;
+        }
+        let id = self.push_dir(Some(0), p.to_string(), NodeOrigin::Existing);
+        self.partitions.insert(p.to_string(), id);
+        id
+    }
+
+    /// Pass-2 fixpoint (session 8): materialize every pending dir
+    /// whose parent chain just became resolvable; repeat until a
+    /// full pass resolves nothing. Non-final calls keep unresolved
+    /// entries pending (they may resolve after the next unit/phase).
+    pub fn resolve_pending(&mut self) {
+        loop {
+            let mut progressed = false;
+            let mut still = Vec::new();
+            let pending = std::mem::take(&mut self.pending_dirs);
+            for e in pending {
+                let hint = e.parent_hint.clone().unwrap_or_default();
+                if self
+                    .resolve_mft_dir(e.partition.as_deref(), &hint)
+                    .is_some()
+                {
+                    let name = sanitize_name(&e.name);
+                    if name != "." {
+                        self.materialize_mft_dir(&e, &name);
+                    }
+                    progressed = true;
+                } else {
+                    still.push(e);
+                }
+            }
+            self.pending_dirs = still;
+            if !progressed || self.pending_dirs.is_empty() {
+                break;
+            }
+        }
+        // Files: one pass (their parents are dirs — the fixpoint
+        // above already settled everything resolvable).
+        let pending = std::mem::take(&mut self.pending_files);
+        for e in pending {
+            let hint = e.parent_hint.clone().unwrap_or_default();
+            if self
+                .resolve_mft_dir(e.partition.as_deref(), &hint)
+                .is_some()
+            {
+                self.materialize_file(e);
+            } else {
+                // Still unresolved mid-scan: keep pending.
+                self.pending_files.push(e);
+            }
+        }
+    }
+
+    /// Final pass: resolve everything resolvable, then land the
+    /// leftovers on the honest lost branches ("File Path Lost" for
+    /// files; root-level salvage for dirs). Called once, after all
+    /// engines finish.
+    pub fn finish(&mut self) {
+        self.resolve_pending();
+        // Leftover dirs: root-level salvage (the old behavior).
+        let pending = std::mem::take(&mut self.pending_dirs);
+        for e in pending {
+            let name = sanitize_name(&e.name);
+            if name != "." {
+                let base = self.ensure_partition(e.partition.as_deref());
+                let key = format!("{base}\\{name}");
+                if !self.dirs.contains_key(&key) {
+                    let id = self.push_dir(Some(base), name, e.origin);
+                    self.dirs.insert(key, id);
+                    self.nodes[id as usize].timestamps = e.timestamps;
+                    if let Some(rec) = e.record_id {
+                        self.mft_dirs.entry(rec).or_insert(id);
+                    }
+                }
+            }
+        }
+        // Leftover files: the lost branch (with partition context).
+        let pending = std::mem::take(&mut self.pending_files);
+        for mut e in pending {
+            let branch = match e.partition.as_deref() {
+                Some(p) => format!("{p}\\File Path Lost"),
+                None => "File Path Lost".to_string(),
+            };
+            e.parent_hint = None;
+            e.partition = None;
+            self.materialize_lost(e, &branch);
+        }
+    }
+
+    /// Materialize a file directly onto a lost branch (path assembled
+    /// from the branch, not a parent dir).
+    fn materialize_lost(&mut self, e: FoundEntry, branch: &str) {
+        let first_off = e.extents.first().map_or(u64::MAX, |x| x.offset);
+        if first_off != u64::MAX
+            && let Some(&existing_id) = self.by_first_extent.get(&first_off)
+        {
+            let existing = &self.nodes[existing_id as usize];
+            if !existing.is_dir
+                && (matches!(existing.origin, NodeOrigin::Existing | NodeOrigin::Deleted)
+                    || (matches!(existing.origin, NodeOrigin::LostPath | NodeOrigin::LostName)
+                        && existing.size == e.size))
+            {
+                return;
+            }
+        }
+        let mut origin = e.origin;
+        if let Some(key) = e.content_key
+            && self.by_content_key.contains_key(&key)
+        {
+            origin = NodeOrigin::Version;
+        }
+        let category = e.category_hint.unwrap_or_else(|| classify(&e.name));
+        let dir_id = self.ensure_lost_branch(branch);
+        let id = self.nodes.len() as u64;
+        let path = format!("{}\\{}", self.nodes[dir_id as usize].path, e.name);
+        let recoverability = grade_from(&e);
+        self.nodes.push(TreeNode {
+            id,
+            parent_id: Some(dir_id),
+            name: e.name,
+            is_dir: false,
+            category,
+            size: e.size,
+            modified: e.timestamps.modified.unwrap_or_default(),
+            origin,
+            recoverability,
+            path,
+            timestamps: e.timestamps,
+            attrs: e.attrs,
+            extents: e.extents,
+            confidence: e.confidence,
+            dimensions: e.dimensions,
+            source: e.source,
+        });
+        if first_off != u64::MAX {
+            self.by_first_extent.insert(first_off, id);
+        }
+        if let Some(key) = e.content_key {
+            self.by_content_key.entry(key).or_insert(id);
+        }
+        let entry = &self.nodes[id as usize];
+        let c = self.counts.entry(entry.category).or_insert((0, 0));
+        c.0 += 1;
+        c.1 += entry.size;
+        self.roll_up(entry.id, entry.size, entry.modified);
+    }
+
+    /// The lost branch dir ("File Path Lost" / "Partition N\File Path
+    /// Lost"), materialized on demand.
+    fn ensure_lost_branch(&mut self, branch: &str) -> u64 {
+        if let Some(&id) = self.dirs.get(branch) {
+            return id;
+        }
+        // Nested form ("Partition N\File Path Lost").
+        let (parent, name) = match branch.rsplit_once('\\') {
+            Some((p, n)) => (self.ensure_dir_path(p), n),
+            None => (0, branch),
+        };
+        let id = self.push_dir(Some(parent), name.to_string(), NodeOrigin::LostPath);
+        self.dirs.insert(branch.to_string(), id);
+        id
     }
 
     /// Resolve an entry's parent: path-hint dirs materialize on
-    /// demand; carved entries land on the lost branches.
+    /// demand; carved entries land on the lost branches; `@mft:` refs
+    /// resolve through the record map (session 8 — the add path
+    /// guarantees resolution here; the defensive arm keeps the lost
+    /// fallback for direct callers).
     fn resolve_parent(&mut self, e: &FoundEntry) -> (u64, Option<String>) {
         match (&e.parent_hint, e.origin) {
             (_, NodeOrigin::LostName) => (0, Some("Tags Extracted".into())),
             (None, NodeOrigin::LostPath | NodeOrigin::Tags) => (0, Some("File Path Lost".into())),
             (Some(_), NodeOrigin::LostPath) => (0, Some("File Path Lost".into())),
             (Some(hint), _) if hint.starts_with('@') => {
-                // NTFS ref unresolved in pass 1 → the lost-keep branch
-                // keeps the name (better than dropping).
-                (0, Some("File Path Lost".into()))
+                match self.resolve_mft_dir(e.partition.as_deref(), hint) {
+                    Some(dir) => (dir, None),
+                    None => (0, Some("File Path Lost".into())),
+                }
+            }
+            (Some(hint), _) if hint.is_empty() => {
+                // Volume-root file on a partition unit.
+                (self.ensure_partition(e.partition.as_deref()), None)
             }
             (Some(hint), _) => (self.ensure_dir_path(hint), None),
             (None, _) => (0, None),
@@ -503,6 +780,119 @@ mod tests {
         poor.size = 100;
         poor.confidence = 30;
         assert_eq!(grade_from(&poor), Recoverability::Poor);
+    }
+
+    // ── Session 8: the @mft pass-2 resolution ──────────────────────
+
+    fn mft_entry(record: u64, parent: u64, name: &str, is_dir: bool) -> FoundEntry {
+        let mut e = FoundEntry::structured(name.to_string(), is_dir, FsKind::Ntfs);
+        e.parent_hint = Some(format!("@mft:{parent}"));
+        e.record_id = Some(record);
+        e
+    }
+
+    fn mft_file(record: u64, parent: u64, name: &str, size: u64, at: u64) -> FoundEntry {
+        let mut e = mft_entry(record, parent, name, false);
+        e.size = size;
+        e.extents = vec![Extent::new(at, size)];
+        e
+    }
+
+    #[test]
+    fn mft_refs_build_the_folder_structure() {
+        // Root (5), Photos dir (100), file inside (101) — parent
+        // BEFORE child (the record order NTFS actually produces).
+        let mut b = TreeBuilder::with_root("Data (D:)");
+        b.add(mft_file(101, 100, "vacation.jpg", 500, 8192));
+        b.add(mft_entry(100, 5, "Photos", true));
+        b.add(mft_entry(5, 5, ".", true));
+        b.finish();
+        let nodes = b.nodes();
+        let photo = nodes
+            .iter()
+            .find(|n| n.name == "vacation.jpg")
+            .expect("file present");
+        assert!(
+            photo.path.contains("Photos"),
+            "nested under its dir, got {}",
+            photo.path
+        );
+        assert!(!photo.path.contains("File Path Lost"));
+        let photos = nodes.iter().find(|n| n.name == "Photos").unwrap();
+        assert_eq!(photos.size, 500, "sizes roll up the resolved chain");
+    }
+
+    #[test]
+    fn mft_child_before_parent_resolves_via_fixpoint() {
+        // Child emitted first, its dir later — the pending buffer +
+        // fixpoint must still nest correctly.
+        let mut b = TreeBuilder::with_root("Vol");
+        b.add(mft_file(50, 40, "report.pdf", 100, 4096));
+        b.add(mft_file(51, 40, "notes.txt", 50, 8192));
+        b.add(mft_entry(40, 5, "Docs", true));
+        b.add(mft_entry(5, 5, ".", true));
+        b.finish();
+        let nodes = b.nodes();
+        for name in ["report.pdf", "notes.txt"] {
+            let n = nodes.iter().find(|n| n.name == name).unwrap();
+            assert!(n.path.contains("Docs"), "{name} nested, got {}", n.path);
+        }
+    }
+
+    #[test]
+    fn mft_partition_prefixes_nest_without_corrupting_refs() {
+        // Whole-disk scan: partition rides the dedicated field.
+        let mut b = TreeBuilder::with_root("Disk 0");
+        let mut f = mft_file(101, 100, "a.jpg", 10, 1024);
+        f.partition = Some("Partition 2".into());
+        b.add(f);
+        let mut d = mft_entry(100, 5, "Photos", true);
+        d.partition = Some("Partition 2".into());
+        b.add(d);
+        let mut r = mft_entry(5, 5, ".", true);
+        r.partition = Some("Partition 2".into());
+        b.add(r);
+        b.finish();
+        let nodes = b.nodes();
+        let photo = nodes.iter().find(|n| n.name == "a.jpg").unwrap();
+        assert!(photo.path.contains("Partition 2"), "{}", photo.path);
+        assert!(photo.path.contains("Photos"), "{}", photo.path);
+        assert!(
+            !nodes.iter().any(|n| n.name.contains('@')),
+            "no literal @mft dirs"
+        );
+    }
+
+    #[test]
+    fn mft_unresolvable_parents_land_on_the_lost_branch() {
+        // A file whose parent record never appears (damaged MFT).
+        let mut b = TreeBuilder::with_root("Vol");
+        b.add(mft_file(77, 12345, "orphan.doc", 300, 2048));
+        b.finish();
+        let nodes = b.nodes();
+        let orphan = nodes.iter().find(|n| n.name == "orphan.doc").unwrap();
+        assert!(orphan.path.contains("File Path Lost"), "{}", orphan.path);
+        assert_eq!(orphan.origin, NodeOrigin::Existing);
+    }
+
+    #[test]
+    fn resolve_pending_mid_scan_keeps_unresolved_pending() {
+        // Mid-scan resolution materializes what it can; the rest stays
+        // pending for the next boundary (never lost prematurely).
+        let mut b = TreeBuilder::with_root("Vol");
+        b.add(mft_file(10, 20, "waiting.txt", 10, 512));
+        b.resolve_pending();
+        assert!(
+            b.nodes().iter().all(|n| n.name != "waiting.txt"),
+            "unresolved stays pending mid-scan"
+        );
+        b.add(mft_entry(20, 5, "Later", true));
+        b.add(mft_entry(5, 5, ".", true));
+        b.resolve_pending();
+        assert!(
+            b.nodes().iter().any(|n| n.name == "waiting.txt"),
+            "resolved after the parent arrives"
+        );
     }
 
     #[test]

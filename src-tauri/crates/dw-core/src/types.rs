@@ -228,7 +228,15 @@ pub struct FoundEntry {
     pub name: String,
     /// Parent directory chain BELOW the volume root ("" = root);
     /// engines supply what they know — tree building tolerates gaps.
+    /// `@mft:<record>` = an NTFS parent REFERENCE resolved by the
+    /// tree's pass-2 (session 8: the folder structure fix).
     pub parent_hint: Option<String>,
+    /// Session 8: this entry's own MFT record number (NTFS base
+    /// records) — the tree's `@mft:` resolution key.
+    pub record_id: Option<u64>,
+    /// Session 8: the partition label (whole-disk scans, e.g.
+    /// "Partition 2") — resolved paths nest under it.
+    pub partition: Option<String>,
     pub is_dir: bool,
     pub size: u64,
     pub attrs: FileAttrs,
@@ -260,6 +268,8 @@ impl FoundEntry {
         Self {
             name,
             parent_hint: None,
+            record_id: None,
+            partition: None,
             is_dir,
             size: 0,
             attrs: FileAttrs::default(),
