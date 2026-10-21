@@ -115,8 +115,8 @@
 }
 
 .dw-file-row .dw-ft-cell {
-  font-size: 12.5px;
-  font-weight: 470;
+  font-size: 13px;
+  font-weight: 480;
   letter-spacing: 0;
   text-transform: none;
   color: var(--text);
@@ -146,9 +146,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
 }
 
 .dw-ft-icon.dw-tone-images span { color: var(--cat-images); background: color-mix(in srgb, var(--cat-images) 13%, transparent); }
@@ -170,7 +170,7 @@
   font-weight: 660;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  color: var(--used);
+  color: var(--used-text, var(--used));
   background: var(--used-soft);
 }
 
@@ -226,9 +226,9 @@
   background: currentColor;
 }
 
-.dw-grade-excellent { color: var(--grade-excellent); background: var(--grade-excellent-soft); }
-.dw-grade-good { color: var(--grade-good); background: var(--grade-good-soft); }
-.dw-grade-poor { color: var(--grade-poor); background: var(--grade-poor-soft); }
+.dw-grade-excellent { color: var(--grade-excellent-text, var(--grade-excellent)); background: var(--grade-excellent-soft); }
+.dw-grade-good { color: var(--grade-good-text, var(--grade-good)); background: var(--grade-good-soft); }
+.dw-grade-poor { color: var(--grade-poor-text, var(--grade-poor)); background: var(--grade-poor-soft); }
 
 .dw-ft-empty {
   display: flex;

@@ -15,7 +15,9 @@ import { CategoryIcon, categoryTone } from "./categoryIcon";
 
 type SortKey = "name" | "size" | "type" | "modified";
 
-const ROW_H = 40;
+/** Reference row height — generous spacing, ~13 rows visible on a
+ * 1080p results body (the reference capture's density). */
+const ROW_H = 48;
 
 export function FileTable({ files, loading }: { files: FileNode[]; loading: boolean }) {
   const selectedIds = useResultsStore((s) => s.selectedIds);
