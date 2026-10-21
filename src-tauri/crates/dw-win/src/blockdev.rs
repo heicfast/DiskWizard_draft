@@ -39,7 +39,9 @@ use windows::Win32::Storage::FileSystem::{
     ReadFile,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::IO::{
+    CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatus, OVERLAPPED,
+};
 use windows::Win32::System::Ioctl::{
     DEVICE_SEEK_PENALTY_DESCRIPTOR, DEVICE_TRIM_DESCRIPTOR, DISK_GEOMETRY_EX,
     IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER,
@@ -47,7 +49,7 @@ use windows::Win32::System::Ioctl::{
     STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY, StorageAccessAlignmentProperty,
     StorageDeviceProperty, StorageDeviceSeekPenaltyProperty, StorageDeviceTrimProperty,
 };
-use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent};
 
 use crate::win_len;
 
@@ -62,12 +64,12 @@ const RAW_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHAR
 const STAGE_CHUNK: usize = 1024 * 1024;
 
 /// Batched-read completion timeout: a healthy ≤16 MiB window completes
-/// in seconds even on dying USB media; when the wait stalls this
-/// long, every still-pending read is CANCELLED (`CancelIoEx`) — the
-/// cancellation signals its event (ERROR_OPERATION_ABORTED) like any
-/// other failure, the slot then degrades to per-sector salvage. No
-/// infinite waits, no buffer races with in-flight reads.
-const IO_WAIT_TIMEOUT_MS: u32 = 120_000;
+/// in seconds even on dying USB media; when the harvest stalls this
+/// long, the window is CANCELLED (`CancelIoEx`) and its completion
+/// packet (ERROR_OPERATION_ABORTED) arrives like any other failure —
+/// the slot then degrades to per-sector salvage. No infinite waits,
+/// no buffer races with in-flight reads.
+const IOCP_HARVEST_TIMEOUT_MS: u32 = 120_000;
 
 /// ERROR_IO_PENDING (WIN32_ERROR 997) in its HRESULT view — the
 /// normal "read queued" state windows-rs surfaces as `Err`.
@@ -91,6 +93,9 @@ pub struct RawHandleDevice {
     /// Recycled manual-reset events for overlapped waits (kernel
     /// objects are too costly to create per read).
     events: Mutex<Vec<HANDLE>>,
+    /// The lazily created completion port batching carve windows
+    /// (§5.1 item 3). One port per handle; created on first batch.
+    iocp: Mutex<Option<HANDLE>>,
 }
 
 // SAFETY: the HANDLE is used only through positioned OVERLAPPED reads
@@ -195,6 +200,7 @@ impl RawHandleDevice {
             alignment,
             profile,
             events: Mutex::new(Vec::new()),
+            iocp: Mutex::new(None),
         })
     }
 
@@ -238,13 +244,15 @@ impl RawHandleDevice {
                     OffsetHigh: u32::try_from(offset >> 32).unwrap_or(u32::MAX),
                 },
             },
-            // The LOW-BIT trick (documented ReadFile mechanism): the
+            // The LOW-BIT trick (documented ReadFile mechanism): once
+            // this handle is associated with the batch completion
+            // port (iocp()), plain reads would otherwise queue a
+            // completion packet there too — and a later batch's
+            // harvest would pop this stack OVERLAPPED and die on the
+            // unknown pointer (the vhd_end_to_end panic). Setting the
             // event's low bit tells the system to signal the event
-            // WITHOUT posting a completion packet to any port the
-            // handle might get associated with. Every read on this
-            // device is event-driven — one owner per completion, no
-            // cross-thread packet identity ever (session 12's rule:
-            // completions belong to their issuer).
+            // WITHOUT posting to the port: single reads stay
+            // event-driven, the port stays batch-only.
             hEvent: HANDLE(((ev.event.0 as usize) | 1) as *mut core::ffi::c_void),
             ..Default::default()
         };
@@ -385,41 +393,40 @@ impl RawHandleDevice {
         bad
     }
 
-    /// The pipelined batch (§5.1 item 3), event-signaled edition:
-    /// submit every window as one positioned overlapped read, then
-    /// wait for the reads to complete — queue depth = `batch.len()`,
-    /// no shared file pointer, no worker-per-read.
+    /// The (lazily created) completion port for batched reads. The
+    /// device handle is associated once; every subsequent batch
+    /// submits positioned overlapped reads and harvests completions
+    /// from this port (§5.1 item 3).
     ///
-    /// Per-read completion identity (session 12): each OVERLAPPED
-    /// carries a POOLED manual-reset event with the low bit set — the
-    /// documented mechanism that signals the event WITHOUT queueing
-    /// a packet to a completion port. Each caller therefore harvests
-    /// exactly its own reads: concurrent batch callers on the same
-    /// handle can never pop, drop or starve each other's
-    /// completions. (The retired design shared one completion port
-    /// across every concurrent batch; `GetQueuedCompletionStatus`
-    /// pops FIFO with no owner identity, so interleaved harvests
-    /// DROPPED foreign packets — the victim then waited the full
-    /// 120 s timeout, issued a `CancelIoEx` that is a no-op on an
-    /// already-completed read, and spun forever while eating every
-    /// later packet: the runner-evidenced carve freeze at 91.4 %
-    /// with the process unkillable until the job timeout.)
-    ///
-    /// Short completions and failures degrade through
-    /// [`RawHandleDevice::salvage_range`] exactly like the sequential
-    /// path, so results are IDENTICAL at any depth.
-    fn event_batch(&self, batch: &mut [BatchRead<'_>]) -> CoreResult<Vec<Vec<(u64, u64)>>> {
-        let ss = u64::from(self.sector_size);
-        // One pooled event per window (the pool sizes itself to the
-        // sharpest concurrency the scan ever runs; they recycle on
-        // drop).
-        let mut events: Vec<PooledEvent<'_>> = Vec::with_capacity(batch.len());
-        for _ in 0..batch.len() {
-            events.push(self.checkout_event()?);
+    /// # Errors
+    /// [`CoreError::Other`] when the port cannot be created.
+    fn iocp(&self) -> CoreResult<HANDLE> {
+        let mut guard = self.iocp.lock();
+        if let Some(h) = *guard {
+            return Ok(h);
         }
+        // SAFETY: the handle is owned and opened OVERLAPPED; we pass
+        // no existing port (fresh association), key 0 (slot identity
+        // rides in the OVERLAPPED pointer), and let the system pick
+        // the concurrency (one harvesting thread per batch anyway).
+        let port = unsafe { CreateIoCompletionPort(self.handle, None, 0, 0) }
+            .map_err(|e| CoreError::Other(format!("CreateIoCompletionPort: {e}")))?;
+        *guard = Some(port);
+        Ok(port)
+    }
+
+    /// The IOCP pipeline (§5.1 item 3): submit every window as one
+    /// positioned overlapped read, then harvest completions from the
+    /// port as they land — queue depth = `batch.len()`, no shared file
+    /// pointer, no worker-per-read. Short completions and failures
+    /// degrade through [`RawHandleDevice::salvage_range`] exactly like
+    /// the sequential path, so results are IDENTICAL at any depth.
+    fn iocp_batch(&self, batch: &mut [BatchRead<'_>]) -> CoreResult<Vec<Vec<(u64, u64)>>> {
+        let port = self.iocp()?;
+        let ss = u64::from(self.sector_size);
         let mut slots: Vec<BatchSlot> = Vec::with_capacity(batch.len());
         // ── submit ──────────────────────────────────────────────────
-        for (r, ev) in batch.iter_mut().zip(&events) {
+        for r in batch.iter_mut() {
             let offset = r.start_lba * ss;
             let mut slot = BatchSlot {
                 ov: Box::new(OVERLAPPED {
@@ -431,23 +438,20 @@ impl RawHandleDevice {
                             OffsetHigh: u32::try_from(offset >> 32).unwrap_or(u32::MAX),
                         },
                     },
-                    // The low-bit trick (same mechanism as the
-                    // single-read path): the completion signals THIS
-                    // event only — no completion-port packet, so no
-                    // other thread can ever consume it.
-                    hEvent: HANDLE(((ev.event.0 as usize) | 1) as *mut core::ffi::c_void),
+                    // Null event: completions post to the port.
+                    hEvent: HANDLE::default(),
                     ..Default::default()
                 }),
                 len: r.buf.len(),
                 done: 0,
                 status: SlotStatus::Pending,
-                event: ev.event,
             };
-            // SAFETY: the handle is owned and opened OVERLAPPED; the
-            // buffer slice is exclusively borrowed for the whole
-            // call; the OVERLAPPED is boxed (stable address) and
-            // untouched until its event signals below. Unique buffer
-            // + unique OVERLAPPED + unique event per request.
+            // SAFETY: the handle is owned, opened OVERLAPPED and
+            // associated with `port`; the buffer slice is exclusively
+            // borrowed for the whole call; the OVERLAPPED is boxed
+            // (stable address) and untouched until its packet is
+            // harvested below. Unique buffer + unique OVERLAPPED per
+            // request — the IOCP multi-read contract.
             let queued = unsafe {
                 ReadFile(
                     self.handle,
@@ -457,12 +461,12 @@ impl RawHandleDevice {
                 )
             };
             match queued {
-                // Queued (or completed inline — the event signals
-                // either way; there is no port to queue a packet).
+                // Synchronous completion on an associated handle STILL
+                // queues a completion packet — wait for it (freeing
+                // the OVERLAPPED before harvest would be UB).
                 Ok(()) => {}
                 Err(e) if e.code() == ERROR_IO_PENDING_HR => {}
-                // Submission-time failure: the event will never
-                // signal — settle it right here.
+                // Submission-time failure: no packet will arrive.
                 Err(_) => {
                     slot.status = SlotStatus::Rejected;
                 }
@@ -470,42 +474,39 @@ impl RawHandleDevice {
             slots.push(slot);
         }
         // ── harvest ─────────────────────────────────────────────
-        self.wait_for_slots(&mut slots);
+        self.harvest_completions(port, &mut slots);
         // ── settle: identical semantics to the sequential path ──
         Ok(self.settle_batch(batch, &slots, ss))
     }
 
-    /// Wait for every Pending slot's event, bounded by
-    /// [`IO_WAIT_TIMEOUT_MS`]. Each wait targets ONE slot's own event
-    /// (already-signaled events return immediately, so slot order
-    /// never multiplies the wall time — the total is the slowest
-    /// read, not the sum). On deadline, still-pending reads are
-    /// cancelled once; a cancelled read signals its event
-    /// (ERROR_OPERATION_ABORTED) which the final sweep collects —
-    /// the loop is therefore TOTAL: every slot reaches a terminal
-    /// status exactly once.
-    fn wait_for_slots(&self, slots: &mut [BatchSlot]) {
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(u64::from(IO_WAIT_TIMEOUT_MS));
-        let mut cancelled = false;
-        loop {
-            // The first Pending slot (a terminal one needs no wait).
-            let Some(i) = slots
-                .iter()
-                .position(|s| matches!(s.status, SlotStatus::Pending))
-            else {
-                return; // all terminal
+    /// Drain the port until every Pending slot completed (or was
+    /// cancelled after [`IOCP_HARVEST_TIMEOUT_MS`]). Cancelled reads
+    /// deliver ERROR_OPERATION_ABORTED packets, so the loop always
+    /// terminates and no buffer is touched after we return.
+    fn harvest_completions(&self, port: HANDLE, slots: &mut [BatchSlot]) {
+        let mut pending = slots
+            .iter()
+            .filter(|s| matches!(s.status, SlotStatus::Pending))
+            .count();
+        while pending > 0 {
+            let mut bytes = 0u32;
+            let mut key = 0usize;
+            let mut pov: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: port is owned; all out-params are stack locals.
+            let harvested = unsafe {
+                GetQueuedCompletionStatus(
+                    port,
+                    std::ptr::from_mut(&mut bytes),
+                    std::ptr::from_mut(&mut key),
+                    std::ptr::from_mut(&mut pov),
+                    IOCP_HARVEST_TIMEOUT_MS,
+                )
             };
-            let now = std::time::Instant::now();
-            let wait_ms = if cancelled {
-                // Post-cancel grace: aborted reads signal promptly; 1 s
-                // bounds a wedged driver without racing the settled
-                // majority.
-                1_000
-            } else if now >= deadline {
-                // Deadline: cancel every still-pending read ONCE.
-                // (A read that completed between deadline and cancel
-                // keeps its signaled event — the sweep collects it.)
+            if pov.is_null() {
+                // Timeout / port-level failure: cancel every still-
+                // pending read; each cancellation delivers its own
+                // packet (ERROR_OPERATION_ABORTED), keeping the
+                // harvest loop total and the buffers race-free.
                 for slot in slots.iter_mut() {
                     if matches!(slot.status, SlotStatus::Pending) {
                         // SAFETY: the OVERLAPPED belongs to a live
@@ -514,33 +515,32 @@ impl RawHandleDevice {
                             unsafe { CancelIoEx(self.handle, Some(std::ptr::from_ref(&*slot.ov))) };
                     }
                 }
-                cancelled = true;
                 continue;
-            } else {
-                u32::try_from((deadline - now).as_millis()).unwrap_or(u32::MAX)
-            };
-            // SAFETY: the event handle is owned (pooled) and valid.
-            let signaled = unsafe { WaitForSingleObject(slots[i].event, wait_ms) }
-                == windows::Win32::Foundation::WAIT_OBJECT_0;
-            if !signaled {
-                continue; // retry the same slot (or hit the deadline next round)
             }
-            // SAFETY: the event signaled — the OVERLAPPED is complete;
-            // bWait=false reads the final state without blocking.
-            let mut done = 0u32;
-            let r = unsafe {
-                GetOverlappedResult(
-                    self.handle,
-                    std::ptr::from_ref(&*slots[i].ov),
-                    std::ptr::from_mut(&mut done),
-                    false,
-                )
+            // Map the completed OVERLAPPED back to its slot (depth ≤16:
+            // a linear scan beats an index header). A packet that
+            // matches NO slot is a stale completion (an event-driven
+            // read that predated the low-bit fix, or a foreign
+            // issuer on a shared handle) — it is DROPPED: a scan
+            // must never die on a completion it didn't ask for (the
+            // F16 lesson, now structural).
+            let Some(slot) = slots.iter_mut().find(|s| std::ptr::from_ref(&*s.ov) == pov) else {
+                continue;
             };
-            slots[i].done = done;
-            slots[i].status = match r {
-                Ok(()) => SlotStatus::Complete,
-                Err(_) => SlotStatus::Failed,
-            };
+            if matches!(slot.status, SlotStatus::Pending) {
+                pending -= 1;
+                match harvested {
+                    Ok(()) => {
+                        slot.done = bytes;
+                        slot.status = SlotStatus::Complete;
+                    }
+                    Err(_) => {
+                        slot.status = SlotStatus::Failed;
+                    }
+                }
+            }
+            // Duplicate/stale packets (already-complete slots) are
+            // dropped — a slot completes exactly once.
         }
     }
 
@@ -587,7 +587,7 @@ impl RawHandleDevice {
 /// One batched window in flight.
 struct BatchSlot {
     /// Boxed → the OVERLAPPED address is stable for the kernel to
-    /// complete into; the box lives until the event signals.
+    /// complete into; the box lives until the packet is harvested.
     ov: Box<OVERLAPPED>,
     /// Window byte length (for short-completion detection).
     len: usize,
@@ -595,17 +595,14 @@ struct BatchSlot {
     done: u32,
     /// Submission/completion bookkeeping.
     status: SlotStatus,
-    /// This slot's pooled event — the completion identity (signaled
-    /// by the kernel, waited on by exactly this slot's owner).
-    event: HANDLE,
 }
 
 enum SlotStatus {
-    /// Queued or already complete — the event WILL signal (the
-    /// low-bit convention keeps completions event-only, so no other
-    /// thread can consume them).
+    /// Queued or synchronously completed — a completion packet IS
+    /// coming (associated handles queue packets even when the
+    /// ReadFile call completed inline).
     Pending,
-    /// Submission-time failure (the event will never signal).
+    /// Submission-time failure (no packet will arrive).
     Rejected,
     /// Harvested: bytes in `done`.
     Complete,
@@ -615,10 +612,14 @@ enum SlotStatus {
 
 impl Drop for RawHandleDevice {
     fn drop(&mut self) {
-        // SAFETY: we own the handle and every pooled event; drop runs
-        // exactly once and no reads are in flight (borrow discipline:
-        // read paths hold &self only while alive).
+        // SAFETY: we own the handle, the completion port and every
+        // pooled event; drop runs exactly once and no reads are in
+        // flight (borrow discipline: read paths hold &self only while
+        // alive).
         unsafe {
+            if let Some(port) = *self.iocp.lock() {
+                let _ = CloseHandle(port);
+            }
             let _ = CloseHandle(self.handle);
             for ev in self.events.lock().drain(..) {
                 let _ = CloseHandle(ev);
@@ -886,13 +887,12 @@ impl BlockDevice for RawHandleDevice {
         self.profile
     }
 
-    /// §5.1 item 3: the event-signaled batch pipeline. Windows of a
-    /// batch submit as concurrent positioned overlapped reads and
-    /// complete out of order (each with its own pooled event — the
-    /// completion identity); failures and short tails degrade
-    /// per-sector exactly like the sequential path. Unaligned
-    /// buffers or single-window batches take the sequential route
-    /// (identical semantics, no events needed).
+    /// §5.1 item 3: the completion-based batch pipeline. Windows of a
+    /// batch submit as concurrent positioned overlapped reads on the
+    /// IOCP-associated handle and complete out of order; failures and
+    /// short tails degrade per-sector exactly like the sequential
+    /// path. Unaligned buffers or single-window batches take the
+    /// sequential route (identical semantics, no port needed).
     fn read_sectors_sparse_batch(
         &self,
         batch: &mut [BatchRead<'_>],
@@ -906,7 +906,7 @@ impl BlockDevice for RawHandleDevice {
             .iter()
             .all(|r| r.buf.len().is_multiple_of(self.sector_size as usize));
         if fast && batch.len() > 1 {
-            return self.event_batch(batch);
+            return self.iocp_batch(batch);
         }
         // Sequential fallback (staging handles unaligned buffers).
         let mut out = Vec::with_capacity(batch.len());

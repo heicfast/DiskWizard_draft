@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+.toolchains/
 src-tauri/gen/
 *.local
 .env

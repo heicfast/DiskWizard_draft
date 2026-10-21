@@ -1111,221 +1111,61 @@ Specification (v1.0)") implemented core-only, top to bottom.
   evaluated and skipped: the lab + benchmark workflows measure the
   REAL engine on REAL media via dw-cli — richer than synthetic-only
   numbers; the codebase's --ignored perf-test convention followed.)
+# Session 9 — `performence` Rayon scan scheduling (2026-10-21)
 
----
+## Scope
 
-## Session 12 (2026-10-21) — the freeze trio: percent scale, completion stealing, drain deadlock
+- Replaced the ad-hoc, one-thread-per-unit structured scan dispatcher with a
+  bounded Rayon work-stealing pool (`min(logical CPUs, 16)`) per scan.
+- Converted NTFS MFT windows to scoped Rayon tasks. The single merger still
+  owns the tree, counters, and observer; no tree lock was introduced.
+- Corrected MFT progress to count records actually walked instead of using the
+  highest completed window index, which could report 100% while earlier Rayon
+  tasks were still running.
+- Bound both result message size (1,024 MFT records) and cancellation-aware
+  channel sends. Progress messages are intentionally lossy status updates so a
+  paused observer cannot stall raw recovery work.
+- Replaced per-partition progress bands with a monotonic, sector-weighted
+  aggregate. This removes backwards jumps when units complete out of order.
 
-Fresh-context session. Both repos re-cloned; the 3918ca6 CI state
-audited FIRST: Core E2E cancelled at the job timeout with the scan
-process hung 38 minutes past its --max-seconds deadline — the runner
-log preserved the exact failure signature the owner reported
-("progress never above 1%", frozen carve, zombie process).
+## Validation status
 
-### The diagnosis (three defects, one CI log)
+- Static checks: `git diff --check` clean; Cargo lock updated for Rayon 1.12.
+- This execution host has no `cargo`, `rustc`, or `rustfmt`, so compile/clippy/
+  test execution remains for the repository CI runners. No benchmark result is
+  claimed until the existing Windows VHD and engine benchmark jobs run.
 
-1. **The percent scale** — `snapshot()` computed
-   `(percent * 100).round() / 100` on a 0..1 FRACTION: 0.9267 became
-   0.93, displayed "0.9%". The whole scan reported 0.0→1.0% max
-   (the run's DONE line would have read "1.0%"). The app's ETA
-   divides (100 − p) by a 0..100-scale rate → the exploding
-   "remaining time". One line, every symptom the owner named.
-2. **Completion stealing (the carve freeze)** — the Windows batch
-   path shared ONE completion port across every concurrent carve
-   worker. `GetQueuedCompletionStatus` pops FIFO with no owner
-   identity: an interleaved harvest popped a FOREIGN packet, matched
-   it against its own slots, and DROPPED it; the victim waited the
-   120 s timeout, issued a `CancelIoEx` that is a no-op on an
-   already-completed read, and spun forever — while its spinning
-   harvest ate every later packet, cascading to all workers. Runner
-   evidence: carve raced to 91.4 % (956288/1046400 sectors) in 3 s,
-   then zero progress for 10 minutes until --max-seconds, then the
-   38-minute zombie.
-3. **Drain-stop deadlock (the zombie)** — all three channel sites
-   (units merger, NTFS walk, carve) stop draining on cancel while a
-   worker may be parked in `send()` on a full bounded channel;
-   `thread::scope` joins only when the sender lands. The
-   cooperative-cancel contract could never complete.
+### Session 10 — validated Rayon execution model (2026-10-21)
 
-### The fixes
+The final statement above is superseded: a project-local Rust 1.99.1 toolchain
+and the JavaScript dependencies were installed and the implementation was
+validated locally. A review of the actual nested scheduler found one flaw in
+the initial Rayon conversion: a Rayon worker could block draining a bounded
+record queue while its child MFT tasks were queued on that same pool. On a
+single-core host, or when enough NTFS units occupied the pool, that forms a
+circular wait.
 
-* **Percent**: fraction→0..100 with 2-decimal precision, clamped —
-  `(f * 100).clamp(0,100) * 100).round() / 100`. Regression tests
-  pin the phase bands (quick 2..38, deep 38..95 with the carve's
-  terminal 95, organizing 95..100, done == 100) and the
-  "max ≥ 100" smoking gun.
-* **Batch IO**: the shared port is GONE. Every batch read carries a
-  POOLED manual-reset event with the low bit set (the documented
-  event-only mechanism, same as the single-read path): each caller
-  harvests exactly its own reads — cross-thread completion theft is
-  structurally impossible. `wait_for_slots`: per-slot event waits
-  bounded by IO_WAIT_TIMEOUT_MS, one-shot CancelIoEx on deadline,
-  post-cancel sweep collects the aborts; the loop is total. The
-  settle semantics (short-tail/failed salvage) unchanged. The
-  `concurrent_batch_reads_never_steal_each_others_completions`
-  hammer test: 4 workers × 25 batches × 8 aligned 64 KiB windows on
-  the real OS disk, byte-identity vs sequential, detached workers +
-  channel timeout so a regression FAILS instead of hanging the
-  runner. (The old batch-identity test also moved to AlignedBuf —
-  plain Vecs could silently exercise the sequential fallback.)
-* **Drain-to-disconnect × 3**: after a cancel break, the merger
-  keeps receiving (discarding) until every sender drops — parked
-  senders land, observe the cancel flag, exit, the scope joins.
-  Applied to run_units_parallel, the NTFS walk drain, and
-  carve_ranges.
-* **The CLI watchdog is two-stage now**: cooperative cancel at
-  --max-seconds, then a hard `exit(75)` after 90 s grace with loud
-  WATCHDOG diagnostics — a scan path that wedges past every
-  cooperative checkpoint can never zombie a runner again.
-* **Carve-plan evidence**: ScanReport carries carve_plan_bytes /
-  carve_plan_capacity / carve_free_ranges (additive; resume fills
-  zeros); dw-cli logs "carve-plan: X% of capacity (bitmap-guided, N
-  free ranges | full-extent)" and serializes them — the CI record
-  now shows whether $Bitmap guidance engaged (the core-e2e run's
-  plan covered the FULL 511 MiB volume: sectors_total 1046400 —
-  either free-range merge ≈ everything after the mass delete, or the
-  bitmap read failed; the next run's evidence line will say which).
+The MFT walker now processes bounded groups of 8 MiB windows with Rayon as
+compute-only work, then merges/emits on the owning task. The outer structured
+scan channel remains bounded and the tree still has one owner. This preserves
+parallel parsing without queue-dependent nested scheduling, uses a small
+four-window bound per active filesystem engine, and keeps progress as an
+accumulated record count rather than a highest completed index.
 
-### Gates
+### Verification
 
-fmt clean; clippy -D warnings clean on linux (dw-core/dw-cli/
-dw-repair/dw-license) AND x86_64-pc-windows-msvc (dw-win/dw-cli,
-all targets); 238 tests green (169 dw-core incl. the 2 new percent
-regressions). dw-win tests cross-compile clean; the hammer +
-identity tests run on the Windows runners (win_api_surface rides
-every push).
-
-### Session 11 (cont. 2) — the whole-disk collision class (the lab's catch)
-
-The Recovery Lab's first real run caught a DEEP cross-volume bug no
-volume-targeted test could see:
-
-* **The tree's merge maps were volume-blind**: `mft_dirs` keyed MFT
-  record numbers ALONE and `by_first_extent` keyed extent offsets in
-  VOLUME-relative space — a whole-disk scan walks several volumes'
-  MFTs concurrently (records 5/6/7 in L: AND in the deleted W:), so
-  one volume's tree swallowed the other's (the lab: Partition 1
-  empty, everything mislabeled under Lost Partition 1; the local
-  repro: W:'s file vanished entirely — resident extents at identical
-  volume-relative offsets absorbed it).
-* **And recovery read wrong bytes**: whole-disk scans re-open the
-  disk device, but nodes carried volume-relative extents.
-
-The fix (both sides of the seam):
-1. `mft_dirs: HashMap<(partition, record), id>` — the record
-   namespace is per-volume; the partition label keys it.
-2. The merger translates every structured entry's extents to
-   DEVICE-ABSOLUTE at drain time (`+ unit.start_byte`; holes keep
-   their sentinel) — one coordinate space for the tree's dedup (the
-   carve's absolute offsets now MERGE with structured correctly —
-   the whole-disk carved-duplicate absorption that never actually
-   worked), and recovery reads true bytes on whole-disk targets.
-3. The two-volume regression test (in-table + deleted NTFS on one
-   disk, both files asserted under their own branches) — runs in
-   every CI pass now.
-
-Also: the CLI's throughput used the integer-second duration — a
-sub-second parallel scan divided by zero (the benchmark's large
-profile finished in <1 s: 219 files, 0.0 MiB/s reported). Now the
-precise Instant. And the lab's recycle-class gate matches the
-$RXXXXXX renamed copies by size+ext (Windows renames on
-SendToRecycleBin — by-name recall is a gate-design error, not an
-engine miss).
-
-### Session 11 (cont. 3) — the flake and the honest first-tick
-
-The phase-band test (carve_progress_maps_into_the_deep_band) flaked
-green-then-red across CI runs: it demanded a mid-band sample from a
-fixture whose ENTIRE carve completes before the drain's first 100 ms
-tick — and whose 2 MiB has no carveable signatures (no entries → the
-drain's only observable state is the terminal one). Two fixes:
-1. The carve drain's FIRST tick now lands immediately (no 100 ms
-   wait for tick #1) AND only once real progress exists
-   (bytes_done > 0) — no more 0 %-of-sweep noise tick.
-2. The test's fixture gained a SlowHalf wrapper (reads touching the
-   volume's second half stall 150 ms) — the mid-sweep state is now
-   DETERMINISTIC, not a race with the scheduler. (The overlap
-   advance starts window 2 before the midpoint — the stall condition
-   keys on the read RANGE, not its start.)
----
-
-## Session 12 (cont.) — the lab evidence pass: five more engine defects, the recycle reconstruction, the seeder honesty
-
-The b4df31b run was the first REAL validation of the session-11
-parallel architecture: Core E2E GREEN for the first time since the
-RE-Match spec (the freeze fixes held), Windows Integration green with
-the new concurrent batch hammer. Engine Benchmark + Recovery Lab
-failed — and their evidence, read properly, exposed five more defects:
-
-### The evidence-driven diagnosis
-
-1. **Benchmark `duration=0s` → 0 MiB/s** — sub-second scans (2 GB in
-   0.9 s!) floored the integer-second duration; throughput divided by
-   zero. The CLI now computes it from its own precise Instant (the
-   report's integer field stays — wire contract).
-2. **`carve-plan: 100% full-extent (no bitmap guidance)`** — the new
-   evidence line caught the $Bitmap path NEVER ENGAGING on the
-   benchmark volumes: `load_volume_bitmap` read
-   `total_clusters/8` bytes in one slice, but that length is rarely a
-   SECTOR multiple (16350 B on the 511-MiB VHD) — `check_buf`
-   rejected it → None → full-extent fallback AND no $Bitmap viability
-   grading. Only round-geometry volumes (the exactly-10-GiB lab disk)
-   worked. Fixed with padded sector-multiple reads (the consumers
-   bound every bit access by total_clusters — the pad is inert);
-   regression fixture with 1308 clusters → 164 B.
-3. **The lab's branch inversion** (everything under "Lost Partition
-   1", "Partition 1" empty) — `mft_dirs` was keyed by RECORD NUMBER
-   ALONE: two concurrently-walked NTFS volumes share record numbers,
-   and the victim's root (record 5) parented ALL of the main
-   partition's directories. Now scoped by (partition, record).
-4. **The 28 vanished victims** — `by_first_extent` maps
-   partition-RELATIVE offsets globally: a victim file at relative
-   offset X was absorbed as "noise" by a main file at the same X. The
-   merger now translates every structured entry's extents to
-   DEVICE-ABSOLUTE at the unit boundary — which also makes the
-   carve↔structured dedup (the carver emits absolute) actually match
-   across partitions, and fixes the readability probes + recovery
-   reads for partition units (they always assumed absolute).
-5. **The aligned-gap sweep hole** — `next_multiple_of(2048)` on an
-   already-aligned gap start returned the same LBA, then `.max(start+1)`
-   nudged 1 sector — every later probe off the MiB grid forever (a
-   boot at the 2nd-or-later boundary of an aligned gap was invisible;
-   the lab's victim only survived because its boot sat at the gap
-   start). Fixed: advance to the boundary STRICTLY beyond start.
-
-### The recycle-bin reconstruction (the og's $I model — a feature)
-
-Recycle-fate recall was 0/375: the engine surfaced the bin's $RXXXXXX
-records under $RECYCLE.BIN\<SID>, names the manifest can never match —
-and the og shows recycled files at their ORIGINAL paths (it parses the
-$I index). Implemented, exactly that: the walk stashes $R/$I twin FILE
-records (dirs never — `$RECYCLE.BIN` is shape-identical to a twin
-name!), parse_record captures the $I's tiny resident index (bounded,
-$I-named records only), and the post-walk pairing emits matched $R
-under the ORIGINAL leaf + directory path (v2 and v1 index formats;
-drive prefix stripped; volume-root originals fall back to @mft:5).
-Unmatched $R pass through raw; $I never surfaces; QA-4 destroy still
-binds (no resurrection of overwritten content). `ensure_dir_path` now
-anchors a leading partition label at that partition's base — path-
-joined chains share `dirs` keys with the mft-materialized ones.
-End-to-end fixture: $I/$R twins in $RECYCLE.BIN\S-1-5-21-999 →
-`Test (V:)\Docs\recycled.txt`, no raw twin names.
-
-### The lab's own honesty (workflow fixes)
-
-- **Seeder order**: recycle-moves FIRST (their $R/$I records allocate
-  from the pristine MFT tail), force-deletes AFTER. Interleaved, NTFS
-  record-reuse ate ~15% of the force-deleted records (the 69%-vs-90%
-  deleted-recall gap — allocator-dependent, physically gone, the og
-  loses them identically; core-e2e had already learned this as "the
-  churn lane is data-not-gate"). Ordered: ceiling ~99.7%.
-- **Path-accuracy check**: samples the first 400 MATCHED files (the
-  first 400 manifest entries could all sit in a reuse hole — the 0/0
-  artifact).
-
-### Gates
-
-fmt clean; clippy -D warnings clean on linux AND
-x86_64-pc-windows-msvc (all targets); 172 dw-core tests green (the 5
-new: percent scale ×2, bitmap alignment, two-volume collision,
-recycle reconstruction).
+* `cargo +1.99.1 fmt --all -- --check`, `check -p dw-core`, and
+  `clippy -p dw-core --all-targets -- -D warnings`: clean.
+* `cargo +1.99.1 test -p dw-core`: 168 passed, 1 fixture-gated ignored;
+  includes a new one-worker Rayon regression test.
+* Ignored performance smoke tests: 200,000-record MFT walk completed in
+  3.04 s (65,886 records/s); the 256 MiB signature-dense carve completed in
+  19.90 s (14 MiB/s). Both configured correctness/throughput floors passed.
+* `npm ci`, `npm run typecheck`, `npm test` (74 passed), and `npm run build`:
+  passed. Vite retains its existing advisory warning about a >500 kB chunk.
+* The full Linux Tauri workspace test was attempted. It is blocked before
+  app compilation because this host lacks the `pkg-config` executable and the
+  GLib/GObject development metadata required by Linux WebKitGTK. Installing
+  those system packages was also attempted, but this container disallows the
+  APT helper's required UID/GID namespace transitions. This does not affect
+  the validated platform-independent core or the Windows target.

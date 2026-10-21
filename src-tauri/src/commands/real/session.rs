@@ -44,11 +44,6 @@ pub fn resume_session(s: State<'_, AppState>, session_id: String) -> Result<Valu
             duration_sec: loaded.header.duration_sec,
             stopped: loaded.header.stopped,
             fs: dw_core::types::FsKind::Unknown,
-            // A resumed session has no fresh carve evidence (the
-            // original scan's plan stats live in its own results).
-            carve_plan_bytes: 0,
-            carve_plan_capacity: 0,
-            carve_free_ranges: 0,
         });
         *st.phase_slot().lock() = dw_core::scan::Phase::Done;
         next

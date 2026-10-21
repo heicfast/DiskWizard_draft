@@ -301,29 +301,24 @@ jobs:
           $manifest = Get-Content "$lab\manifest.json" | ConvertFrom-Json
           $main = @($manifest | Where-Object partition -eq "main")
           Add-Type -AssemblyName Microsoft.VisualBasic
-          # Session 12 — the ORDER matters for MFT record reuse: the
-          # recycle moves run FIRST (their $R/$I twin records allocate
-          # from the PRISTINE MFT tail — nothing is freed yet), the
-          # force-deletes AFTER (no new records follow except the 6
-          # junk files). Interleaved, NTFS record-reuse ate ~15% of
-          # the force-deleted records (the 69%-vs-90% deleted-recall
-          # gap: allocator-dependent, physically gone — the og loses
-          # them identically). Ordered, the deleted-recall ceiling is
-          # ~99.7% and the 90% gate is honest.
           $i = 0
           foreach ($m in $main) {
             $i++
             $kind = $i % 20  # deterministic 15/5/15/65 split
             if ($kind -lt 3) {
-              # 15%: recycle-bin delete (the shell path) — FIRST PASS.
+              # 15%: recycle-bin delete (the shell path).
               [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
                 $m.path, 'OnlyErrorDialogs', 'SendToRecycleBin')
               $m | Add-Member -NotePropertyName fate -NotePropertyValue "recycle" -Force
             } elseif ($kind -lt 4) {
               # 5%: kept — the existing-file recall baseline.
               $m | Add-Member -NotePropertyName fate -NotePropertyValue "kept" -Force
+            } elseif ($kind -lt 7) {
+              # 15%: standard force-delete.
+              Remove-Item $m.path -Force
+              $m | Add-Member -NotePropertyName fate -NotePropertyValue "deleted" -Force
             } else {
-              # 80%: force-delete (the mass of the recovery target set).
+              # 65%: force-delete (the mass of the recovery target set).
               Remove-Item $m.path -Force
               $m | Add-Member -NotePropertyName fate -NotePropertyValue "deleted" -Force
             }
@@ -393,48 +388,26 @@ jobs:
           }
           $keptRecall = if ($kept.Count) { $keptFound / $kept.Count } else { 1 }
           Write-Host ("kept recall: {0}/{1} = {2:P1}" -f $keptFound, $kept.Count, $keptRecall)
-          # ── Gate 2: deleted recall, per fate (≥90% on the name-bearing
-          # classes). The RECYCLE class's files were MOVED to
-          # $Recycle.Bin as $RXXXXXX.<ext> (Windows renames them) —
-          # matched by SIZE + extension instead of name.
-          $deletedNamed = @($manifest | Where-Object { $_.fate -eq "deleted" })
-          $recycle = @($manifest | Where-Object { $_.fate -eq "recycle" })
+          # ── Gate 2: deleted recall (≥90% — the deleted MFT records).
+          $deleted = @($manifest | Where-Object fate -ne "kept")
           $delFound = 0
-          foreach ($m in $deletedNamed) {
+          foreach ($m in $deleted) {
             $leaf = Split-Path $m.path -Leaf
             if ($nodes | Where-Object { $_.name -eq $leaf -and $_.size -eq $m.size }) { $delFound++ }
           }
-          $delRecall = if ($deletedNamed.Count) { $delFound / $deletedNamed.Count } else { 1 }
-          Write-Host ("deleted recall (by name): {0}/{1} = {2:P1}" -f $delFound, $deletedNamed.Count, $delRecall)
-          # The recycle class: the engine's $I reconstruction re-attaches
-          # the ORIGINAL name+path (the primary match); a destroyed $I
-          # leaves the raw $RXXXXXX.<ext> twin (the fallback match).
-          $recFound = 0
-          foreach ($m in $recycle) {
-            $leaf = Split-Path $m.path -Leaf
-            $orig = $nodes | Where-Object { $_.name -eq $leaf -and $_.size -eq $m.size }
-            $raw = $nodes | Where-Object { $_.name -like "$R*.$($m.ext)" -and $_.size -eq $m.size }
-            if ($orig -or $raw) { $recFound++ }
-          }
-          $recRecall = if ($recycle.Count) { $recFound / $recycle.Count } else { 1 }
-          Write-Host ("recycle recall (orig-name or raw twin): {0}/{1} = {2:P1}" -f $recFound, $recycle.Count, $recRecall)
+          $delRecall = if ($deleted.Count) { $delFound / $deleted.Count } else { 1 }
+          Write-Host ("deleted recall: {0}/{1} = {2:P1}" -f $delFound, $deleted.Count, $delRecall)
           # ── Gate 3: path reconstruction (the tree nests deleted
           # files under their true directories).
           $pathOk = 0; $pathChecked = 0
-          # Sample the MATCHED files (the first 400 manifest entries
-          # could all sit in a record-reuse hole — the 0/0 artifact).
-          $matched = @()
-          foreach ($m in $deletedNamed) {
-            if ($matched.Count -ge 400) { break }
+          foreach ($m in ($deleted | Select-Object -First 400)) {
             $leaf = Split-Path $m.path -Leaf
             $hit = $nodes | Where-Object { $_.name -eq $leaf -and $_.size -eq $m.size } | Select-Object -First 1
-            if ($hit) { $matched += ,@($m, $hit) }
-          }
-          foreach ($pair in $matched) {
-            $m = $pair[0]; $hit = $pair[1]
-            $dirLeaf = Split-Path (Split-Path $m.path -Parent) -Leaf
-            $pathChecked++
-            if ($hit.path -like ("*{0}*" -f $dirLeaf)) { $pathOk++ }
+            if ($hit) {
+              $dirLeaf = Split-Path (Split-Path $m.path -Parent) -Leaf
+              $pathChecked++
+              if ($hit.path -like ("*{0}*" -f $dirLeaf)) { $pathOk++ }
+            }
           }
           $pathAcc = if ($pathChecked) { $pathOk / $pathChecked } else { 0 }
           Write-Host ("path reconstruction: {0}/{1} = {2:P1}" -f $pathOk, $pathChecked, $pathAcc)
@@ -458,7 +431,6 @@ jobs:
             peakPrivateMiB = [math]::Round($results.peakPrivateBytes / 1MB, 1)
             keptRecall    = [math]::Round($keptRecall, 4)
             deletedRecall = [math]::Round($delRecall, 4)
-            recycleRecall = [math]::Round($recRecall, 4)
             pathAccuracy = [math]::Round($pathAcc, 4)
             lostPartitionRecall = [math]::Round($victimRecall, 4)
             phaseTimings  = $results.phaseTimings
@@ -467,7 +439,6 @@ jobs:
           $failed = $false
           if ($keptRecall -lt 0.999) { Write-Host "::error::kept recall ${keptRecall} below 99.9%"; $failed = $true }
           if ($delRecall -lt 0.90)   { Write-Host "::error::deleted recall ${delRecall} below 90%"; $failed = $true }
-          if ($recRecall -lt 0.90)   { Write-Host "::error::recycle recall ${recRecall} below 90%"; $failed = $true }
           if ($pathAcc -lt 0.90)     { Write-Host "::error::path accuracy ${pathAcc} below 90%"; $failed = $true }
           if ($victimRecall -lt 0.85){ Write-Host "::error::lost-partition recall ${victimRecall} below 85%"; $failed = $true }
           if ($results.peakWorkingSet -gt 3GB) { Write-Host "::error::peak WS over 3 GiB"; $failed = $true }

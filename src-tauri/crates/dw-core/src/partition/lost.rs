@@ -207,15 +207,9 @@ pub fn sweep_for_lost_partitions(
                     confidence: probe.confidence,
                 });
             }
-            // 1 MiB stride + the gap start itself. The advance past the
-            // first probe must land on the NEXT 1-MiB boundary STRICTLY
-            // beyond `start` — an already-aligned start advanced only
-            // `start+1`, leaving every later probe off the MiB grid
-            // (a boot sector at the 2nd-or-later boundary of an
-            // aligned gap was invisible; session 12's two-volume
-            // fixture caught it).
+            // 1 MiB stride + the gap start itself.
             lba = if probed == 0 {
-                (start + 1).next_multiple_of(2048).max(start + 1)
+                start.max(1).next_multiple_of(2048).max(start + 1)
             } else {
                 lba + 2048
             };

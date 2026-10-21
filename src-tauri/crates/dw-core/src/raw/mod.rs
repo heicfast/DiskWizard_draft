@@ -145,7 +145,7 @@ impl RawCarver {
     /// (`cores.clamp(2,16)`, bounded by the buffer budget) consumes
     /// window batches off a shared work queue — each worker submits
     /// its batch as ONE [`BlockDevice::read_sectors_sparse_batch`]
-    /// (the platform overlapped-events pipeline on Windows), scans every window
+    /// (the platform IOCP pipeline on Windows), scans every window
     /// (signature hunt + grammar validation — the CPU-bound half
     /// that was serial), and sends carved entries over a bounded
     /// channel (cap 1024 — the RE queue size for the larger carved
@@ -340,10 +340,8 @@ impl RawCarver {
             drop(tx);
             // THIS thread owns the sink: drain the carve channel,
             // throttled live progress (100 ms — the RE CProgressTimer
-            // cadence; the FIRST tick lands immediately so a fast
-            // sweep still surfaces a mid-band sample — the phase-band
-            // test's flake), cooperative pause/stop honored mid-drain.
-            let mut last_progress: Option<std::time::Instant> = None;
+            // cadence), cooperative pause/stop honored mid-drain.
+            let mut last_progress = std::time::Instant::now();
             'drain: loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(e) => {
@@ -358,29 +356,16 @@ impl RawCarver {
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'drain,
                 }
-                let done_now = bytes_done.load(std::sync::atomic::Ordering::Relaxed);
-                if done_now > 0 && last_progress.is_none_or(|t| t.elapsed().as_millis() >= 100) {
+                if last_progress.elapsed().as_millis() >= 100 {
                     if ctrl.checkpoint().is_err() {
                         cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     #[allow(clippy::cast_precision_loss)] // percent display
-                    sink.on_progress(done_now / ss, total_bytes / ss);
-                    last_progress = Some(std::time::Instant::now());
-                }
-            }
-            // Session 12 — drain-to-disconnect: a carve worker may be
-            // parked in `send` (channel cap 1024) with its collected
-            // window entries when the merger breaks on cancel; the
-            // scope joins only when that send lands. Keep receiving
-            // (discarding) until every worker drops its sender — the
-            // same cancel-time wedge the units merger had.
-            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                loop {
-                    match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                        Ok(_) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                    }
+                    sink.on_progress(
+                        bytes_done.load(std::sync::atomic::Ordering::Relaxed) / ss,
+                        total_bytes / ss,
+                    );
+                    last_progress = std::time::Instant::now();
                 }
             }
         });
@@ -1666,7 +1651,7 @@ mod tests {
 
     /// Test double: a profile-forced device whose batches complete in
     /// REVERSE order — proving the carver's results never depend on
-    /// completion ordering (the overlapped-events contract) — and which records
+    /// completion ordering (the IOCP contract) — and which records
     /// the batch sizes it served.
     struct BatchingRam {
         ram: Arc<RamDevice>,

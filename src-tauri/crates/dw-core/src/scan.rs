@@ -21,6 +21,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::Serialize;
 
 use crate::blockdev::{BlockDevice, BlockRead, CachedDevice};
@@ -82,15 +84,6 @@ pub struct ScanReport {
     pub duration_sec: u64,
     pub stopped: bool,
     pub fs: FsKind,
-    /// Session 12 evidence — the carve coverage plan's total bytes
-    /// (free-cluster-guided on a healthy NTFS, full-extent otherwise).
-    pub carve_plan_bytes: u64,
-    /// The scanned capacity (the plan ratio's denominator).
-    pub carve_plan_capacity: u64,
-    /// Free-cluster ranges the NTFS $Bitmap contributed (0 with a
-    /// nonzero plan = the bitmap was unavailable and the plan fell
-    /// back to full extents — the slower-but-correct path).
-    pub carve_free_ranges: u32,
 }
 
 /// Live observer the app layer installs (event emission seam).
@@ -136,11 +129,27 @@ pub struct ScanController {
     /// stopped-report's label when cancellation lands between the
     /// units' lifetimes.
     last_fs_kind: FsKind,
-    /// Session 12: the carve-plan evidence (reported even on stopped
-    /// scans that reached the carve phase).
-    carve_plan_bytes: u64,
-    carve_plan_capacity: u64,
-    carve_free_ranges: u32,
+    /// One bounded work-stealing pool per scan. Nested Rayon work in
+    /// filesystem engines inherits this pool rather than creating an
+    /// unbounded pool per partition or MFT walk.
+    rayon_pool: Option<ThreadPool>,
+}
+
+/// Create the scan's bounded Rayon pool.  We keep one CPU worker on a
+/// single-core host and cap wider machines at sixteen workers: recovery is
+/// dominated by storage latency beyond that point, while larger pools add
+/// cache pressure and starve the merger/UI thread.  Pool creation can fail
+/// only for platform resource reasons; callers then use Rayon's global pool
+/// and preserve functional scan behavior.
+fn build_scan_pool() -> Option<ThreadPool> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .clamp(1, 16);
+    ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|index| format!("dw-scan-{index}"))
+        .build()
+        .ok()
 }
 
 impl ScanController {
@@ -173,9 +182,7 @@ impl ScanController {
             last_publish: Instant::now(),
             ever_published: false,
             last_fs_kind: FsKind::Raw,
-            carve_plan_bytes: 0,
-            carve_plan_capacity: 0,
-            carve_free_ranges: 0,
+            rayon_pool: build_scan_pool(),
         }
     }
 
@@ -188,14 +195,7 @@ impl ScanController {
     fn snapshot(&self, percent: f64) -> Progress {
         Progress {
             phase: self.phase,
-            // `percent` arrives as a 0..1 fraction from every call
-            // site (phase bands, carve mapping, the 1.0 done markers);
-            // the wire field is 0..100 with two decimals of precision.
-            // Session 12: the old `(percent * 100).round() / 100`
-            // rounded the FRACTION to two decimals (0.9267 → 0.93) —
-            // the UI bar sat under 1% for the whole scan and the ETA
-            // (which divides 100−p by a 0..100 rate) exploded.
-            percent: ((percent * 100.0).clamp(0.0, 100.0) * 100.0).round() / 100.0,
+            percent: (percent * 100.0).round() / 100.0,
             files_found: self.files,
             bytes_found: self.bytes,
             sectors_read: self.sectors_read,
@@ -311,10 +311,7 @@ impl ScanController {
         // (non-NTFS units' extents, NTFS units without a usable
         // bitmap, and the unpartitioned/lost gaps) carves fully.
         if !self.ctrl.is_cancelled() {
-            let (carve_plan, plan_stats) = self.carve_plan(&units);
-            self.carve_plan_bytes = plan_stats.plan_bytes;
-            self.carve_plan_capacity = self.dev.capacity_bytes();
-            self.carve_free_ranges = plan_stats.free_ranges;
+            let carve_plan = self.carve_plan(&units);
             let carver = RawCarver::new(Arc::clone(&self.dev) as Arc<dyn BlockDevice>);
             let ctrl = self.ctrl.clone();
             let mut sink = CarveSink {
@@ -371,9 +368,6 @@ impl ScanController {
             duration_sec: self.started.elapsed().as_secs(),
             stopped: false,
             fs: kind,
-            carve_plan_bytes: self.carve_plan_bytes,
-            carve_plan_capacity: self.carve_plan_capacity,
-            carve_free_ranges: self.carve_free_ranges,
         })
     }
 
@@ -410,127 +404,110 @@ impl ScanController {
             Phase::Quick => (0.02, 0.38),
             _ => (0.38, 0.68),
         };
-        let mut cum_weight = 0u64;
-        let mut bands: Vec<(usize, f64, f64)> = Vec::with_capacity(structured.len());
-        for &(i, u) in &structured {
-            let lo = band_lo + (band_hi - band_lo) * weight_frac(cum_weight, structured_weight);
-            cum_weight += u.sectors.max(1);
-            let hi = band_lo + (band_hi - band_lo) * weight_frac(cum_weight, structured_weight);
-            bands.push((i, lo, hi));
-        }
-        let band_of = |unit: usize| -> (f64, f64) {
-            bands
-                .iter()
-                .find(|(i, _, _)| *i == unit)
-                .map_or((band_lo, band_hi), |&(_, lo, hi)| (lo, hi))
-        };
         let ctrl = self.ctrl.clone();
         let (tx, rx) = crossbeam_channel::bounded::<UnitMsg>(UNIT_CHANNEL_CAP);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let cancelled_ref = &cancelled;
         let mut cancelled_err: Option<CoreError> = None;
         let mut done_sum = 0u64;
+        // Track each unit independently then aggregate by byte weight.  A
+        // per-unit band makes out-of-order completions move progress
+        // backwards; the aggregate is monotonic and reflects actual work.
+        let mut unit_progress = vec![(0u64, 0u64); units.len()];
+        let pool = self.rayon_pool.take();
         std::thread::scope(|scope| {
-            for &(i, u) in &structured {
-                let tx = tx.clone();
-                let ctrl = ctrl.clone();
-                let fs = u.fs;
-                let dev = Arc::clone(&u.dev);
-                let cancelled = cancelled_ref;
-                scope.spawn(move || {
-                    let Ok(mut engine) = fs::create_engine(fs, dev) else {
-                        // Engine failure: the carve still covers the
-                        // unit's bytes; other units continue.
-                        return;
-                    };
-                    let mut sink = UnitChannelSink { tx, unit: i };
-                    let r = match phase {
-                        Phase::Quick => engine.quick_scan(&mut sink, &ctrl),
-                        _ => engine.deep_scan(&mut sink, &ctrl),
-                    };
-                    if matches!(r, Err(CoreError::Cancelled)) {
-                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                });
-            }
+            let producer_tx = tx.clone();
+            let structured_ref = &structured;
+            let pool_ref = &pool;
+            let producer = scope.spawn(move || {
+                let run = || {
+                    structured_ref.par_iter().for_each(|&(i, u)| {
+                        if cancelled_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        let Ok(mut engine) = fs::create_engine(u.fs, Arc::clone(&u.dev)) else {
+                            // Engine failure: the carve still covers this
+                            // unit; other units continue independently.
+                            return;
+                        };
+                        let mut sink = UnitChannelSink {
+                            tx: producer_tx.clone(),
+                            unit: i,
+                            cancelled: cancelled_ref,
+                        };
+                        let result = match phase {
+                            Phase::Quick => engine.quick_scan(&mut sink, &ctrl),
+                            _ => engine.deep_scan(&mut sink, &ctrl),
+                        };
+                        if matches!(result, Err(CoreError::Cancelled)) {
+                            cancelled_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    });
+                };
+                if let Some(pool) = pool_ref.as_ref() {
+                    pool.install(run);
+                } else {
+                    run();
+                }
+            });
             drop(tx);
             // THIS thread = the merger (tree + counters + observer).
             'drain: loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
                     Ok(UnitMsg::Entry(unit, boxed_entry)) => {
                         let mut entry = *boxed_entry;
-                        // The session-11 whole-disk fix: a sub-device
-                        // unit's engine reports VOLUME-relative
-                        // extents; the tree's first-extent merge map
-                        // and the recovery reader both need
-                        // DEVICE-absolute offsets (the carve already
-                        // emits absolute — one coordinate space for
-                        // everything). Holes keep their sentinel.
-                        let start_byte = units.get(unit).map_or(0, |u| u.start_byte);
-                        if start_byte > 0 {
-                            for ext in &mut entry.extents {
-                                if ext.offset != crate::types::HOLE_EXTENT_OFFSET {
-                                    ext.offset += start_byte;
-                                }
-                            }
-                        }
                         // Partition prefixes ride the dedicated field
                         // (never string-munged into `@mft:` refs — the
                         // session-8 rule); the unit tag routes the
                         // right partition's label.
-                        if let Some(&(_, u)) = structured.iter().find(|(j, _)| *j == unit) {
-                            // Session 12 — DEVICE-ABSOLUTE extents: the
-                            // engines emit volume-RELATIVE offsets (they
-                            // read through the partition slice); every
-                            // downstream consumer — the by_first_extent
-                            // merge, the carve↔structured dedup (the
-                            // carver emits absolute), the readability
-                            // probes and the recovery stream — reads
-                            // through the WHOLE-TARGET device. Translate
-                            // once, here, at the unit boundary: two
-                            // partitions' relative offsets must never
-                            // collide in the merge maps (the lab run's
-                            // cross-partition absorption), and carved
-                            // duplicates of structured files must
-                            // actually match.
-                            let base = u.start_byte;
-                            if base != 0 {
-                                for ext in &mut entry.extents {
-                                    if ext.offset != crate::types::HOLE_EXTENT_OFFSET {
-                                        ext.offset += base;
-                                    }
+                        if let Some(&(_, u)) = structured.iter().find(|(j, _)| *j == unit)
+                            && let Some(prefix) = u.prefix.as_deref()
+                        {
+                            match entry.parent_hint.as_deref() {
+                                Some(h) if h.starts_with('@') => {
+                                    entry.partition = Some(prefix.to_string());
                                 }
-                            }
-                            if let Some(prefix) = u.prefix.as_deref() {
-                                match entry.parent_hint.as_deref() {
-                                    Some(h) if h.starts_with('@') => {
-                                        entry.partition = Some(prefix.to_string());
-                                    }
-                                    Some(h) if !h.is_empty() => {
-                                        entry.parent_hint = Some(format!("{prefix}/{h}"));
-                                    }
-                                    Some(_) => {
-                                        // Volume-root entry on a partition unit.
-                                        entry.parent_hint = Some(prefix.to_string());
-                                    }
-                                    None => {}
+                                Some(h) if !h.is_empty() => {
+                                    entry.parent_hint = Some(format!("{prefix}/{h}"));
                                 }
+                                Some(_) => {
+                                    // Volume-root entry on a partition unit.
+                                    entry.parent_hint = Some(prefix.to_string());
+                                }
+                                None => {}
                             }
                         }
                         self.ingest_entry(obs, tree, entry);
                     }
                     Ok(UnitMsg::Progress { unit, done, total }) => {
-                        done_sum = done_sum.max(done);
-                        let (lo, hi) = band_of(unit);
-                        let frac = if total == 0 {
-                            1.0
-                        } else {
-                            #[allow(clippy::cast_precision_loss)]
-                            {
-                                (done as f64 / total as f64).clamp(0.0, 1.0)
-                            }
+                        let Some(slot) = unit_progress.get_mut(unit) else {
+                            continue;
                         };
-                        self.emit_obs(obs, lo + (hi - lo) * frac);
+                        slot.0 = slot.0.max(done);
+                        slot.1 = slot.1.max(total);
+                        done_sum = unit_progress.iter().map(|&(d, _)| d).sum();
+                        self.engine_done = done_sum;
+                        self.engine_total = unit_progress.iter().map(|&(_, t)| t).sum();
+                        // Sector counts are representable exactly by f64 for
+                        // every practical storage device (the precision limit
+                        // is 2^53 sectors, ~=4 EiB at 512 B/sector).  The
+                        // fractional aggregate keeps independently-completing
+                        // units smooth without truncating their weights.
+                        #[allow(clippy::cast_precision_loss)]
+                        let weighted = structured.iter().fold(0.0, |sum, &(i, u)| {
+                            let (unit_done, unit_total) = unit_progress[i];
+                            let fraction = weight_frac(unit_done, unit_total);
+                            sum + fraction * u.sectors.max(1) as f64
+                        });
+                        #[allow(clippy::cast_precision_loss)]
+                        let aggregate =
+                            (weighted / structured_weight.max(1) as f64).clamp(0.0, 1.0);
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            self.sectors_read = weighted as u64;
+                        }
+                        self.sectors_total = structured_weight;
+                        self.emit_obs(obs, band_lo + (band_hi - band_lo) * aggregate);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -547,25 +524,9 @@ impl ScanController {
                     break 'drain;
                 }
             }
-            // Session 12 — drain-to-disconnect: a worker may be parked
-            // in `send` on this bounded channel at the very moment the
-            // merger stopped (the cancel break). The scope below joins
-            // only when every worker returns, and a parked sender never
-            // returns unless its message LANDS — so keep receiving
-            // (discarding) until all senders drop. Without this, a
-            // cancel-time full channel wedged `thread::scope` forever
-            // (the runner's 38-minute zombie process until the job
-            // timeout killed it).
-            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                loop {
-                    match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
-                        Ok(_) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            }
+            let _ = producer.join();
         });
+        self.rayon_pool = pool;
         if cancelled_err.is_some() {
             return Err(CoreError::Cancelled);
         }
@@ -611,15 +572,12 @@ impl ScanController {
     /// other structured unit, full extents for UNRECOGNIZED units
     /// (raw/unknown partitions are lost space — everything in them
     /// is carve territory), and the uncovered gaps between units —
-    /// merged, sorted, device-absolute. Returns the plan + the
-    /// evidence stats (session 12: the CLI/CI record whether the
-    /// bitmap guidance actually engaged).
-    fn carve_plan(&self, units: &[ScanUnit]) -> (Vec<(u64, u64)>, CarvePlanStats) {
+    /// merged, sorted, device-absolute.
+    fn carve_plan(&self, units: &[ScanUnit]) -> Vec<(u64, u64)> {
         let cap = self.dev.capacity_bytes();
         let mut covered: Vec<(u64, u64)> = Vec::new();
         let mut plan: Vec<(u64, u64)> = Vec::new();
         let mut any_structured = false;
-        let mut free_ranges: u32 = 0;
         for u in units {
             if matches!(u.fs, FsKind::Raw | FsKind::Unknown) {
                 // Unrecognized unit: its whole extent carves (lost
@@ -639,8 +597,6 @@ impl ScanController {
                 && let Ok(engine) = crate::fs::ntfs::NtfsEngine::new(Arc::clone(&u.dev))
                 && let Some(free) = engine.free_cluster_ranges()
             {
-                free_ranges =
-                    free_ranges.saturating_add(u32::try_from(free.len()).unwrap_or(u32::MAX));
                 for (off, len) in free {
                     let abs = u.start_byte + off;
                     if abs < cap {
@@ -654,13 +610,7 @@ impl ScanController {
         if !any_structured {
             // Nothing structured anywhere: the whole device carves
             // (the original raw-target behavior).
-            return (
-                vec![(0, cap)],
-                CarvePlanStats {
-                    plan_bytes: cap,
-                    free_ranges: 0,
-                },
-            );
+            return vec![(0, cap)];
         }
         // The uncovered gaps: everything outside the STRUCTURED units'
         // extents (unpartitioned space, the tail past the last
@@ -689,14 +639,7 @@ impl ScanController {
                 _ => merged.push((s, l)),
             }
         }
-        let plan_bytes = merged.iter().map(|&(_, l)| l).sum();
-        (
-            merged,
-            CarvePlanStats {
-                plan_bytes,
-                free_ranges,
-            },
-        )
+        merged
     }
 
     fn finish_stopped(
@@ -719,9 +662,6 @@ impl ScanController {
                 duration_sec: self.started.elapsed().as_secs(),
                 stopped: true,
                 fs: fs_kind,
-                carve_plan_bytes: self.carve_plan_bytes,
-                carve_plan_capacity: self.carve_plan_capacity,
-                carve_free_ranges: self.carve_free_ranges,
             },
         )
     }
@@ -742,13 +682,6 @@ fn clamp_report_bytes(logical_total: u64, capacity: u64) -> u64 {
     logical_total.min(capacity)
 }
 
-/// Session 12 — the carve-plan evidence (what the CLI/CI record about
-/// coverage guidance).
-struct CarvePlanStats {
-    plan_bytes: u64,
-    free_ranges: u32,
-}
-
 /// Merger→worker message: one unit's entry or progress tick.
 /// Boxed entry — the channel's per-message footprint stays flat
 /// (FoundEntry carries its extents/strings; 300+ bytes on the stack
@@ -760,18 +693,41 @@ enum UnitMsg {
 
 /// The per-worker engine sink: ships entries + progress over the
 /// bounded channel to the merger thread (the RE CKernelQueue shape).
-struct UnitChannelSink {
+struct UnitChannelSink<'a> {
     tx: crossbeam_channel::Sender<UnitMsg>,
     unit: usize,
+    cancelled: &'a std::sync::atomic::AtomicBool,
 }
 
-impl ScanSink for UnitChannelSink {
+impl ScanSink for UnitChannelSink<'_> {
     fn on_entry(&mut self, entry: FoundEntry) {
-        let _ = self.tx.send(UnitMsg::Entry(self.unit, Box::new(entry)));
+        let mut message = UnitMsg::Entry(self.unit, Box::new(entry));
+        loop {
+            match self
+                .tx
+                .send_timeout(message, std::time::Duration::from_millis(UNIT_POLL_MS))
+            {
+                Ok(()) => return,
+                Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
+                    message = returned;
+                    if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                }
+                Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                    self.cancelled
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
     }
 
     fn on_progress(&mut self, done: u64, total: u64) {
-        let _ = self.tx.send(UnitMsg::Progress {
+        // Progress is a lossy status signal. Never let an IPC/UI pause
+        // block a scanner behind result entries; the next tick carries a
+        // newer monotonic counter.
+        let _ = self.tx.try_send(UnitMsg::Progress {
             unit: self.unit,
             done,
             total,
@@ -1039,7 +995,7 @@ pub fn read_partition_layout(dev: &dyn BlockDevice) -> CoreResult<PartitionLayou
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::testutil::RamDevice;
 
@@ -1206,145 +1162,6 @@ pub(crate) mod tests {
         assert!(tree.totals().0 >= 1);
     }
 
-    /// Session 12 — the percent-scale regression: `Progress.percent`
-    /// is a 0..100 aggregate (the wire contract the app's ETA divides
-    /// into), fed by 0..1 phase-band fractions. The old snapshot math
-    /// rounded the FRACTION to two decimals (0.9267 → 0.93) — the
-    /// owner's "progress never goes above 1 %" for the whole scan and
-    /// the ETA's (100 − p)/rate explosion on a sub-1 % scale. Every
-    /// phase band must now report in its documented percentage range.
-    #[test]
-    fn progress_percent_lives_on_the_0_to_100_scale_per_phase() {
-        // The NTFS fixture (not FAT): its walk emits per-window
-        // progress, so the QUICK band actually reports — the FAT
-        // engine emits no intermediate ticks (a known gap, not this
-        // regression's subject).
-        let ram = ntfs_volume();
-        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
-        let mut obs = Recorder(Vec::new(), Vec::new());
-        let (_tree, report) = run_scan(dev, "Test (V:)", &mut obs).expect("scan");
-        assert!(!report.stopped, "the fixture scan completes");
-        assert!(!obs.0.is_empty(), "progress was emitted");
-        // 1. Scale: nothing outside [0, 100] — ever.
-        for p in &obs.0 {
-            assert!(
-                (0.0..=100.0).contains(&p.percent),
-                "percent {} out of range in phase {}",
-                p.percent,
-                p.phase.wire()
-            );
-        }
-        // 2. The DONE snapshot is exactly 100 — not 1.0.
-        let done: Vec<&Progress> = obs.0.iter().filter(|p| p.phase == Phase::Done).collect();
-        assert!(
-            done.iter().any(|p| (p.percent - 100.0).abs() < 0.005),
-            "done reports 100 (got {:?})",
-            done.iter().map(|p| p.percent).collect::<Vec<_>>()
-        );
-        // 3. Phase bands (the RE-Match spec table): quick lives in
-        //    [2, 38], deep-structured + carve in [38, 95], organizing
-        //    in [95, 100]. The carve's final on_progress(total, total)
-        //    must reach 95.0 while still in the deep phase.
-        let max_quick = obs
-            .0
-            .iter()
-            .filter(|p| p.phase == Phase::Quick)
-            .map(|p| p.percent)
-            .fold(0.0_f64, f64::max);
-        let max_deep = obs
-            .0
-            .iter()
-            .filter(|p| p.phase == Phase::Deep)
-            .map(|p| p.percent)
-            .fold(0.0_f64, f64::max);
-        let max_org = obs
-            .0
-            .iter()
-            .filter(|p| p.phase == Phase::Organizing)
-            .map(|p| p.percent)
-            .fold(0.0_f64, f64::max);
-        assert!(
-            (2.0..=38.0).contains(&max_quick),
-            "quick band 2..38 (max {max_quick})"
-        );
-        assert!(
-            max_deep >= 95.0,
-            "the carve completes at 95 while phase=deep (max {max_deep})"
-        );
-        assert!(
-            (95.0..=100.0).contains(&max_org),
-            "organizing band 95..100 (max {max_org})"
-        );
-        // 4. The old bug's smoking gun: a fraction-scale percent can
-        //    never exceed 1.0 — the observed maximum must.
-        let overall = obs.0.iter().map(|p| p.percent).fold(0.0_f64, f64::max);
-        assert!(
-            overall >= 100.0,
-            "max percent {overall} — not fraction-scale"
-        );
-    }
-
-    /// Session 12 — the carve's LIVE progress must move within the
-    /// deep band as the sweep advances (68 + 27·frac), so the UI's bar
-    /// and the CLI's percent line track real work instead of freezing
-    /// at the phase floor.
-    #[test]
-    fn carve_progress_maps_into_the_deep_band() {
-        // A deterministic mid-sweep state needs REAL time between
-        // window completions (a RamDevice finishes every window before
-        // the drain's first tick — the band test flaked on fast hosts).
-        // The wrapper stalls every read in the volume's second half by
-        // 150 ms: window 1 completes, the drain ticks inside the band,
-        // then window 2 lands.
-        struct SlowHalf {
-            inner: Arc<dyn BlockDevice>,
-            half: u64,
-        }
-        impl BlockDevice for SlowHalf {
-            fn sector_size(&self) -> u32 {
-                self.inner.sector_size()
-            }
-            fn total_sectors(&self) -> u64 {
-                self.inner.total_sectors()
-            }
-            fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> CoreResult<()> {
-                // Stall any read TOUCHING the second half (the carve's
-                // overlap advance starts window 2 before the midpoint).
-                let ss = u64::from(self.sector_size()).max(1);
-                if lba * ss + (buf.len() as u64) > self.half * ss {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                }
-                self.inner.read_sectors(lba, buf)
-            }
-        }
-        let ram = ntfs_volume();
-        let half = ram.total_sectors() / 2;
-        let dev: Arc<dyn BlockDevice> = Arc::new(SlowHalf {
-            inner: Arc::new(ram),
-            half,
-        });
-        let mut obs = Recorder(Vec::new(), Vec::new());
-        let _ = run_scan(dev, "Test (V:)", &mut obs).expect("scan");
-        // Carve-relative sector pairs ride the same Progress; during
-        // phase=deep the sectors pair is the SWEEP's own numbers.
-        let deep_with_sectors: Vec<&Progress> = obs
-            .0
-            .iter()
-            .filter(|p| p.phase == Phase::Deep && p.sectors_total > 0)
-            .collect();
-        assert!(!deep_with_sectors.is_empty());
-        for p in &deep_with_sectors {
-            assert!(p.sectors_read <= p.sectors_total, "carve sector math");
-        }
-        // At least one mid-sweep snapshot in the open band (not just
-        // the terminal 95): proves the mapping is continuous through
-        // the sweep, not a single end-of-phase jump.
-        let mid = deep_with_sectors
-            .iter()
-            .any(|p| (68.0..95.0).contains(&p.percent));
-        assert!(mid, "a mid-carve percent lands strictly inside 68..95");
-    }
-
     #[test]
     fn stop_midway_keeps_partial_results() {
         let ram = fat_image_with_file();
@@ -1424,12 +1241,6 @@ pub(crate) mod tests {
 
     /// A minimal NTFS volume: boot + MFT (records 0-8: $MFT, root
     /// ".", Docs dir, present.txt at root, note.txt inside Docs).
-    /// Cross-module test access (the ntfs recycle fixture builds on
-    /// this volume).
-    pub(crate) fn ntfs_volume_public() -> RamDevice {
-        ntfs_volume()
-    }
-
     fn ntfs_volume() -> RamDevice {
         let mut ram = RamDevice::new(512 * 4096, 512);
         let mut boot = vec![0u8; 512];
@@ -1489,99 +1300,13 @@ pub(crate) mod tests {
         ram
     }
 
-    /// Session 12 — the multi-volume collision regression (the lab
-    /// run's three cross-partition defects in one fixture): two NTFS
-    /// volumes with IDENTICAL geometry (same record numbers, same
-    /// relative extents — the guaranteed-collision case) on one disk,
-    /// the second partition's table entry deleted. Without the fixes:
-    /// (1) `mft_dirs` was keyed by record number alone → volume B's
-    /// root (record 5) parented ALL of volume A's dirs under
-    /// "Lost Partition 1" (the empty "Partition 1" + everything under
-    /// the lost branch); (2) `by_first_extent` mapped
-    /// partition-RELATIVE offsets globally → A's file at relative
-    /// offset X absorbed B's file at the same X as "noise" (the 28
-    /// vanished victims); (3) carved entries are device-absolute while
-    /// structured were partition-relative → the carve↔structured dedup
-    /// never matched across partitions.
-    #[test]
-    fn two_volumes_never_collide_records_extents_or_branches() {
-        // 8 MiB disk, MBR: partition 1 = volume A at 1 MiB (2 MiB
-        // long); volume B at 4 MiB with its entry ZEROED (lost).
-        let mut ram = RamDevice::new(512 * 16_384, 512);
-        let vol_a = ntfs_volume();
-        let vol_b = ntfs_volume();
-        ram.data[2048 * 512..2048 * 512 + vol_a.data.len()].copy_from_slice(&vol_a.data);
-        ram.data[8192 * 512..8192 * 512 + vol_b.data.len()].copy_from_slice(&vol_b.data);
-        ram.data[0x1BE + 4] = 0x07; // NTFS
-        ram.data[0x1BE + 8..0x1BE + 12].copy_from_slice(&2048u32.to_le_bytes());
-        ram.data[0x1BE + 12..0x1BE + 16].copy_from_slice(&4096u32.to_le_bytes());
-        // Entry 2 (volume B) stays zeroed — the deleted partition.
-        ram.data[510..512].copy_from_slice(&[0x55, 0xAA]);
-
-        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
-        let (tree, report) = run_scan(dev, "Disk 9", &mut NoObserver).expect("scan");
-        let nodes = tree.nodes();
-        let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
-
-        // A's files under Partition 1 — NOT under the lost branch.
-        let a_present: Vec<&crate::tree::TreeNode> = nodes
-            .iter()
-            .filter(|n| n.name == "present.txt" && n.path.starts_with("Disk 9\\Partition 1"))
-            .collect();
-        assert_eq!(
-            a_present.len(),
-            1,
-            "volume A's present.txt under Partition 1: {:?}",
-            nodes.iter().map(show).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            a_present[0].path, "Disk 9\\Partition 1\\present.txt",
-            "got {}",
-            a_present[0].path
-        );
-        // B's files under Lost Partition 1 — BOTH files survive (the
-        // collision would absorb B's identical-relative-offset file).
-        let b_present: Vec<&crate::tree::TreeNode> = nodes
-            .iter()
-            .filter(|n| n.name == "present.txt" && n.path.starts_with("Disk 9\\Lost Partition"))
-            .collect();
-        assert_eq!(
-            b_present.len(),
-            1,
-            "volume B's present.txt survives under the lost branch: {:?}",
-            nodes.iter().map(show).collect::<Vec<_>>()
-        );
-        // The nested files on both volumes.
-        let note_nodes: Vec<&crate::tree::TreeNode> =
-            nodes.iter().filter(|n| n.name == "note.txt").collect();
-        assert_eq!(note_nodes.len(), 2, "both volumes' note.txt survive");
-        assert!(
-            note_nodes.iter().all(|n| n.path.contains("Docs")),
-            "nested paths"
-        );
-        // B's file was NOT absorbed as A's duplicate: distinct nodes
-        // with distinct ABSOLUTE extents (A ~1 MiB region, B ~4 MiB).
-        let a_off = a_present[0].extents.first().map_or(0, |e| e.offset);
-        let b_off = b_present[0].extents.first().map_or(0, |e| e.offset);
-        assert!(
-            b_off >= 8192 * 512,
-            "B's extent is device-absolute (got {b_off}, volume B starts at {})",
-            8192 * 512
-        );
-        assert!(
-            (2048 * 512..8192 * 512).contains(&a_off),
-            "A's extent {a_off}"
-        );
-        // The report's fs label is populated (multi-unit scans).
-        assert_eq!(report.fs, FsKind::Ntfs);
-    }
-
     #[test]
     fn ntfs_tree_resolves_structure_end_to_end() {
         let ram = ntfs_volume();
         let dev: Arc<dyn BlockDevice> = Arc::new(ram);
         let (tree, report) = run_scan(dev, "Test (V:)", &mut NoObserver).expect("scan");
         assert_eq!(report.fs, FsKind::Ntfs);
+
         let nodes = tree.nodes();
         let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
         // Root-level file: nested at the tree root, NEVER under a

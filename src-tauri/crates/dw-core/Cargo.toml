@@ -17,6 +17,10 @@ memchr = "2.8.3"
 # The scan pipeline's worker→merger transport (RE CKernelQueue model:
 # bounded channels, fair drain, timeout polls for live progress).
 crossbeam-channel = "0.5"
+# Work-stealing CPU scheduling for the structured scan pipeline.  The
+# controller owns one bounded pool; nested MFT walks inherit it so a
+# multi-volume scan cannot oversubscribe the machine.
+rayon = "1.12"
 # FAT family timestamps are LOCAL wall-clock (the Windows mount
 # behavior); interpreting them needs the host timezone. clock+std
 # only — no oldtime/serde baggage.
