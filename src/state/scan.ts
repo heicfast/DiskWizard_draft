@@ -7,7 +7,7 @@
 import { create } from "zustand";
 import { invoke, listen } from "../lib/ipc";
 import type { ScanProgress } from "../types";
-import { EV_SCAN_DONE, EV_SCAN_PROGRESS } from "../types";
+import { EV_SCAN_DONE, EV_SCAN_PHASE, EV_SCAN_PROGRESS } from "../types";
 import { useResultsStore } from "./results";
 import { useViewStore } from "./view";
 
@@ -127,6 +127,18 @@ export function attachScanEvents(): void {
   attached = true;
   void listen<ScanProgress>(EV_SCAN_PROGRESS, (p) => {
     useScanStore.getState().adoptProgress(p);
+  }).catch(() => undefined);
+  // The instant phase flip (CORE-INTERFACE-GAPS #5): scan-progress
+  // carries the phase, but its cadence is the progress interval —
+  // this event fires exactly at each transition, so the UI's phase
+  // badge (Quick Scan → Deep Scan → Organizing) never lags a beat.
+  void listen<{ generation: number; phase: ScanProgress["phase"] }>(EV_SCAN_PHASE, (e) => {
+    const st = useScanStore.getState();
+    if (st.progress && st.progress.generation === e.generation) {
+      useScanStore.setState({
+        progress: { ...st.progress, phase: e.phase },
+      });
+    }
   }).catch(() => undefined);
   void listen<ScanDoneInfo>(EV_SCAN_DONE, (info) => {
     useScanStore.setState({ done: info, progress: null });

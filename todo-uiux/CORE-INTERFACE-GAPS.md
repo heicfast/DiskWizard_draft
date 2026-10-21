@@ -1,8 +1,14 @@
 # UI/UX Gap Register — Core Interface Session (for the parallel UI/UX agents)
 
-> **Session-8 status**: items 1-3 are CLOSED (verified in code); item 4
-> (BitLocker args) and 5 (scan-phase adoption) remain as-is; item 6
-> verified. The register stays for the remaining P1/P2 polish.
+> **Session-8 status**: items 1-3 CLOSED (verified in code).
+> **Session-10 update**: item 4 CLOSED (d36ee1a — the BitLocker
+> dialog passes the core's password/recoveryKey contract); item 5
+> CLOSED (the scan store listens to scan-phase — instant flips);
+> item 6 verified. Items 8 + 9 CLOSED: the summary carries the
+> failed-count row with the recovery-log copy + the real
+> repairedFiles counter (the phase-2 backend now emits it for real),
+> and the session rows display targetName by design (the auto_
+> filename never surfaces). The register is complete.
 
 > **Source**: the core-interface session's audit of the shipped UI
 > against (a) the frozen IPC contract in `docs/ARCHITECTURE.md`, (b)

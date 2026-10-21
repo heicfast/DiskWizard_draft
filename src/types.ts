@@ -290,6 +290,7 @@ export type ResultsMode = "essential" | "complete";
 /* ── Events (Tauri event names; the mock bus mirrors them) ───────────── */
 
 export const EV_SCAN_PROGRESS = "scan-progress";
+export const EV_SCAN_PHASE = "scan-phase";
 export const EV_SCAN_DONE = "scan-done";
 export const EV_SCAN_ERROR = "scan-error";
 export const EV_RECOVER_PROGRESS = "recover-progress";

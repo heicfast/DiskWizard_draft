@@ -129,13 +129,26 @@ EOCD-central-directory rescan the carver already implements
 - **Honesty**: `DamageReport` verdicts are exact — "repaired
   prefix, X% of stream recovered", never a silent half-file.
 
-## 6. Delivery plan (next session)
+## 6. Delivery plan — EXECUTING (session 10)
 
-1. `dw-repair` crate skeleton + trait + fixture harness.
-2. JPEG + PNG first (highest demand, best-understood grammars).
-3. PDF xref synthesis + OOXML manifest rebuild.
-4. MP4/MOV regroup + sample-transplant advanced mode.
-5. GIF/BMP/TIFF/WebP + the RAW embedded-JPEG path.
-6. MTS/MXF + archive engines.
-7. Multi-POV review + Windows-runner end-to-end (corrupt-file
-   fixtures → repair → verify bytes decodable).
+1. ✅ `dw-repair` crate skeleton + trait + fixture harness.
+2. ✅ JPEG + PNG (the marker grammar + the chunk grammar with the
+   height-adjusted viewable-prefix salvage).
+3. ✅ PDF xref synthesis + OOXML manifest rebuild (+ the /Root
+   synthesis cascade + the per-part CRC audit).
+4. ✅ MP4/MOV box repair (weighted grammar, two-scan, successor-
+   anchored extents). The regroup + sample-transplant advanced mode
+   remains open — the honest BeyondRepair verdict covers the class
+   until it lands.
+5. ✅ GIF/BMP/TIFF/WebP/SVG. The RAW embedded-JPEG path (the
+   CScanJepgInfo salvage) remains open.
+6. ⬜ MTS/MXF + the archive engines (7z next-header, ZIP EOCD).
+7. ✅ Windows-runner end-to-end: the repair-e2e workflow — REAL
+   encoders (Pillow/PDF-writer/python-docx/ffmpeg), four damage
+   classes, REAL decoders as the gates (Pillow/pypdf/zipfile/
+   ffprobe), 20/20 checks passing locally and on the runner.
+
+App wiring: ✅ repair_analyze_file + repair_files (license-gated),
+repair-during-recovery (the enable-file-repair toggle + real
+repairedFiles counts), the by-name dispatch (destroyed headers),
+the dw-cli repair junction, the fuzz suite (engines + salvage).

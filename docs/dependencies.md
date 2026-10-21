@@ -57,18 +57,22 @@ Known follow-up (queued): the license stack's rustls provider is
 aws-lc-rs (via reqwest's rustls-tls) — a ring-provider swap would
 remove the aws-lc-sys build dependency that blocks local
 `--target x86_64-pc-windows-msvc` cross-checks of the app crate.
-| zustand | ^4.5.5 | 5 is current — donor-tested 4.5; same ticket |
-| framer-motion | ^11 | 12 current — pinned to donor-tested line; same ticket |
 | @tanstack/react-virtual | ^3.14.21 | latest major ✅ |
 | lucide-react | ^0.474.0 | icon line pin (visual stability for the theme system) |
-| vitest | ^2.1.8 | test runner line pin |
 
-**Policy note (OQ-7, logged):** the npm set intentionally matches the
-donor's tested stack (same versions) rather than chasing each latest
-major mid-session; the consolidated upgrade ticket above closes the gap
-in a controlled pass with the tour + screenshot workflows as gates.
-Rust crates — where the core's correctness lives — are held strictly to
-latest-stable, verified above.
+**Policy note (OQ-7, closed):** the consolidated upgrade ticket landed
+in session 8 (react 19 + framer-motion 14 + zustand 5 + vite 8) with
+TypeScript 7 following in session 9 — the table above is the current
+state, verified by tsc + the 74-test suite on it. Rust crates are held
+strictly to latest-stable, verified above.
+
+## Session-10 additions (Rust)
+
+| Crate | Version | Role |
+|---|---|---|
+| crc32fast | 1 (latest stable) | dw-repair: PNG chunk CRC re-stamping + OOXML part audits |
+| flate2 | 1 (same as dw-core) | dw-repair: zlib salvage/re-deflate + OOXML member inflate |
+| memchr | 2.8.3 (same as dw-core) | dw-repair: corruption-tolerant pattern search |
 
 ## Tooling
 
