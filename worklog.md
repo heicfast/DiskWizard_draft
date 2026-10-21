@@ -1386,3 +1386,16 @@ both translated partition-unit extents in the drain — every extent
 shifted by 2× the partition start. Recovery read shifted bytes; the
 lab's byte-truth verified 0/20 on perfect-grade files. One block, one
 place.
+
+---
+Task ID: uiux-overhaul-s12
+Agent: main (UI/UX overhaul session)
+Task: Production-grade UI/UX overhaul — pixel-match reference designs, File Reconstruction tab, layout fixes, realtime polish
+
+Work Log:
+- Cloned both repos; read ARCHITECTURE.md, CORE-INTERFACE-GAPS.md, RE UIUX artifacts (07/08/09/31), types, stores, pages, CSS
+- VLM-analyzed both reference images (extreme detail) + current UI screenshots — confirmed defects: header stack too tall (7 rows), drive cards not 2-col grid, Help Center wrongly in nav, scan widget Stop obscured, preview pane waste, no File Reconstruction tab
+- Plan: CSS restructure to granular per-domain files; compact results header; 2-col recover grid; partition-wise File Reconstruction tab (types + TS mock + Rust mock + real core partition field); realtime scan stats (sectors, speed, ETA); tests + VLM validation loop
+
+Stage Summary:
+- Baseline captured (screenshots in workspace/shots/), defect register compiled, architecture plan set
