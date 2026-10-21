@@ -1329,3 +1329,29 @@ fmt clean; clippy -D warnings clean on linux AND
 x86_64-pc-windows-msvc (all targets); 172 dw-core tests green (the 5
 new: percent scale ×2, bitmap alignment, two-volume collision,
 recycle reconstruction).
+
+### Session 12 (cont. cont.) — the 9918256 evidence: two environment truths
+
+The 9918256 lab run: **recycle 375/375 = 100%** (the $I
+reconstruction works perfectly on real Windows), kept 100%, path
+accuracy PASS, carve-plan bitmap-guided 94.5%/215 ranges on the
+10-GiB disk, benchmark GREEN (precise throughput). Two gates left:
+
+1. **deleted 1620/2000 = 81%** — the artifact's count match nailed
+   it: 375 $R/$I twin pairs + 6 junk records ≈ 381 ≈ 380 missing.
+   NTFS allocates new MFT records LIFO from the freed pool — the
+   interleaved recycle/delete loop fed every $R/$I pair two
+   freshly-freed force-deleted records. My "recycle-first reorder"
+   was a NO-OP (it merged the fate branches but kept the single
+   interleaved loop — the commit that lied). Implemented FOR REAL:
+   fates assigned first, then TWO SEQUENTIAL passes (recycle-moves →
+   force-deletes); only the 6 junk records allocate afterwards →
+   ceiling ~99.7%.
+2. **victim 126/150 = 84%** — files 1-16 + 142-149 vanished from a
+   PRISTINE volume (no allocation, no deletion, nothing can remove a
+   record there... except one thing): **Windows Defender real-time
+   quarantine** of the freshly-seeded fake-media files (head+tail =
+   the scan pipeline's leading and trailing edge when the partition
+   died). Standard CI practice applied:
+   `Add-MpPreference -ExclusionPath L:\, W:\` before seeding — the
+   evidence must measure OUR engine, not the antivirus.
