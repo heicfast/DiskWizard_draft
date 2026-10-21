@@ -884,6 +884,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dw-repair"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "memchr",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "dw-win"
 version = "0.1.0"
 dependencies = [

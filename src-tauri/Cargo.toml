@@ -18,6 +18,7 @@ rust-version = "1.99"
 members = [
     "crates/dw-core",
     "crates/dw-license",
+    "crates/dw-repair",
     "crates/dw-win",
     "crates/dw-cli",
 ]
