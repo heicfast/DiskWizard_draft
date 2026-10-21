@@ -1399,3 +1399,25 @@ Work Log:
 
 Stage Summary:
 - Baseline captured (screenshots in workspace/shots/), defect register compiled, architecture plan set
+
+---
+Task ID: uiux-overhaul-s12 (stage 2)
+Agent: main (UI/UX overhaul session)
+
+Work Log:
+- CSS restructure: 6 monoliths → 21 granular files (components/ shell/ pages/ dialogs/)
+- Recover page: reference 2-col grid, Scan History pill + quiet refresh, kebab-free cards
+- Sidebar: 4 nav items (Help Center via the card only), reference scan widget (ring/Stop/pause)
+- Results: compact 4-row header (breadcrumb / title+tools / scan strip / tabs+mode)
+- File Reconstruction tab: PartitionInfo wire contract, TS+Rust mock parity (LOST_AT 0.45),
+  dw-core TreeNode.partition + .rsf round-trip, real-core partition_summaries;
+  expandable per-partition folder trees, click-to-scope + toolbar chip
+- Telemetry: sector X/Y, throughput, found, 07m43s ETA in the strip
+- File table 48px reference rows; AA chip text tones (grade/used) across all 5 themes
+- Tide theme contrast fix (VLM audit pass); tools 4-up grid; license rows 560px cap;
+  help cards equal-height
+- Responsive floor verified at 1180px (2-col grid, no overflow, single-row toolbar)
+- 89 tests green (15 new: reconstruction contract + telemetry formatters)
+
+Stage Summary:
+- All pages reference-matched and VLM-validated (multi-crop loop); push to origin
