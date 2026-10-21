@@ -1231,3 +1231,19 @@ precise Instant. And the lab's recycle-class gate matches the
 $RXXXXXX renamed copies by size+ext (Windows renames on
 SendToRecycleBin — by-name recall is a gate-design error, not an
 engine miss).
+
+### Session 11 (cont. 3) — the flake and the honest first-tick
+
+The phase-band test (carve_progress_maps_into_the_deep_band) flaked
+green-then-red across CI runs: it demanded a mid-band sample from a
+fixture whose ENTIRE carve completes before the drain's first 100 ms
+tick — and whose 2 MiB has no carveable signatures (no entries → the
+drain's only observable state is the terminal one). Two fixes:
+1. The carve drain's FIRST tick now lands immediately (no 100 ms
+   wait for tick #1) AND only once real progress exists
+   (bytes_done > 0) — no more 0 %-of-sweep noise tick.
+2. The test's fixture gained a SlowHalf wrapper (reads touching the
+   volume's second half stall 150 ms) — the mid-sweep state is now
+   DETERMINISTIC, not a race with the scheduler. (The overlap
+   advance starts window 2 before the midpoint — the stall condition
+   keys on the read RANGE, not its start.)

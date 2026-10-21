@@ -1268,8 +1268,39 @@ mod tests {
     /// at the phase floor.
     #[test]
     fn carve_progress_maps_into_the_deep_band() {
+        // A deterministic mid-sweep state needs REAL time between
+        // window completions (a RamDevice finishes every window before
+        // the drain's first tick — the band test flaked on fast hosts).
+        // The wrapper stalls every read in the volume's second half by
+        // 150 ms: window 1 completes, the drain ticks inside the band,
+        // then window 2 lands.
+        struct SlowHalf {
+            inner: Arc<dyn BlockDevice>,
+            half: u64,
+        }
+        impl BlockDevice for SlowHalf {
+            fn sector_size(&self) -> u32 {
+                self.inner.sector_size()
+            }
+            fn total_sectors(&self) -> u64 {
+                self.inner.total_sectors()
+            }
+            fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> CoreResult<()> {
+                // Stall any read TOUCHING the second half (the carve's
+                // overlap advance starts window 2 before the midpoint).
+                let ss = u64::from(self.sector_size()).max(1);
+                if lba * ss + (buf.len() as u64) > self.half * ss {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+                self.inner.read_sectors(lba, buf)
+            }
+        }
         let ram = ntfs_volume();
-        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let half = ram.total_sectors() / 2;
+        let dev: Arc<dyn BlockDevice> = Arc::new(SlowHalf {
+            inner: Arc::new(ram),
+            half,
+        });
         let mut obs = Recorder(Vec::new(), Vec::new());
         let _ = run_scan(dev, "Test (V:)", &mut obs).expect("scan");
         // Carve-relative sector pairs ride the same Progress; during
