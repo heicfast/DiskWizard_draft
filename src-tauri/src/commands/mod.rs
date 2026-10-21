@@ -13,7 +13,7 @@ pub use mock::*;
 mod real;
 
 #[cfg(not(feature = "sim"))]
-pub use real::{devices::*, license::*, recover::*, scan::*, session::*, settings::*};
+pub use real::{devices::*, license::*, recover::*, repair::*, scan::*, session::*, settings::*};
 
 /// The managed-state constructor (mirrors the mock's `shared_state`).
 #[cfg(not(feature = "sim"))]

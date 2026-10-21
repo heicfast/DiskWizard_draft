@@ -87,6 +87,9 @@ pub fn run() {
             commands::sdr_diagnose,
             commands::sdr_repair,
             commands::unlock_bitlocker,
+            // File repair (phase-2)
+            commands::repair_analyze_file,
+            commands::repair_files,
             // Scan lifecycle
             commands::start_scan,
             commands::start_folder_scan,

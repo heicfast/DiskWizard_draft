@@ -8,6 +8,7 @@
 pub mod devices;
 pub mod license;
 pub mod recover;
+pub mod repair;
 pub mod scan;
 pub mod session;
 pub mod settings;

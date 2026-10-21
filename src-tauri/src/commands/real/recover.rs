@@ -210,6 +210,17 @@ pub fn start_recovery(
             });
             match result {
                 Ok(report) => {
+                    // Repair-during-recovery (phase-2 §5): the
+                    // enable-file-repair toggle walks the recovered
+                    // copies and repairs the damaged repairable
+                    // formats in place — OUR destination copies, the
+                    // source device is never touched.
+                    let repaired_files = if enable {
+                        let (repaired, _scanned) = super::repair::repair_recovered_tree(&dest_root);
+                        repaired as u64
+                    } else {
+                        0
+                    };
                     let _ = app.emit(
                         "recover-done",
                         json!({
@@ -222,7 +233,7 @@ pub fn start_recovery(
                             "currentFile": "Complete",
                             "destination": dest_display,
                             "enableRepair": enable,
-                            "repairedFiles": 0,
+                            "repairedFiles": repaired_files,
                             "finished": true,
                         }),
                     );

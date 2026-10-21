@@ -29,6 +29,7 @@
 
 mod logging;
 mod recover;
+mod repair;
 mod scan;
 mod selftest;
 mod target;
@@ -100,6 +101,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         }
         "scan" => scan::cmd(args),
         "recover" => recover::cmd(args),
+        "repair" => repair::cmd(args),
         "selftest" => selftest::cmd(args),
         other => Err(format!("unknown command `{other}`")),
     }

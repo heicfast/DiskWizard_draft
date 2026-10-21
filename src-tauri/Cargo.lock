@@ -741,6 +741,7 @@ version = "0.1.0"
 dependencies = [
  "dw-core",
  "dw-license",
+ "dw-repair",
  "dw-win",
  "parking_lot",
  "reqwest",
@@ -849,6 +850,7 @@ name = "dw-cli"
 version = "0.1.0"
 dependencies = [
  "dw-core",
+ "dw-repair",
  "dw-win",
  "serde",
  "serde_json",

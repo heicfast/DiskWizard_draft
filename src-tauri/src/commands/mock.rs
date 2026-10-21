@@ -133,6 +133,37 @@ pub async fn sdr_repair(
     }))
 }
 
+#[tauri::command]
+pub async fn repair_analyze_file(s: State<'_, SharedState>, path: String) -> Result<Value, String> {
+    // The dev-sim shape: a plausible damage verdict for any path the
+    // UI agents throw at it (the real engine parses the bytes).
+    license_gate(&s)?;
+    delay(900).await;
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+    let fmt = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
+    Ok(json!({
+        "format": fmt.clone().unwrap_or_else(|| "jpeg".into()),
+        "family": "Photo",
+        "healthy": false,
+        "tier": "basis",
+        "damage": ["truncated"],
+        "detail": "Dev-sim damage verdict: the file parses as truncated (mock layer).",
+        "fileName": name,
+        "fileSize": 204_800_u64,
+    }))
+}
+
+#[tauri::command]
+pub async fn repair_files(
+    s: State<'_, SharedState>,
+    paths: Vec<String>,
+    destination: String,
+) -> Result<Value, String> {
+    license_gate(&s)?;
+    delay(2_500).await;
+    Ok(json!({ "ok": true }))
+}
+
 /* ── Scan lifecycle (licensed) ───────────────────────────────────────── */
 
 #[tauri::command]
