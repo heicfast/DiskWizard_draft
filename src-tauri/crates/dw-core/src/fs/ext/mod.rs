@@ -725,6 +725,7 @@ impl ExtEngine {
                 changed: nonzero(child.ctime * 1000),
                 created: nonzero(child.crtime * 1000),
                 deleted: nonzero(child.dtime * 1000),
+                ..Timestamps::default()
             };
             entry.attrs = FileAttrs(if child.is_dir() {
                 FileAttrs::DIRECTORY
@@ -822,6 +823,7 @@ impl ScanEngine for ExtEngine {
                     changed: nonzero(inode.ctime * 1000),
                     created: nonzero(inode.crtime * 1000),
                     deleted: nonzero(inode.dtime * 1000),
+                    ..Timestamps::default()
                 };
                 stats.entries += 1;
                 stats.bytes += entry.size;

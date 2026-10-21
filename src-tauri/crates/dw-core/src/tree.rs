@@ -581,12 +581,15 @@ impl TreeBuilder {
     /// Structured grades below Poor are never raised, only lowered —
     /// reading the first sector cannot prove the whole file is
     /// intact, but failing to read it proves the file is not
-    /// recoverable as-is.
+    /// recoverable as-is. Probes run on a worker pool (the RE
+    /// CCheckNodeThread FAMILY — `min(cores,16)` check threads),
+    /// results applied in node order afterwards.
     pub fn apply_readability_grades(&mut self, dev: &dyn BlockDevice, cap: usize) -> usize {
         let ss = u64::from(dev.sector_size()).max(1);
-        let mut probed = 0usize;
-        for node in &mut self.nodes {
-            if probed >= cap {
+        // Collect the probe targets first (immutable pass).
+        let mut targets: Vec<(usize, u64)> = Vec::new(); // (node idx, first-extent byte offset)
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if targets.len() >= cap {
                 break;
             }
             if node.is_dir || node.origin != NodeOrigin::Deleted || node.extents.is_empty() {
@@ -603,13 +606,47 @@ impl TreeBuilder {
             else {
                 continue;
             };
-            // One sector through the cache layer: chunk-resident for
-            // neighbors, a single positioned read on the miss path.
-            let mut buf = vec![0u8; ss as usize];
-            let readable = dev.read_sectors(first.offset / ss, &mut buf).is_ok();
-            probed += 1;
-            if !readable && node.recoverability != Recoverability::Poor {
-                node.recoverability = Recoverability::Poor;
+            targets.push((idx, first.offset));
+        }
+        let probed = targets.len();
+        if probed == 0 {
+            return 0;
+        }
+        // Parallel probes (each target = ONE cached first-sector
+        // read; the chunk layer coalesces neighbors).
+        let results: Vec<bool> = {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let out = std::sync::Arc::new(parking_lot::Mutex::new(vec![false; probed]));
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZero::get)
+                .clamp(2, 16)
+                .min(probed);
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let next = &next;
+                    let out = &out;
+                    let targets = &targets;
+                    scope.spawn(move || {
+                        let mut buf = vec![0u8; ss as usize];
+                        loop {
+                            let ti = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&(_idx, off)) = targets.get(ti) else {
+                                break;
+                            };
+                            // One sector through the cache layer:
+                            // chunk-resident for neighbors, a single
+                            // positioned read on the miss path.
+                            let ok = dev.read_sectors(off / ss, &mut buf).is_ok();
+                            out.lock()[ti] = ok;
+                        }
+                    });
+                }
+            });
+            out.lock().clone()
+        };
+        for ((idx, _), ok) in targets.iter().zip(results) {
+            if !ok && self.nodes[*idx].recoverability != Recoverability::Poor {
+                self.nodes[*idx].recoverability = Recoverability::Poor;
             }
         }
         probed
@@ -690,6 +727,17 @@ pub fn grade_from(e: &FoundEntry) -> Recoverability {
         NodeOrigin::Deleted => 100,
         _ => 80,
     };
+    // The RE v2 extent-intact ratio gate (ntfs-engine-algorithms-v2
+    // §1/§3): ratio 1.0 → Excellent, ≥0.75 → Good, ≥0.25 → Poor,
+    // <0.25 → Poor (the "overwritten" class — kept listed, graded
+    // Poor; the fully-reused case was destroyed at the engine).
+    if let Some(ratio) = e.recovery_ratio {
+        return match ratio {
+            r if r >= 1.0 => Recoverability::Excellent,
+            r if r >= 0.75 => Recoverability::Good,
+            _ => Recoverability::Poor,
+        };
+    }
     let score = e.confidence.min(cap);
     if e.extents.is_empty() && !e.is_dir && e.size > 0 {
         // Size claimed but no extents — metadata-only knowledge.

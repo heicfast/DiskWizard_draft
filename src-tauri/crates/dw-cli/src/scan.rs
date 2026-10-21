@@ -215,10 +215,12 @@ fn sample_self() -> Option<(u64, u64)> {
     let mut pmc = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS::default();
     // SAFETY: GetCurrentProcess returns a pseudo-handle (no
     // ownership); pmc is the documented output buffer.
+    #[allow(unsafe_code)] // audited Win32 call (the crate policy)
+    #[allow(clippy::cast_possible_truncation)] // struct size ≤ 4 GiB by construction
     let ok = unsafe {
         GetProcessMemoryInfo(
             GetCurrentProcess(),
-            &mut pmc,
+            std::ptr::from_mut(&mut pmc),
             std::mem::size_of::<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS>()
                 as u32,
         )
@@ -454,12 +456,14 @@ pub fn reopen(spec: &str) -> Result<Arc<dyn BlockDevice>, String> {
 #[cfg(windows)]
 fn total_physical_bytes() -> Option<u64> {
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    #[allow(clippy::cast_possible_truncation)] // struct size ≤ 4 GiB by construction
     let mut ms = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..Default::default()
     };
     // SAFETY: ms is the documented output struct with dwLength set.
-    unsafe { GlobalMemoryStatusEx(&mut ms) }
+    #[allow(unsafe_code)] // audited Win32 call (the crate policy)
+    unsafe { GlobalMemoryStatusEx(std::ptr::from_mut(&mut ms)) }
         .is_ok()
         .then_some(ms.ullTotalPhys)
 }

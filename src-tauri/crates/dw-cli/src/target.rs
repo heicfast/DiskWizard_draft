@@ -138,8 +138,12 @@ fn partition_extent(disk: &Arc<dyn BlockDevice>, part_no: u32) -> Option<(u64, u
     if ptype == 0x00 || ptype == 0x05 || ptype == 0x0F || ptype == 0xEE {
         return None;
     }
-    let start = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as u64;
-    let len = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as u64;
+    let start = u64::from(u32::from_le_bytes([
+        entry[8], entry[9], entry[10], entry[11],
+    ]));
+    let len = u64::from(u32::from_le_bytes([
+        entry[12], entry[13], entry[14], entry[15],
+    ]));
     (len > 0).then_some((start, len))
 }
 

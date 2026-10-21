@@ -976,3 +976,107 @@ d306f07 (hardening, artifacts untracked in 88ae319), 97deaff
 (M2 #1 + fuzz fixes), 837d322/933f946 (M2 #2 + nits). CI green on
 88ae319: CI, Core E2E, License E2E, Engine Benchmark; the repair
 e2e + fuzz re-run on the fix pushes.
+
+---
+
+## Session 11 — The RE-Match core: parallel pipeline, $Bitmap grading, 100-ns timestamps, the SMART transport chain
+
+The owner's executive spec ("DiskWizard Core — Exact RE-Match
+Specification (v1.0)") implemented core-only, top to bottom.
+
+### The diagnosis (every symptom, one root each)
+
+1. **"Scan very very slow"** — the NTFS walk's I/O was serialized:
+   one 4 MiB read in flight; the parse pool waited on each read; the
+   carve's signature VALIDATION ran single-threaded (only the reads
+   pipelined through IOCP); the scan units ran one-at-a-time.
+2. **"Progress never above 1%"** — phase-emission cadence: progress
+   fired once per 4 MiB chunk, and the whole quick phase mapped into
+   0-38% of the bar.
+3. **"Deleted files not shown"** — the $SI timestamp swap made
+   deleted entries look wrong, and the binary destroy-or-keep
+   viability rule graded everything else at full confidence with no
+   RE ratio banding.
+4. **"Date/time not accurate"** — $STANDARD_INFORMATION offsets
+   SWAPPED: `modified` read $SI+0x10 (the MFT touch time — updates on
+   renames/metadata writes) while Explorer shows $SI+0x08. Every
+   NTFS date shown was the wrong qword.
+5. **"SMART isn't available for this disk"** — the ATA task file was
+   register-scrambled: the SMART cylinder signature 0x4F/0xC2 sat at
+   CylHigh/DriveHead instead of CylLow/CylHigh — every SATA/USB
+   query ABRT'd. Disk 0 (NVMe) worked; everything else failed. The
+   non-admin case had NO fallback transport at all.
+
+### The implementation (the spec's §0-8, mapped)
+
+* **§4.1-4.3 The thread graph** — `ntfs::walk` now: 8 MiB windows
+  (kMftChunkBytes), a `cores.clamp(2,16)` worker pool where each
+  worker does its OWN positioned bulk read (overlapped → the READS
+  overlap on Windows), parses records, and scores deleted files
+  inline against the shared read-only $Bitmap; records flow over
+  bounded(4096) crossbeam (CKernelQueue) to the engine thread which
+  alone owns the sink (stash/defer/emit semantics identical, order
+  freed by the tree's fixpoint). Progress: per-window atomic counter
+  + the 100 ms CProgressTimer throttle.
+* **§4.1 units in parallel** — `scan::run_units_parallel`: one
+  worker per structured unit (the Quick/Complete controller
+  family), UnitMsg channel (entries boxed — the channel footprint
+  clippy flagged), the merger on the main thread owning tree +
+  counters + observer. Phase bands per the spec table: discovery
+  0-2%, quick 2-38%, deep-structured 38-68%, carving 68-95%
+  (wire phase stays `deep` — no UI contract break), organizing
+  95-100%.
+* **§3 Recovery scoring** — `score_deleted` computes
+  intact/total cluster ratio inline (worker-side, bitmap shared);
+  grading per the RE bands: 1.0→Excellent, ≥0.75→Good, ≥0.25→Poor,
+  <0.25→Poor ("overwritten" class, kept listed); ratio==0 + the
+  0x3FF size gate → destroy (the v2 rule, preserved);
+  `FoundEntry::recovery_ratio` feeds `tree::grade_from` before
+  confidence arithmetic; resident files = Excellent (record survived
+  = content inline).
+* **§7 Free-cluster carving** — `NtfsEngine::free_cluster_ranges`
+  (word-wise bitmap run detection: all-allocated/all-free words take
+  the fast path; per-bit only on mixed words) +
+  `ScanController::carve_plan` (NTFS free ranges translated to
+  device-absolute, non-NTFS structured units' full extents, RAW
+  units' full extents, the uncovered gaps; merged/sorted) +
+  `RawCarver::carve_ranges` — the parallel sweep: worker pool over
+  window batches, each worker submits its batch as ONE
+  read_sectors_sparse_batch (IOCP on Windows), scans windows
+  (scan_window_collect — the CPU half that was serial), ships
+  entries over bounded(1024) (CCarveQueue). Per-window
+  first-signature-wins dedup local; scan regions disjoint by the
+  overlap advance — byte-identical results at any pool size (the
+  sorted-set equivalence tests pin it).
+* **§5 Timestamps** — the $SI mapping fixed (modified=+0x08,
+  changed=+0x10, the $FILE_NAME fallback mapped correctly too);
+  `Timestamps` carries `*_raw` (full 100-ns FILETIME ticks) for all
+  four times; the wire node gains ADDITIVE `modifiedRaw` (the ms
+  contract untouched); the spec's 10k-sample roundtrip test +
+  a distinct-values Explorer-parity test pin the mapping.
+* **§8 SMART** — the transport chain: ATA PASS-THROUGH (RW handle,
+  DRDY|DATA_IN, the task file from `smart_read_data_taskfile()` —
+  unit-tested register order) → `SMART_RCV_DRIVE_DATA`
+  (FILE_ANY_ACCESS — THE non-admin path) →
+  `IOCTL_STORAGE_PREDICT_FAILURE` (vendor area = the ATA SMART
+  sector) → ATA PASS-THROUGH on the RO handle → NVMe cross-check;
+  NVMe bus: protocol query → PREDICT_FAILURE → ATA cross-check.
+  IOCTL codes CTL_CODE-derived + tested.
+* **CCheckNodeThread family** — `apply_readability_grades` probes
+  in parallel (cores.clamp(2,16)), applied in node order.
+* **Deps** — crossbeam-channel 0.5 added (rayon evaluated and
+  REJECTED: nested-pool starvation with multi-unit engines on a
+  shared pool; std::thread::scope + crossbeam delivers the spec's
+  exact worker counts with zero starvation risk).
+
+### Verification
+
+* dw-core: 167 tests green (164 + roundtrip + Explorer-parity +
+  free-ranges), including the QA-6 census (carve/merge counts
+  EXACTLY pinned through the parallel pipeline) and the QA-4
+  viability fixture (updated to the ratio bands).
+* dw-win: cross-checked + cross-clippy clean (x86_64-pc-windows-msvc);
+  the SMART register-layout + IOCTL-derivation tests run in CI.
+* fmt + clippy -D warnings: clean on every crate, both targets
+  (dw-cli's pre-existing 6 Windows warnings fixed too).
+* App wire: `modifiedRaw` additive; all frozen shapes untouched.

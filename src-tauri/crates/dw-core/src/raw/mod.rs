@@ -54,7 +54,7 @@ use std::sync::Arc;
 use memchr::memmem;
 
 use crate::blockdev::{AlignedBuf, BatchRead, BlockDevice, BlockRead};
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::fs::{ScanControl, ScanSink, ScanStats};
 use std::collections::HashSet;
 
@@ -75,6 +75,11 @@ pub use signatures::{Signature, SignatureId, signature_set};
 /// never exceeds this (16 × 4 MiB worst case) — the pipelined sweep
 /// stays memory-bounded on every profile (§5.1 items 5+7).
 const MAX_WINDOW_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Worker→merger carved-entry channel capacity (the RE CCarveQueue
+/// size — 4× smaller than the structured record queue: carved items
+/// are larger).
+const CARVE_CHANNEL_CAP: usize = 1024;
 
 /// Window overlap: 64 KiB re-scanned per advance so signatures
 /// straddling a window boundary are never missed (the longest magic
@@ -118,18 +123,7 @@ impl RawCarver {
         Self { dev }
     }
 
-    /// Carve `[start_byte, end_byte)` (the deep phase's sweep).
-    ///
-    /// The pipelined sweep (§5.1 items 3+5): the device's adaptive
-    /// profile decides the window width and how many windows ride in
-    /// one [`BlockDevice::read_sectors_sparse_batch`] — one at a time
-    /// on unknown/HDD-class media, up to 16 in flight on flash. Media
-    /// damage degrades to per-sector salvage inside the platform layer
-    /// and shows up here as zeroed bad ranges whose hits are skipped —
-    /// the sweep itself never stalls on a dying disk. Completion order
-    /// inside a batch is irrelevant: windows are processed in offset
-    /// order with the same emitted-position set as the sequential
-    /// sweep, so results are byte-identical at every queue depth.
+    /// Carve `[start_byte, end_byte)` (the single-range legacy entry).
     ///
     /// # Errors
     /// [`CoreError::Cancelled`] through the control token.
@@ -140,12 +134,62 @@ impl RawCarver {
         start_byte: u64,
         end_byte: u64,
     ) -> CoreResult<ScanStats> {
+        self.carve_ranges(sink, ctrl, &[(start_byte, end_byte)])
+    }
+
+    /// Carve a SET of byte ranges (the deep phase's coverage plan —
+    /// free-cluster spans on NTFS volumes, full extents elsewhere,
+    /// unallocated gaps always).
+    ///
+    /// The parallel sweep (the RE CCarveQueue model): a worker pool
+    /// (`cores.clamp(2,16)`, bounded by the buffer budget) consumes
+    /// window batches off a shared work queue — each worker submits
+    /// its batch as ONE [`BlockDevice::read_sectors_sparse_batch`]
+    /// (the platform IOCP pipeline on Windows), scans every window
+    /// (signature hunt + grammar validation — the CPU-bound half
+    /// that was serial), and sends carved entries over a bounded
+    /// channel (cap 1024 — the RE queue size for the larger carved
+    /// items) to THIS thread, which owns the sink and the live
+    /// progress emission. Results are byte-identical to the
+    /// sequential sweep at every pool size: scan regions are disjoint
+    /// by construction (the overlap advance), per-window
+    /// first-signature-wins dedup is local, and emission order is the
+    /// only degree of freedom — the tree builder is order-independent
+    /// (fixpoint + first-extent merge).
+    ///
+    /// # Errors
+    /// [`CoreError::Cancelled`] through the control token.
+    #[allow(clippy::too_many_lines)] // The parallel sweep pipeline; the worker body + drain loop share the channel contract.
+    #[allow(clippy::single_match_else)] // The Err arm doubles as the cancellation signal — a match reads the intent.
+    pub fn carve_ranges(
+        &self,
+        sink: &mut dyn ScanSink,
+        ctrl: &ScanControl,
+        ranges: &[(u64, u64)],
+    ) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
         let ss = u64::from(self.dev.sector_size()).max(1);
         let cap = self.dev.capacity_bytes();
-        let end = end_byte.min(cap);
-        let mut cursor = start_byte.min(end);
-        if end == cursor {
+        // Clamp + normalize the coverage plan: sorted, merged,
+        // in-device, non-empty.
+        let mut plan: Vec<(u64, u64)> = ranges
+            .iter()
+            .filter_map(|&(s, e)| {
+                let s = s.min(cap);
+                let e = e.min(cap).max(s);
+                (e > s).then_some((s, e))
+            })
+            .collect();
+        plan.sort_unstable();
+        let mut merged_ranges: Vec<(u64, u64)> = Vec::with_capacity(plan.len());
+        for (s, e) in plan {
+            match merged_ranges.last_mut() {
+                Some((_, le)) if s <= *le => *le = (*le).max(e),
+                _ => merged_ranges.push((s, e)),
+            }
+        }
+        let total_bytes: u64 = merged_ranges.iter().map(|&(s, e)| e - s).sum();
+        if total_bytes == 0 {
             return Ok(stats);
         }
         let sigs = signature_set();
@@ -159,112 +203,193 @@ impl RawCarver {
             })
             .collect();
         // Adaptive geometry (§5.1 item 5): the profile's bands are
-        // clamped, then the window shrinks to the remaining span, then
-        // the depth shrinks to the buffer budget. Ram fixtures and
-        // tiny volumes end at single-window batches — identical to
-        // the sequential sweep.
+        // clamped, then the window shrinks to the remaining span.
         let prof = self.dev.read_profile().clamped();
-        let span = usize::try_from(end - cursor).unwrap_or(usize::MAX).max(1);
+        let span = usize::try_from(total_bytes).unwrap_or(usize::MAX).max(1);
         let window = prof.window_bytes.min(span).max(ss as usize);
+        // Worker pool (the RE clamp: more than 16 shows no gain; the
+        // buffer budget keeps workers × depth × window ≤ 64 MiB).
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .clamp(2, 16);
         let depth = prof
             .queue_depth
-            .min((MAX_WINDOW_BUDGET / window).max(1))
+            .min((MAX_WINDOW_BUDGET / window / workers).max(1))
             .max(1);
-        let mut bufs: Vec<AlignedBuf> = (0..depth)
-            .map(|_| AlignedBuf::zeroed(window, self.dev.preferred_read_alignment()))
-            .collect();
-        // The validators' shared scratch (reused across every hit —
-        // no per-read allocations).
-        let mut scratch: Vec<u8> = Vec::with_capacity(PROBE_CHUNK);
-        // Positions already emitted this carve (absolute): "first
-        // signature wins a position" — while the SAME signature keeps
-        // scanning for further hits (one file per signature PER
-        // WINDOW was the old break bug).
-        let mut emitted: HashSet<u64> = HashSet::new();
-        'batches: while cursor < end {
-            ctrl.checkpoint()?;
-            // Plan this batch: consecutive windows chained by the
-            // overlap advance — exactly the sequential sweep's math,
-            // submitted together.
-            let mut plan: Vec<(u64, usize)> = Vec::with_capacity(depth);
-            let mut c = cursor;
-            while plan.len() < depth && c < end {
-                let want = (end - c).min(window as u64);
+        let workers = workers
+            .min((MAX_WINDOW_BUDGET / window / depth).max(1))
+            .max(1);
+        // The full window plan, precomputed (identical math to the
+        // sequential sweep: sector-multiple takes, overlap advance
+        // WITHIN each range — a signature straddling into allocated
+        // space is a partially-destroyed file; free-range boundaries
+        // do not overlap).
+        let mut windows: Vec<(u64, usize)> = Vec::new();
+        for &(rs, re) in &merged_ranges {
+            let mut c = rs;
+            while c < re {
+                let want = (re - c).min(window as u64);
                 // Sector-multiple read length (trait contract), ≥1 sector.
                 let take = (want as usize).next_multiple_of(ss as usize).min(window);
                 let take = take.max(ss as usize).min(window);
-                let take = (take as u64).min(end - c) as usize;
+                let take = (take as u64).min(re - c) as usize;
                 let take = take.max(ss as usize);
-                plan.push((c, take));
-                if c + take as u64 >= end {
-                    break; // the final window is in this batch
+                windows.push((c, take));
+                if c + take as u64 >= re {
+                    break; // the final window of this range
                 }
                 let advance = (take - CARVE_OVERLAP.min(take / 2)).max(1);
                 c += advance as u64;
             }
-            // Pipeline the batch: `depth` windows in flight at once on
-            // IOCP-class devices; the sequential default elsewhere.
-            let mut batch: Vec<BatchRead<'_>> = plan
-                .iter()
-                .zip(bufs.iter_mut())
-                .map(|(&(off, take), b)| BatchRead {
-                    start_lba: off / ss,
-                    buf: &mut b[..take],
-                })
-                .collect();
-            let results = self.dev.read_sectors_sparse_batch(&mut batch)?;
-            drop(batch); // release the buffer borrows before scanning
-            // Process in OFFSET order (callers may not depend on the
-            // completion order the device chose).
-            for (i, &(off, take)) in plan.iter().enumerate() {
-                ctrl.checkpoint()?;
-                let is_last = off + take as u64 >= end;
-                self.scan_window(
-                    sink,
-                    &bufs[i][..take],
-                    &results[i],
-                    off,
-                    is_last,
-                    end,
-                    &finders,
-                    &mut emitted,
-                    &mut stats,
-                    &mut scratch,
-                    ctrl,
-                )?;
-                // Progress in DEVICE SECTORS (session 9): the wire's
-                // sectorsRead/sectorsTotal stay unit-consistent — the
-                // old byte-flavored numbers made the live stats read
-                // past the total mid-carve.
-                sink.on_progress(
-                    (off + take as u64 - start_byte) / ss,
-                    (end - start_byte) / ss,
-                );
-            }
-            let (last_off, last_take) = *plan.last().expect("plan has a window");
-            if last_off + last_take as u64 >= end {
-                break 'batches;
-            }
-            let advance = (last_take - CARVE_OVERLAP.min(last_take / 2)).max(1);
-            cursor = last_off + advance as u64;
         }
-        sink.on_progress((end - start_byte) / ss, (end - start_byte) / ss);
+        // Dispatch in batches of `depth` consecutive windows (the
+        // pipelined submission unit).
+        let mut batches: Vec<&[(u64, usize)]> = windows.chunks(depth).collect();
+        if batches.last().is_some_and(|b| b.is_empty()) {
+            batches.pop();
+        }
+        let next_batch = std::sync::atomic::AtomicUsize::new(0);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let bytes_done = std::sync::atomic::AtomicU64::new(0);
+        let (tx, rx) = crossbeam_channel::bounded::<FoundEntry>(CARVE_CHANNEL_CAP);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let next_batch = &next_batch;
+                let cancelled = &cancelled;
+                let bytes_done = &bytes_done;
+                let batches = &batches;
+                let finders = &finders;
+                scope.spawn(move || {
+                    // Worker-local reusable window buffers (one batch's
+                    // worth — the memory bound above) + the validators'
+                    // shared scratch (reused across every hit).
+                    let mut bufs: Vec<AlignedBuf> = (0..depth)
+                        .map(|_| AlignedBuf::zeroed(window, self.dev.preferred_read_alignment()))
+                        .collect();
+                    let mut scratch: Vec<u8> = Vec::with_capacity(PROBE_CHUNK);
+                    'worker: loop {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'worker;
+                        }
+                        let bi = next_batch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(batch) = batches.get(bi) else {
+                            break 'worker;
+                        };
+                        if ctrl.checkpoint().is_err() {
+                            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'worker;
+                        }
+                        let mut read: Vec<BatchRead<'_>> = batch
+                            .iter()
+                            .zip(bufs.iter_mut())
+                            .map(|(&(off, take), b)| BatchRead {
+                                start_lba: off / ss,
+                                buf: &mut b[..take],
+                            })
+                            .collect();
+                        let results = match self.dev.read_sectors_sparse_batch(&mut read) {
+                            Ok(r) => r,
+                            Err(_) => vec![Vec::new(); batch.len()],
+                        };
+                        drop(read);
+                        // Process this worker's batch in OFFSET order
+                        // (its own sequential semantics; cross-worker
+                        // order is the tree's non-concern).
+                        for (i, &(off, take)) in batch.iter().enumerate() {
+                            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                                break 'worker;
+                            }
+                            let is_last = off + take as u64 >= cap;
+                            let mut budget: u64 = VALIDATOR_BUDGET;
+                            let mut emitted: HashSet<u64> = HashSet::new();
+                            match self.scan_window_collect(
+                                &bufs[i][..take],
+                                &results[i],
+                                off,
+                                is_last,
+                                cap,
+                                finders,
+                                &mut emitted,
+                                &mut scratch,
+                                &mut budget,
+                                ctrl,
+                            ) {
+                                Ok(entries) => {
+                                    bytes_done.fetch_add(
+                                        take as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    for e in entries {
+                                        if tx.send(e).is_err() {
+                                            cancelled
+                                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                                            break 'worker;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    break 'worker;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            // THIS thread owns the sink: drain the carve channel,
+            // throttled live progress (100 ms — the RE CProgressTimer
+            // cadence), cooperative pause/stop honored mid-drain.
+            let mut last_progress = std::time::Instant::now();
+            'drain: loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(e) => {
+                        stats.entries += 1;
+                        stats.bytes += e.size;
+                        sink.on_entry(e);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'drain;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'drain,
+                }
+                if last_progress.elapsed().as_millis() >= 100 {
+                    if ctrl.checkpoint().is_err() {
+                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    #[allow(clippy::cast_precision_loss)] // percent display
+                    sink.on_progress(
+                        bytes_done.load(std::sync::atomic::Ordering::Relaxed) / ss,
+                        total_bytes / ss,
+                    );
+                    last_progress = std::time::Instant::now();
+                }
+            }
+        });
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
+        }
+        sink.on_progress(total_bytes / ss, total_bytes / ss);
         Ok(stats)
     }
 
     /// Scan one FILLED carve window: signature hunt over the new-hit
     /// region (everything but the overlap tail — the final window
-    /// scans fully), grammar validation, entry emission. Extracted
-    /// from the sequential loop so the batched pipeline reuses the
-    /// exact per-window semantics.
+    /// scans fully), grammar validation, entries collected. Pure
+    /// collection variant of the historical sink-emitting scan — the
+    /// parallel pipeline's workers call this and ship the entries
+    /// over the channel; per-window semantics are EXACTLY the
+    /// sequential sweep's.
     ///
     /// # Errors
     /// [`CoreError::Cancelled`] propagates from validator
-    /// checkpoints (the sweep stops; emitted entries stand).
+    /// checkpoints (the sweep stops; collected entries stand).
     #[allow(clippy::too_many_arguments)] // one window-scan state pass
-    fn scan_window(
+    fn scan_window_collect(
         &self,
-        sink: &mut dyn ScanSink,
         buf: &[u8],
         bad: &[(u64, u64)],
         window_start: u64,
@@ -272,10 +397,11 @@ impl RawCarver {
         end: u64,
         finders: &[(usize, &Signature, memmem::Finder<'static>)],
         emitted: &mut HashSet<u64>,
-        stats: &mut ScanStats,
         scratch: &mut Vec<u8>,
+        budget: &mut u64,
         ctrl: &ScanControl,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<Vec<FoundEntry>> {
+        let mut out = Vec::new();
         let take = buf.len();
         // New-hit region: everything except the overlap tail (the
         // final window scans fully — there is no next window).
@@ -285,8 +411,6 @@ impl RawCarver {
             take.saturating_sub(CARVE_OVERLAP)
         };
         let hay = &buf[..scan_end];
-        // Session 8: the shared validator budget for THIS window.
-        let mut budget: u64 = VALIDATOR_BUDGET;
         for (_, sig, finder) in finders {
             let mut from = 0usize;
             while let Some(rel) = finder.find(&hay[from..]) {
@@ -310,7 +434,7 @@ impl RawCarver {
                 if emitted.contains(&abs) {
                     continue; // an earlier signature already won here
                 }
-                if let Some(mut h) = self.validate_hit(sig, abs, end, scratch, &mut budget, ctrl)? {
+                if let Some(mut h) = self.validate_hit(sig, abs, end, scratch, budget, ctrl)? {
                     h.category = sig.category;
                     if h.length >= sig.min_size {
                         let name = format!("{}_{abs:08X}{}", sig.name_prefix, sig.ext);
@@ -345,17 +469,14 @@ impl RawCarver {
                             };
                         }
                         entry.source = FsKind::Raw;
-                        stats.entries += 1;
-                        stats.bytes += entry.size;
                         emitted.insert(abs);
-                        sink.on_entry(entry); // keep scanning —
-                        // further hits of this signature and every
-                        // other one still surface.
+                        out.push(entry); // keep scanning — further hits of
+                        // this signature and every other one still surface.
                     }
                 }
             }
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Validate a signature hit: apply the format grammar and derive

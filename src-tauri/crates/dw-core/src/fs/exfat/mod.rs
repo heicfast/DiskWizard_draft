@@ -310,6 +310,7 @@ impl ExFatEngine {
                 accessed: Some(t(0x10)),
                 changed: None,
                 deleted: None,
+                ..Timestamps::default()
             };
             // Walk secondaries.
             let mut name = String::new();

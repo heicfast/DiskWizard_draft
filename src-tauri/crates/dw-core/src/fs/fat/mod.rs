@@ -378,6 +378,7 @@ impl FatEngine {
                     accessed: Some(fat_date(access_date)),
                     changed: None,
                     deleted: None,
+                    ..Timestamps::default()
                 },
                 deleted,
             });

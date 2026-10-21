@@ -616,6 +616,7 @@ impl ScanEngine for HfsPlusEngine {
                     accessed: None,
                     changed: None,
                     deleted: None,
+                    ..Timestamps::default()
                 };
                 stats.entries += 1;
                 stats.bytes += entry.size;

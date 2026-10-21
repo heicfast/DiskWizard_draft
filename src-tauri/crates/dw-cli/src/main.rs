@@ -156,18 +156,16 @@ fn cmd_devices(json: bool) -> Result<ExitCode, String> {
 fn cmd_smart(device_id: &str) -> Result<ExitCode, String> {
     #[cfg(windows)]
     {
-        let disk = dw_win::volume::parse_device_id(device_id)
-            .map(|t| match t {
-                dw_win::volume::DeviceTarget::WholeDisk(n)
-                | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
-                | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
-                dw_win::volume::DeviceTarget::Volume(letter) => {
-                    dw_win::blockdev::RawHandleDevice::open_volume(letter)
-                        .ok()
-                        .and_then(|d| d.device_number().ok().map(|(n, _)| n))
-                }
-            })
-            .flatten();
+        let disk = dw_win::volume::parse_device_id(device_id).and_then(|t| match t {
+            dw_win::volume::DeviceTarget::WholeDisk(n)
+            | dw_win::volume::DeviceTarget::Partition { disk: n, .. }
+            | dw_win::volume::DeviceTarget::LostPartition { disk: n, .. } => Some(n),
+            dw_win::volume::DeviceTarget::Volume(letter) => {
+                dw_win::blockdev::RawHandleDevice::open_volume(letter)
+                    .ok()
+                    .and_then(|d| d.device_number().ok().map(|(n, _)| n))
+            }
+        });
         let Some(index) = disk else {
             return Err(format!("UNKNOWN_DEVICE. {device_id}"));
         };

@@ -14,6 +14,9 @@ parking_lot = "0.12"
 flate2 = "1"
 crc32fast = "1"
 memchr = "2.8.3"
+# The scan pipeline's worker→merger transport (RE CKernelQueue model:
+# bounded channels, fair drain, timeout polls for live progress).
+crossbeam-channel = "0.5"
 # FAT family timestamps are LOCAL wall-clock (the Windows mount
 # behavior); interpreting them needs the host timezone. clock+std
 # only — no oldtime/serde baggage.

@@ -749,7 +749,10 @@ pub fn get_scan_progress(s: State<'_, AppState>) -> Value {
 }
 
 /// One wire node (the frozen FileNode shape; timestamps in unix
-/// MILLISECONDS — session 9's precision contract).
+/// MILLISECONDS — session 9's precision contract — plus the ADDITIVE
+/// `modifiedRaw`: the full 100-ns FILETIME ticks for NTFS sources,
+/// the RE precision contract preserved end-to-end; absent on
+/// filesystems without sub-ms timestamps).
 fn wire_node(n: &TreeNode, now_ms: i64) -> Value {
     json!({
         "id": n.id,
@@ -759,6 +762,7 @@ fn wire_node(n: &TreeNode, now_ms: i64) -> Value {
         "category": n.category.wire(),
         "size": n.size,
         "modified": n.modified,
+        "modifiedRaw": n.timestamps.modified_raw,
         "origin": n.origin.wire(),
         "recoverability": n.recoverability.wire(),
         "path": n.path,

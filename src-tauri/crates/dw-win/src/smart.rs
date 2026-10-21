@@ -89,43 +89,76 @@ fn attr_name(id: u8) -> String {
     )
 }
 
-/// Build the report for a physical disk (transport gated by the
-/// device's bus type — session 9's fix for "SMART shows for the
-/// first disk only": disk 0 is NVMe (the storage-query path was
-/// correct), every SATA/USB disk died in the ATA path).
+/// Build the report for a physical disk — the multi-transport
+/// fallback chain (the smartmontools/CrystalDiskInfo posture, the
+/// owner's "SMART shows for the first disk only" fix):
+///
+/// * NVMe bus → the protocol-specific SMART/HEALTH log query (the
+///   existing correct path).
+/// * Everything else, in order (first success wins):
+///   1. ATA PASS-THROUGH on a READ|WRITE handle (richest — the full
+///      22-attribute table; needs admin).
+///   2. `SMART_RCV_DRIVE_DATA` (FILE_ANY_ACCESS — works on
+///      NON-ELEVATED processes and many USB bridges where
+///      pass-through is refused).
+///   3. `IOCTL_STORAGE_PREDICT_FAILURE` (FILE_ANY_ACCESS — the
+///      vendor-specific area carries the ATA SMART sector on SATA).
+///   4. ATA PASS-THROUGH on a READ-ONLY handle (some storport
+///      stacks allow it).
+///   5. The cross-check: the NVMe protocol query (mislabeled buses).
 ///
 /// # Errors
 /// String error when no transport yields data.
 pub fn report_for_disk(index: u32) -> Result<SmartReport, String> {
     let dev = RawHandleDevice::open_physical(index).map_err(|e| e.to_string())?;
     let (model, serial, bus) = crate::devices::disk_identity(index);
-    // Bus gating: NVMe transports only answer for NVMe buses (the
-    // old try-both probed NVMe on SATA and kept an adapter-property
-    // fallback that can return ANOTHER controller's data).
     if bus == "NVMe" {
         if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
             finalize_verdict(&mut rep);
             return Ok(rep);
         }
+        // PREDICT_FAILURE works on some NVMe stacks too.
+        if let Some(mut rep) = predict_failure_ata(&dev, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+        // Mislabeled bus: try the ATA chain.
+        if let Some(mut rep) =
+            with_pass_through(index, |handle| ata_smart(handle, index, &model, &serial))
+        {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
     } else {
-        // ATA PASS-THROUGH with a dedicated READ|WRITE handle (the
+        // (1) ATA PASS-THROUGH, dedicated READ|WRITE handle (the
         // smartmontools/CrystalDiskInfo posture — many storport
-        // stacks reject pass-through on read-only handles). The
-        // RAII wrapper closes it exactly once.
+        // stacks reject pass-through on read-only handles).
         if let Some(mut rep) =
             with_pass_through(index, |handle| ata_smart(handle, index, &model, &serial))
         {
             finalize_verdict(&mut rep);
             return Ok(rep);
         }
-        // Last resort on mis-reported buses: try both transports.
+        // (2) SMART_RCV_DRIVE_DATA — FILE_ANY_ACCESS: the classic
+        // transport, works without elevation.
+        if let Some(mut rep) = smart_rcv_drive_data(&dev, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+        // (3) IOCTL_STORAGE_PREDICT_FAILURE — FILE_ANY_ACCESS; the
+        // 512-byte vendor area carries the ATA SMART sector on SATA.
+        if let Some(mut rep) = predict_failure_ata(&dev, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+        // (4) ATA PASS-THROUGH on the read-only scan handle.
+        let ro = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
+        if let Some(mut rep) = ata_smart(&ro, index, &model, &serial) {
+            finalize_verdict(&mut rep);
+            return Ok(rep);
+        }
+        // (5) Mislabeled bus: the NVMe protocol query.
         if let Some(mut rep) = nvme_health(&dev, index, &model, &serial) {
-            finalize_verdict(&mut rep);
-            return Ok(rep);
-        }
-        if let Some(mut rep) =
-            with_pass_through(index, |handle| ata_smart(handle, index, &model, &serial))
-        {
             finalize_verdict(&mut rep);
             return Ok(rep);
         }
@@ -272,42 +305,75 @@ fn parse_ata_smart_sector(data: &[u8]) -> AtaSummary {
 /// so the EX code is defined here).
 const IOCTL_ATA_PASS_THROUGH_EX: u32 = 0x0004_D040;
 
+/// `SMART_RCV_DRIVE_DATA` — CTL_CODE(IOCTL_SCSI_BASE=0x04,
+/// function 0x0022, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x0004C088
+/// (the classic pre-pass-through SMART transport; FILE_ANY_ACCESS
+/// means it works on non-elevated handles — the fill-in for disks
+/// whose storport stack refuses ATA PASS-THROUGH without admin).
+/// windows-rs does not ship the constant; the derivation is pinned
+/// here for review.
+const SMART_RCV_DRIVE_DATA: u32 = 0x0004_C088;
+
+/// `IOCTL_STORAGE_PREDICT_FAILURE` — CTL_CODE(IOCTL_STORAGE_BASE=0x2D,
+/// function 0x0410, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x002D1040
+/// (the Windows "predict failure" IOCTL; on ATA-backed disks the
+/// 512-byte vendor-specific area carries the SMART READ DATA
+/// sector). Also not shipped by windows-rs.
+const IOCTL_STORAGE_PREDICT_FAILURE: u32 = 0x002D_1040;
+
+/// The ATA task-file for SMART READ DATA — the register layout the
+/// drive REQUIRES (the CrystalDiskInfo/smartmontools byte-for-byte
+/// contract; extracted as a pure function so the register mapping is
+/// unit-testable — the session's scrambled-register bug put the
+/// cylinder signature in the wrong slots and every SATA query ABRT'd).
+///
+/// `CurrentTaskFile` maps, by index: 0=Features, 1=SectorCount,
+/// 2=SectorNumber, 3=CylLow, 4=CylHigh, 5=DriveHead, 6=Command,
+/// 7=Reserved.
+#[must_use]
+pub const fn smart_read_data_taskfile() -> [u8; 8] {
+    [
+        0xD0, // Features: SMART READ DATA
+        0x01, // Sector count
+        0x01, // Sector number
+        0x4F, // Cylinder low — the SMART signature half (WAS at index 4 → DriveHead)
+        0xC2, // Cylinder high — the signature half (WAS at index 5 → Command slot's neighbor)
+        0xA0, // Drive/Head: drive 0 selected
+        0xB0, // Command: SMART
+        0x00, // Reserved
+    ]
+}
+
 /// ATA SMART READ DATA via `IOCTL_ATA_PASS_THROUGH_EX` (SAT — the
-/// smartmontools transport). Session 9's fix: the struct was always
-/// EX-shaped but the IOCTL was the legacy `IOCTL_ATA_PASS_THROUGH`
-/// (task-file-first decode — the command byte landed at the wrong
-/// offset and every SATA/USB query failed) and `Length` was never
-/// set (the EX path validates it). The handle is the dedicated
-/// READ|WRITE pass-through open, not the scan device's read-only one.
+/// smartmontools transport). The task file comes from
+/// [`smart_read_data_taskfile`] (the register-layout fix — the old
+/// inline array was off-by-one and every SATA/USB query failed with
+/// the drive's ABRT: the 0x4F/0xC2 cylinder signature landed in
+/// CylHigh/DriveHead instead of CylLow/CylHigh). `ATA_FLAGS_DRDY_REQUIRED`
+/// is set alongside `ATA_FLAGS_DATA_IN` per the smartmontools
+/// contract. The handle is the dedicated READ|WRITE pass-through open
+/// (or the read-only scan handle as the last-resort retry).
 fn ata_smart(
     handle: &windows::Win32::Foundation::HANDLE,
     index: u32,
     model: &str,
     serial: &str,
 ) -> Option<SmartReport> {
-    use windows::Win32::Storage::IscsiDisc::{ATA_FLAGS_DATA_IN, ATA_PASS_THROUGH_EX};
+    use windows::Win32::Storage::IscsiDisc::{
+        ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, ATA_PASS_THROUGH_EX,
+    };
     // The 512-byte SMART data sector follows the struct in the buffer.
     let struct_size = std::mem::size_of::<ATA_PASS_THROUGH_EX>();
     let mut buf = vec![0u8; struct_size + 512];
+    let taskfile = smart_read_data_taskfile();
     let mut ata = ATA_PASS_THROUGH_EX {
-        // The flag constant is 2 (fits u16 by construction; a wider
-        // value would be an upstream breaking change we want to hear
-        // about, hence the explicit saturate-to-0).
-        AtaFlags: u16::try_from(ATA_FLAGS_DATA_IN).unwrap_or(0),
+        // DRDY (0x01) | DATA_IN (0x02) — both fit u16 by construction.
+        AtaFlags: u16::try_from(ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED).unwrap_or(0),
         DataTransferLength: 512,
         TimeOutValue: 10,
         DataBufferOffset: struct_size,
         PreviousTaskFile: [0; 8],
-        CurrentTaskFile: [
-            0xD0, // SMART READ DATA command features
-            0x00,
-            0x00,
-            0x00,
-            0x4F,            // low cylinder
-            0xC2,            // high cylinder
-            0xB0,            // SMART command
-            0xA0 | (1 << 6), // device select: LBA bit
-        ],
+        CurrentTaskFile: taskfile,
         ..Default::default()
     };
     // The EX contract: Length = sizeof(ATA_PASS_THROUGH_EX) — the
@@ -354,6 +420,137 @@ fn ata_smart(
         power_cycles: s.cycles,
         total_writes: s.lbas_written.saturating_mul(512),
         interface: "ATA/SAT".into(),
+        attributes: s.attributes,
+    })
+}
+
+/// `SMART_RCV_DRIVE_DATA` transport (the classic path — works on
+/// FILE_ANY_ACCESS handles, i.e. WITHOUT elevation, which is the gap
+/// that made SMART unavailable on every SATA disk for non-admin
+/// users). The input is a `SENDCMDINPARAMS` (manually laid out:
+/// 4-byte buffer size, the 8-byte IDE register set, the drive
+/// number, 19 reserved bytes); the output's `SENDCMDOUTPARAMS` puts
+/// the 512-byte SMART sector at offset 16 (cBufferSize + DRIVERSTATUS).
+fn smart_rcv_drive_data(
+    dev: &RawHandleDevice,
+    index: u32,
+    model: &str,
+    serial: &str,
+) -> Option<SmartReport> {
+    // SENDCMDINPARAMS manual layout (all little-endian):
+    //   +0x00 cBufferSize (u32) — 512 (the SMART sector we expect back)
+    //   +0x04 IDEREGS (8 bytes) — the same task-file registers
+    //   +0x0C bDriveNumber (u8) — the target (PhysicalDriveN → 0)
+    //   +0x0D bReserved[3] + dwReserved[4] (19 bytes)
+    let mut inbuf = [0u8; 36];
+    inbuf[..4].copy_from_slice(&512u32.to_le_bytes());
+    inbuf[4..12].copy_from_slice(&smart_read_data_taskfile());
+    inbuf[12] = 0; // bDriveNumber: the physical-drive handle selects it
+    // Output: SENDCMDOUTPARAMS (cBufferSize u32 + DRIVERSTATUS 12 bytes)
+    // + the 512-byte sector → the data lands at +16.
+    let mut out = vec![0u8; 16 + 512];
+    let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
+    let ok = unsafe {
+        windows::Win32::System::IO::DeviceIoControl(
+            handle,
+            SMART_RCV_DRIVE_DATA,
+            Some(inbuf.as_mut_ptr().cast()),
+            win_len(inbuf.len()),
+            Some(out.as_mut_ptr().cast()),
+            win_len(out.len()),
+            None,
+            None,
+        )
+    };
+    if ok.is_err() {
+        return None;
+    }
+    // DriverStatus.bDriverError at +4 must be 0 (NO_ERROR).
+    if out[4] != 0 {
+        return None;
+    }
+    let s = parse_ata_smart_sector(&out[16..]);
+    if s.attributes.is_empty() {
+        return None;
+    }
+    let health = if s.bad_health {
+        "bad"
+    } else if s.warn_health {
+        "caution"
+    } else {
+        "good"
+    };
+    Some(SmartReport {
+        device_id: format!("disk-{index}"),
+        device_name: format!("PhysicalDrive{index}"),
+        model: model.to_string(),
+        firmware: String::new(),
+        serial: serial.to_string(),
+        health: health.to_string(),
+        temperature: s.temperature,
+        power_on_hours: s.hours,
+        power_cycles: s.cycles,
+        total_writes: s.lbas_written.saturating_mul(512),
+        interface: "ATA (SMART_RCV)".into(),
+        attributes: s.attributes,
+    })
+}
+
+/// `IOCTL_STORAGE_PREDICT_FAILURE` — the universal Windows health
+/// IOCTL (FILE_ANY_ACCESS). Output: 4-byte `PredictFailure` status +
+/// 512 bytes of vendor-specific data — on ATA-backed disks that area
+/// IS the SMART READ DATA sector (verified against smartmontools'
+/// `storage_predict_failure` path). `PredictFailure != 0` → failing.
+fn predict_failure_ata(
+    dev: &RawHandleDevice,
+    index: u32,
+    model: &str,
+    serial: &str,
+) -> Option<SmartReport> {
+    let mut out = vec![0u8; 4 + 512];
+    let handle = windows::Win32::Foundation::HANDLE(dev.as_file_handle());
+    let ok = unsafe {
+        windows::Win32::System::IO::DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_PREDICT_FAILURE,
+            None,
+            0,
+            Some(out.as_mut_ptr().cast()),
+            win_len(out.len()),
+            None,
+            None,
+        )
+    };
+    if ok.is_err() {
+        return None;
+    }
+    let predict_failure = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+    let s = parse_ata_smart_sector(&out[4..]);
+    if s.attributes.is_empty() {
+        // Not an ATA-backed disk (or the vendor area is opaque) — the
+        // binary verdict alone still answers "is it failing", but
+        // without attributes there is no report to build.
+        return None;
+    }
+    let health = if predict_failure != 0 || s.bad_health {
+        "bad"
+    } else if s.warn_health {
+        "caution"
+    } else {
+        "good"
+    };
+    Some(SmartReport {
+        device_id: format!("disk-{index}"),
+        device_name: format!("PhysicalDrive{index}"),
+        model: model.to_string(),
+        firmware: String::new(),
+        serial: serial.to_string(),
+        health: health.to_string(),
+        temperature: s.temperature,
+        power_on_hours: s.hours,
+        power_cycles: s.cycles,
+        total_writes: s.lbas_written.saturating_mul(512),
+        interface: "ATA (PredictFailure)".into(),
         attributes: s.attributes,
     })
 }
@@ -659,5 +856,50 @@ fn format_raw(raw: u64) -> String {
 fn finalize_verdict(rep: &mut SmartReport) {
     if rep.device_id.is_empty() {
         rep.device_id = rep.device_name.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The register-layout regression test (the session's core SMART
+    /// bug): `CurrentTaskFile` index order is Features, SectorCount,
+    /// SectorNumber, CylLow, CylHigh, DriveHead, Command, Reserved —
+    /// the SMART cylinder signature 0x4F/0xC2 MUST sit at indices
+    /// 3/4 and the SMART command 0xB0 at index 6. The scrambled
+    /// version had 0x4F at index 4 (CylHigh) and 0xC2 at index 5
+    /// (DriveHead) — every SATA/USB query aborted with the wrong
+    /// cylinder signature.
+    #[test]
+    fn smart_read_data_taskfile_registers_are_in_spec_order() {
+        let tf = smart_read_data_taskfile();
+        assert_eq!(tf[0], 0xD0, "Features = SMART READ DATA");
+        assert_eq!(tf[1], 0x01, "Sector count = 1");
+        assert_eq!(tf[2], 0x01, "Sector number = 1");
+        assert_eq!(tf[3], 0x4F, "CylLow = 0x4F (the SMART signature low)");
+        assert_eq!(tf[4], 0xC2, "CylHigh = 0xC2 (the SMART signature high)");
+        assert_eq!(tf[5], 0xA0, "Drive/Head = drive 0");
+        assert_eq!(tf[6], 0xB0, "Command = SMART (0xB0)");
+        assert_eq!(tf[7], 0x00, "Reserved = 0");
+    }
+
+    /// The IOCTL codes' CTL_CODE derivations (pinned for review —
+    /// these must never drift from the Win32 headers).
+    #[test]
+    fn ioctl_codes_derive_from_ctl_code_math() {
+        // CTL_CODE(DeviceType, Function, Method, Access) =
+        // (DeviceType << 16) | (Access << 14) | (Function << 2) | Method
+        let ctl = |device: u32, function: u32, method: u32, access: u32| -> u32 {
+            (device << 16) | (access << 14) | (function << 2) | method
+        };
+        // IOCTL_ATA_PASS_THROUGH_EX: IOCTL_SCSI_BASE (0x04), 0x0410,
+        // METHOD_BUFFERED (0), FILE_READ_ACCESS|FILE_WRITE_ACCESS (3).
+        assert_eq!(IOCTL_ATA_PASS_THROUGH_EX, ctl(0x04, 0x0410, 0, 3));
+        // SMART_RCV_DRIVE_DATA: 0x04, 0x0022, METHOD_BUFFERED, FILE_ANY_ACCESS.
+        assert_eq!(SMART_RCV_DRIVE_DATA, ctl(0x04, 0x0022, 0, 0));
+        // IOCTL_STORAGE_PREDICT_FAILURE: IOCTL_STORAGE_BASE (0x2D),
+        // 0x0410, METHOD_BUFFERED, FILE_ANY_ACCESS.
+        assert_eq!(IOCTL_STORAGE_PREDICT_FAILURE, ctl(0x2D, 0x0410, 0, 0));
     }
 }

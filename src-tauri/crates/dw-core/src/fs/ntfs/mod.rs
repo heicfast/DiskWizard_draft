@@ -638,21 +638,120 @@ impl NtfsEngine {
         total / u64::from(self.boot.mft_record_size)
     }
 
+    /// The volume's FREE cluster ranges as DEVICE-relative bytes —
+    /// the carve sweep's coverage plan (the RE model: the og carver
+    /// sweeps FREE clusters only — live files are the structured
+    /// engine's job, and carved duplicates of them are the
+    /// essential-mode noise the merge absorbs). Deleted files'
+    /// clusters are free by definition (that is why they are
+    /// recoverable), so nothing recoverable is skipped.
+    ///
+    /// Word-wise run detection (all-allocated and all-free bitmap
+    /// words take the fast path — a 4-billion-cluster volume scans
+    /// its 512 MiB bitmap in well under a second; the per-bit path
+    /// only runs on mixed words).
+    ///
+    /// `None` = the bitmap is unavailable/implausible (damaged
+    /// record, short bitmap, non-NTFS volume) — the caller falls
+    /// back to the full-device sweep (correctness over speed).
+    #[must_use]
+    pub fn free_cluster_ranges(&self) -> Option<Vec<(u64, u64)>> {
+        let bm = self.load_volume_bitmap()?;
+        let cs = self.boot.cluster_size().max(1);
+        let total_clusters =
+            self.boot.total_sectors / u64::from(self.boot.sectors_per_cluster.max(1));
+        if total_clusters == 0 || bm.is_empty() {
+            return None;
+        }
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut run_start: Option<u64> = None;
+        let close_run = |ranges: &mut Vec<(u64, u64)>, run_start: Option<u64>, end: u64| {
+            if let Some(s) = run_start {
+                ranges.push((s * cs, (end - s) * cs));
+            }
+            None
+        };
+        let full_words = total_clusters / 64;
+        for w in 0..full_words {
+            let base8 = w * 8;
+            let word = u64::from_le_bytes([
+                bm[base8 as usize],
+                bm[(base8 + 1) as usize],
+                bm[(base8 + 2) as usize],
+                bm[(base8 + 3) as usize],
+                bm[(base8 + 4) as usize],
+                bm[(base8 + 5) as usize],
+                bm[(base8 + 6) as usize],
+                bm[(base8 + 7) as usize],
+            ]);
+            let base = w * 64;
+            match word {
+                u64::MAX => run_start = close_run(&mut ranges, run_start.take(), base),
+                0 => {
+                    if run_start.is_none() {
+                        run_start = Some(base);
+                    }
+                }
+                _ => {
+                    // Mixed word — per-bit (rare: allocation
+                    // boundaries only).
+                    for b in 0..64u64 {
+                        let allocated = word >> b & 1 != 0;
+                        let c = base + b;
+                        if allocated {
+                            run_start = close_run(&mut ranges, run_start.take(), c);
+                        } else if run_start.is_none() {
+                            run_start = Some(c);
+                        }
+                    }
+                }
+            }
+        }
+        // The tail bits (clusters past the last full word).
+        for c in (full_words * 64)..total_clusters {
+            let byte = bm.get((c / 8) as usize)?;
+            let allocated = byte & (1 << (c % 8)) != 0;
+            if allocated {
+                run_start = close_run(&mut ranges, run_start.take(), c);
+            } else if run_start.is_none() {
+                run_start = Some(c);
+            }
+        }
+        close_run(&mut ranges, run_start.take(), total_clusters);
+        Some(ranges)
+    }
+
     /// Walk the MFT, emitting one [`FoundEntry`] per record (files,
     /// dirs, named streams). The tree builder links via
     /// `parent_hint`-encoded record refs (see [`FoundEntry`]).
     ///
-    /// The session-9 I/O model (the og engine's shape — research:
-    /// `ntfs-engine-internals.md` "the MFT walk streams cluster-
-    /// strided aligned blocks through one 64 KiB buffer"): records
-    /// stream through the MFT extents in 4 MiB aligned chunks — ONE
-    /// positioned bulk read each (the cache layer's ≥256 KiB bypass),
-    /// never per-record 1 KiB hop-throughs — and each chunk's records
-    /// PARSE on a scoped worker pool before in-order emission
-    /// (parallel parse, sequential semantics: the sink contract and
-    /// record numbering are exactly the sequential walk's). Media
-    /// damage inside a chunk zero-fills through the sparse read; the
-    /// damaged records fail the magic check and skip individually.
+    /// The RE-matched parallel pipeline (the og's MFT chunk loader,
+    /// `ntfs-engine-internals.md` — scaled to the RE-Match spec):
+    ///
+    /// * The MFT extents split into **8 MiB windows** (the RE
+    ///   `kMftChunkBytes`) at sector-aligned record boundaries.
+    /// * A worker pool (`cores.clamp(2,16)` — the RE cap) consumes
+    ///   windows off a shared queue: each worker performs its OWN
+    ///   positioned bulk read (overlapped reads on Windows mean the
+    ///   READS genuinely overlap across workers — the serialized
+    ///   read-then-parse hop was the old bottleneck), parses every
+    ///   record (fixup + attribute walk), and scores DELETED records
+    ///   inline against the volume `$Bitmap` (loaded ONCE, shared
+    ///   read-only — the RE `CNTFSBuildVolumeBitmap` model).
+    /// * Parsed records flow over a **bounded(4096)** channel (the RE
+    ///   CKernelQueue) back to THIS thread, which alone owns the
+    ///   sink: extension records stash, forked bases defer, entries
+    ///   emit — exactly the sequential walk's semantics, order-free
+    ///   (the tree's pass-2 fixpoint is order-independent by
+    ///   construction).
+    /// * Progress reports per window with a **100 ms throttle** (the
+    ///   RE CProgressTimer cadence) instead of once per phase — the
+    ///   owner's "progress never goes above 1%" was the coarse phase
+    ///   emission, not the walk itself.
+    ///
+    /// Media damage inside a window zero-fills through the sparse
+    /// read; the damaged records fail the magic check and skip
+    /// individually.
     #[allow(clippy::too_many_lines)] // One record-walk state machine; splitting would hurt locality.
     fn walk(&mut self, sink: &mut dyn ScanSink, ctrl: &ScanControl) -> CoreResult<ScanStats> {
         let mut stats = ScanStats::default();
@@ -663,183 +762,162 @@ impl NtfsEngine {
         let max_clusters =
             (self.boot.total_sectors / u64::from(self.boot.sectors_per_cluster.max(1))).max(1);
         // The QA-4 viability bitmap — loaded ONCE up front (the og
-        // `CNTFSBuildVolumeBitmap` model; per-record lazy loading raced
-        // the worker pool by needing `&mut self` mid-parse).
-        let bitmap = self.load_volume_bitmap();
-        // Records per streaming chunk: 4 MiB worth, rounded so every
-        // chunk START stays sector-aligned even when records are
-        // sub-sector (4 KiB sectors + 1 KiB records — lcm = 4 KiB).
+        // `CNTFSBuildVolumeBitmap` model), shared read-only with the
+        // worker pool (per-record lazy loading raced the workers by
+        // needing `&mut self` mid-parse).
+        let bitmap: Option<Arc<Vec<u8>>> = self.load_volume_bitmap().map(Arc::new);
+        // Windows: 8 MiB targets, sector-aligned record blocks (the
+        // RE kMftChunkBytes — chunk starts stay sector-aligned even
+        // when records are sub-sector: 4 KiB sectors + 1 KiB records
+        // → lcm = 4 KiB).
         let recs_align = ss.div_ceil(rs).max(1);
-        let recs_per_chunk = ((MFT_STREAM_TARGET / rs) / recs_align * recs_align).max(recs_align);
-        // Scoped parse workers (the og's priority-7 worker family):
-        // cap at 8 — parse is memory-bound, more just thrashes.
-        let workers = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZero::get)
-            .clamp(1, 8);
-        let mut record_no: u64 = 0;
-        // The forking state (M2 review #1): stashed extension-record
-        // fragments keyed by BASE record number + the deferred
-        // forked-base records awaiting the post-walk merge.
-        let mut ext_stash: HashMap<u64, Vec<ExtFragments>> = HashMap::new();
-        let mut deferred: Vec<ParsedRecord> = Vec::new();
-        'all: for ext in self.mft_extents.clone() {
+        let recs_per_window = ((MFT_STREAM_TARGET / rs) / recs_align * recs_align).max(recs_align);
+        let mut windows: Vec<MftWindow> = Vec::new();
+        let mut base_record = 0u64;
+        for ext in self.mft_extents.clone() {
             let recs_here = ext.len / rs;
             let mut done = 0u64;
             while done < recs_here {
-                ctrl.checkpoint()?;
-                let take = recs_per_chunk.min(recs_here - done);
-                let off = ext.offset + done * rs;
-                let mut buf =
-                    AlignedBuf::zeroed((take * rs) as usize, self.dev.preferred_read_alignment());
-                // Damage-tolerant bulk read: bad sectors zero-fill;
-                // their records fail the magic check and skip.
-                let _ = self.dev.read_sectors_sparse(off / ss, &mut buf);
-                // PARSE in parallel, EMIT in order (dense record
-                // numbering across the chunk's spans).
-                let base_no = record_no;
-                let mut parsed: Vec<Option<ParsedRecord>> = Vec::with_capacity(take as usize);
-                {
-                    let per = ((take as usize) + workers - 1) / workers.max(1);
-                    let slice = &buf[..];
-                    std::thread::scope(|scope| {
-                        let mut handles = Vec::with_capacity(workers);
-                        for w in 0..workers {
-                            let start = w * per;
-                            if start >= take as usize {
-                                break;
-                            }
-                            let end = ((w + 1) * per).min(take as usize);
-                            handles.push(scope.spawn(move || {
-                                let mut out = Vec::with_capacity(end - start);
-                                for k in start..end {
-                                    let ro = base_no + k as u64;
-                                    let rec_off = off + k as u64 * rs;
-                                    let data = &slice[k * rs as usize..(k + 1) * rs as usize];
-                                    out.push(parse_record(
-                                        data,
-                                        ro,
-                                        rec_off,
-                                        ss,
-                                        cluster,
-                                        max_clusters,
-                                    ));
-                                }
-                                out
-                            }));
-                        }
-                        for h in handles {
-                            parsed.extend(h.join().unwrap_or_default());
-                        }
-                    });
-                }
-                // Sequential emission — identical ordering + semantics
-                // to the record-number loop it replaces. Extension
-                // records STASH (the forking merge); forked base
-                // records DEFER to the post-walk merge pass.
-                for p in parsed.into_iter().flatten() {
-                    if p.record_no == 4 {
-                        continue; // $AttrDef — pure metadata
-                    }
-                    ctrl.checkpoint()?;
-                    if let Some(base) = p.extension_of {
-                        // The stash: streams + names + times flow into
-                        // the base entry (M2 review #1). Bounded against
-                        // hostile media.
-                        if ext_stash.len() < 65_536 {
-                            let e = ext_stash.entry(base).or_default();
-                            if e.len() < 64 {
-                                e.push(ExtFragments {
-                                    names: p.names,
-                                    times: p.times,
-                                    streams: p.data_streams,
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    if !p.attr_list_exts.is_empty() {
-                        // A forked base: defer emission until every
-                        // extension record has been seen (they can sit
-                        // anywhere in the MFT).
-                        if deferred.len() < 65_536 {
-                            deferred.push(p);
-                        }
-                        continue;
-                    }
-                    let origin = if p.in_use {
-                        NodeOrigin::Existing
-                    } else {
-                        NodeOrigin::Deleted
-                    };
-                    // ── QA-4: deleted-viability $Bitmap scoring ──
-                    // (research: ntfs-engine-algorithms-v2 §1): a
-                    // DELETED non-directory file ≥ 1 KiB whose unnamed
-                    // $DATA clusters ALL read as allocated in the live
-                    // $Bitmap has been fully re-used — destroy it.
-                    // Partial re-use keeps the candidate ("possibly
-                    // damaged but listed") with confidence scaled by
-                    // the intact fraction. Unverifiable → KEEP.
-                    let mut destroyed = false;
-                    let mut partial_confidence: Option<u8> = None;
-                    if origin == NodeOrigin::Deleted
-                        && !p.is_dir
-                        && p.names.iter().any(|(_, n)| !n.starts_with('$'))
-                        && let Some(stream) = p
-                            .data_streams
-                            .iter()
-                            .find(|s| s.name.is_none() && s.resident_len.is_none())
-                        && stream.size >= 0x3FF
-                        && !stream.extents.is_empty()
-                        && let Some(bm) = bitmap.as_deref()
-                    {
-                        let cs = cluster.max(1);
-                        let mut tot = 0u64;
-                        let mut reused = 0u64;
-                        let mut unverifiable = false;
-                        'runs: for e in &stream.extents {
-                            if e.offset == crate::types::HOLE_EXTENT_OFFSET {
-                                continue; // sparse hole — no clusters on disk
-                            }
-                            let first = e.offset / cs;
-                            let count = e.len / cs;
-                            for c in first..first + count {
-                                if c / 8 >= bm.len() as u64 {
-                                    unverifiable = true;
-                                    break 'runs;
-                                }
-                                tot += 1;
-                                if bm[(c / 8) as usize] & (1 << (c % 8)) != 0 {
-                                    reused += 1;
-                                }
-                            }
-                        }
-                        if !unverifiable && tot > 0 && reused == tot {
-                            destroyed = true; // every cluster re-allocated
-                        } else if !unverifiable && reused > 0 {
-                            let intact = tot - reused;
-                            partial_confidence =
-                                Some(u8::try_from(40 + (60 * intact) / tot).unwrap_or(100));
-                        }
-                    }
-                    if destroyed {
-                        continue; // fully re-used since deletion
-                    }
-                    emit_parsed(&p, origin, partial_confidence, sink, &mut stats);
-                }
-                record_no += take;
+                let take = recs_per_window.min(recs_here - done);
+                windows.push(MftWindow {
+                    offset: ext.offset + done * rs,
+                    records: take,
+                    base_record: base_record + done,
+                });
                 done += take;
-                sink.on_progress(record_no.min(total), total);
-                if record_no >= total {
-                    break 'all;
+            }
+            base_record += recs_here;
+        }
+        // Worker pool: the RE clamp (16 — beyond it, cache thrash).
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .clamp(2, 16)
+            .min(windows.len().max(1));
+        let cancelled = CancelFlag::default();
+        let done_records = std::sync::atomic::AtomicU64::new(0);
+        // The shared work-queue cursor (outer lifetime — the scoped
+        // workers borrow it; a closure-body local would die before
+        // the scope's join).
+        let next_window = std::sync::atomic::AtomicUsize::new(0);
+        let (wtx, wrx) = crossbeam_channel::bounded::<Vec<ParsedRecord>>(RECORD_CHANNEL_CAP);
+        // The forking state (M2 review #1) — walk-local, drained by
+        // THIS thread only (the single sink owner).
+        let mut ext_stash: HashMap<u64, Vec<ExtFragments>> = HashMap::new();
+        let mut deferred: Vec<ParsedRecord> = Vec::new();
+        let mut drain_err: Option<CoreError> = None;
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let wtx = wtx.clone();
+                let next_window = &next_window;
+                let cancelled = &cancelled;
+                let done_records = &done_records;
+                let windows = &windows;
+                let dev: &dyn BlockDevice = self.dev.as_ref();
+                let bitmap = bitmap.as_deref().map(Vec::as_slice);
+                scope.spawn(move || {
+                    'worker: loop {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'worker;
+                        }
+                        let wi = next_window.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(w) = windows.get(wi) else {
+                            break 'worker;
+                        };
+                        if ctrl.checkpoint().is_err() {
+                            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'worker;
+                        }
+                        let mut buf = AlignedBuf::zeroed(
+                            (w.records * rs) as usize,
+                            dev.preferred_read_alignment(),
+                        );
+                        // Damage-tolerant bulk read: bad sectors
+                        // zero-fill; their records fail the magic
+                        // check and skip.
+                        let _ = dev.read_sectors_sparse(w.offset / ss, &mut buf);
+                        let mut recs: Vec<ParsedRecord> = Vec::with_capacity(w.records as usize);
+                        for i in 0..w.records {
+                            let rec_off = w.offset + i * rs;
+                            let data = &buf[(i * rs) as usize..((i + 1) * rs) as usize];
+                            if let Some(mut p) = parse_record(
+                                data,
+                                w.base_record + i,
+                                rec_off,
+                                ss,
+                                cluster,
+                                max_clusters,
+                            ) {
+                                // Inline $Bitmap scoring (the RE
+                                // v2 §1 gate — worker-side, bitmap
+                                // shared read-only).
+                                score_deleted(&mut p, bitmap, cluster);
+                                recs.push(p);
+                            }
+                        }
+                        done_records.store(
+                            (w.base_record + w.records)
+                                .max(done_records.load(std::sync::atomic::Ordering::Relaxed)),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if wtx.send(recs).is_err() {
+                            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'worker;
+                        }
+                    }
+                });
+            }
+            drop(wtx);
+            // THIS thread owns the sink: drain, stash/defer/emit —
+            // identical semantics to the sequential walk, with
+            // throttled live progress between window batches.
+            let mut last_progress = std::time::Instant::now();
+            'drain: loop {
+                match wrx.recv_timeout(std::time::Duration::from_millis(PROGRESS_TICK_MS)) {
+                    Ok(recs) => {
+                        for p in recs {
+                            if p.record_no == 4 {
+                                continue; // $AttrDef — pure metadata
+                            }
+                            if let Err(e) = ctrl.checkpoint() {
+                                drain_err = Some(e);
+                                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                                break 'drain;
+                            }
+                            consume_parsed(p, &mut ext_stash, &mut deferred, sink, &mut stats);
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'drain;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        break 'drain;
+                    }
+                }
+                if last_progress.elapsed().as_millis() >= u128::from(PROGRESS_TICK_MS) {
+                    sink.on_progress(
+                        done_records
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            .min(total),
+                        total,
+                    );
+                    last_progress = std::time::Instant::now();
                 }
             }
+        });
+        if let Some(e) = drain_err {
+            return Err(e);
+        }
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
         }
         // ── The forking merge pass (M2 review #1) ──
         // Every extension record has now been stashed; the deferred
         // forked bases merge them and emit (ordering after the main
         // walk is safe — the tree builder resolves parent links in a
         // post-pass fixpoint, not by record order).
-        for mut p in deferred {
+        for mut p in std::mem::take(&mut deferred) {
             ctrl.checkpoint()?;
             if let Some(exts) = ext_stash.remove(&p.record_no) {
                 for e in exts {
@@ -871,16 +949,102 @@ impl NtfsEngine {
                     }
                 }
             }
-            let origin = if p.in_use {
-                NodeOrigin::Existing
-            } else {
-                NodeOrigin::Deleted
-            };
-            emit_parsed(&p, origin, None, sink, &mut stats);
+            // The merge is complete — this record is FINAL (its
+            // fork targets were consumed; re-deferring would drop
+            // it: the old code emitted here directly).
+            p.attr_list_exts.clear();
+            consume_parsed(p, &mut ext_stash, &mut deferred, sink, &mut stats);
         }
         sink.on_progress(total, total);
         Ok(stats)
     }
+}
+
+/// One MFT streaming window (the parallel walk's work unit).
+struct MftWindow {
+    /// Device byte offset of the window's first record.
+    offset: u64,
+    /// Records in this window.
+    records: u64,
+    /// Record number of the window's first record (dense numbering
+    /// across the MFT's extents).
+    base_record: u64,
+}
+
+/// The shared cancellation flag (workers + drain signal each other).
+type CancelFlag = std::sync::atomic::AtomicBool;
+
+/// Worker→drain record channel capacity (the RE CKernelQueue size).
+const RECORD_CHANNEL_CAP: usize = 4096;
+
+/// Progress throttle: the RE CProgressTimer cadence — below this the
+/// WebView2 IPC floods, above it the bar visibly stutters.
+const PROGRESS_TICK_MS: u64 = 100;
+
+/// Consume one parsed record through the sink: stash extensions,
+/// defer forked bases, apply the QA-4 destroy rule, emit the rest —
+/// the sequential walk's per-record semantics as a pure function of
+/// the record (order-free: stashes/defers resolve post-walk).
+fn consume_parsed(
+    p: ParsedRecord,
+    ext_stash: &mut HashMap<u64, Vec<ExtFragments>>,
+    deferred: &mut Vec<ParsedRecord>,
+    sink: &mut dyn ScanSink,
+    stats: &mut ScanStats,
+) {
+    // The forking state (M2 review #1): stashed extension-record
+    // fragments keyed by BASE record number + the deferred forked
+    // base records awaiting the post-walk merge.
+    if let Some(base) = p.extension_of {
+        // The stash: streams + names + times flow into the base
+        // entry. Bounded against hostile media.
+        if ext_stash.len() < 65_536 {
+            let e = ext_stash.entry(base).or_default();
+            if e.len() < 64 {
+                e.push(ExtFragments {
+                    names: p.names,
+                    times: p.times,
+                    streams: p.data_streams,
+                });
+            }
+        }
+        return;
+    }
+    if !p.attr_list_exts.is_empty() {
+        // A forked base: defer emission until every extension record
+        // has been seen (they can sit anywhere in the MFT).
+        if deferred.len() < 65_536 {
+            deferred.push(p);
+        }
+        return;
+    }
+    let origin = if p.in_use {
+        NodeOrigin::Existing
+    } else {
+        NodeOrigin::Deleted
+    };
+    // ── QA-4: deleted-viability $Bitmap scoring ──
+    // (research: ntfs-engine-algorithms-v2 §1): a DELETED non-directory
+    // file ≥ 1 KiB whose unnamed $DATA clusters ALL read as allocated
+    // in the live $Bitmap has been fully re-used — destroy it.
+    // Partial re-use keeps the candidate ("possibly damaged but
+    // listed") graded by the intact ratio. Unverifiable → KEEP.
+    if let Some(score) = p.recovery.as_ref()
+        && !score.unverifiable
+        && score.total_clusters > 0
+        && score.intact_clusters == 0
+        && !p.is_dir
+        && p.names.iter().any(|(_, n)| !n.starts_with('$'))
+        && let Some(stream) = p
+            .data_streams
+            .iter()
+            .find(|s| s.name.is_none() && s.resident_len.is_none())
+        && stream.size >= 0x3FF
+        && !stream.extents.is_empty()
+    {
+        return; // fully re-used since deletion
+    }
+    emit_parsed(&p, origin, sink, stats);
 }
 
 /// The stashed fragments of one extension record (the forking merge
@@ -891,9 +1055,93 @@ struct ExtFragments {
     streams: Vec<ParsedStream>,
 }
 
-/// Streaming chunk target: 4 MiB of MFT per bulk read (the og's
-/// cluster-strided block loader, scaled to modern media).
-const MFT_STREAM_TARGET: u64 = 4 * 1024 * 1024;
+/// Streaming window target: 8 MiB of MFT per bulk read (the RE's
+/// `kMftChunkBytes` — one positioned read per window, worker-owned).
+const MFT_STREAM_TARGET: u64 = 8 * 1024 * 1024;
+
+/// The $Bitmap extent-intact score for one DELETED record (the RE
+/// v2 §1/§3 gate — computed inline during the MFT walk).
+struct RecoveryScore {
+    /// intact_clusters / total_clusters (1.0 = fully free).
+    ratio: f64,
+    intact_clusters: u64,
+    total_clusters: u64,
+    /// The bitmap could not verify every cluster (out of range /
+    /// short bitmap): the candidate is KEPT unscored.
+    unverifiable: bool,
+}
+
+/// Score a DELETED record's unnamed non-resident $DATA against the
+/// volume bitmap (worker-side; pure — the drain applies the destroy
+/// rule and the confidence mapping). Sparse holes read as intact (no
+/// cluster on disk to reuse); resident streams score Excellent via
+/// the emit path (the record survived — content is inline). Files
+/// under the 0x3FF size gate skip cluster validation entirely (the
+/// RE v2 §1 rule — the destroy/confidence gates only bind files
+/// large enough for the bitmap signal to be meaningful).
+fn score_deleted(p: &mut ParsedRecord, bitmap: Option<&[u8]>, cluster: u64) {
+    if p.in_use || p.is_dir || p.names.iter().all(|(_, n)| n.starts_with('$')) {
+        return; // live/dirs/meta: no viability scoring
+    }
+    let Some(bm) = bitmap else { return };
+    let Some(stream) = p
+        .data_streams
+        .iter()
+        .find(|s| s.name.is_none() && s.resident_len.is_none())
+    else {
+        return;
+    };
+    if stream.size < 0x3FF || stream.extents.is_empty() {
+        return; // the size gate: small files keep full confidence
+    }
+    let cs = cluster.max(1);
+    let mut total = 0u64;
+    let mut intact = 0u64;
+    let mut unverifiable = false;
+    'runs: for e in &stream.extents {
+        if e.offset == crate::types::HOLE_EXTENT_OFFSET {
+            continue; // sparse hole — no clusters on disk
+        }
+        let first = e.offset / cs;
+        let count = e.len / cs;
+        for c in first..first + count {
+            if c / 8 >= bm.len() as u64 {
+                unverifiable = true;
+                break 'runs;
+            }
+            total += 1;
+            if bm[(c / 8) as usize] & (1 << (c % 8)) == 0 {
+                intact += 1; // free cluster — still recoverable
+            }
+        }
+    }
+    if total == 0 {
+        return; // nothing on disk to score
+    }
+    #[allow(clippy::cast_precision_loss)]
+    // ratio math — 52-bit mantissa far exceeds any cluster count
+    let ratio = intact as f64 / total as f64;
+    p.recovery = Some(RecoveryScore {
+        ratio,
+        intact_clusters: intact,
+        total_clusters: total,
+        unverifiable,
+    });
+}
+
+/// The RE v2 ratio → engine confidence (the grade mapping: ratio
+/// 1.0→Excellent, ≥0.75→Good, ≥0.25→Poor, else Poor/overwritten).
+fn ratio_confidence(ratio: f64) -> u8 {
+    if ratio >= 1.0 {
+        100
+    } else if ratio >= 0.75 {
+        85
+    } else if ratio >= 0.25 {
+        54
+    } else {
+        30
+    }
+}
 
 /// One $DATA stream parsed off a record.
 struct ParsedStream {
@@ -926,6 +1174,9 @@ struct ParsedRecord {
     /// (base_ref != 0) — the walk stashes it for the merge instead
     /// of emitting it standalone.
     extension_of: Option<u64>,
+    /// The inline $Bitmap viability score (worker-side; see
+    /// [`score_deleted`]).
+    recovery: Option<RecoveryScore>,
 }
 
 /// Parse + fixup one MFT record from an in-memory slice. `None` =
@@ -981,10 +1232,31 @@ fn parse_record(
                             b
                         })
                     };
+                    let traw = |off: usize| {
+                        u64::from_le_bytes({
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&r[off..off + 8]);
+                            b
+                        })
+                    };
+                    // $STANDARD_INFORMATION layout (the Explorer
+                    // parity fix — the session's timestamp bug):
+                    // +0x00 creation, +0x08 FILE MODIFICATION (what
+                    // Explorer shows as "Date modified"), +0x10 MFT
+                    // RECORD change (metadata touches — renames,
+                    // attribute writes), +0x18 access. The old mapping
+                    // swapped 0x08/0x10 — every NTFS "modified" shown
+                    // was the MFT touch time.
                     times.created = Some(ntfs_time_ms(t(0x00)));
-                    times.changed = Some(ntfs_time_ms(t(0x08)));
-                    times.modified = Some(ntfs_time_ms(t(0x10)));
+                    times.modified = Some(ntfs_time_ms(t(0x08)));
+                    times.changed = Some(ntfs_time_ms(t(0x10)));
                     times.accessed = Some(ntfs_time_ms(t(0x18)));
+                    // Full 100-ns FILETIME ticks — the RE precision
+                    // contract preserved end-to-end.
+                    times.created_raw = Some(traw(0x00));
+                    times.modified_raw = Some(traw(0x08));
+                    times.changed_raw = Some(traw(0x10));
+                    times.accessed_raw = Some(traw(0x18));
                     dos_attrs = u32::from_le_bytes([r[0x20], r[0x21], r[0x22], r[0x23]]);
                 }
             }
@@ -1004,10 +1276,15 @@ fn parse_record(
                             b
                         })
                     };
+                    // $FILE_NAME layout: +0x08 creation, +0x10 file
+                    // modification, +0x18 MFT change, +0x20 access
+                    // (the SI fallback when $STANDARD_INFORMATION is
+                    // absent — old NTFS volumes).
                     if times.modified.is_none() {
-                        times.modified = Some(ntfs_time_ms(ft(0x08)));
-                        times.changed = Some(ntfs_time_ms(ft(0x10)));
-                        times.accessed = Some(ntfs_time_ms(ft(0x18)));
+                        times.created = Some(ntfs_time_ms(ft(0x08)));
+                        times.modified = Some(ntfs_time_ms(ft(0x10)));
+                        times.changed = Some(ntfs_time_ms(ft(0x18)));
+                        times.accessed = Some(ntfs_time_ms(ft(0x20)));
                     }
                     let name_len = r[0x40] as usize;
                     let namespace = r[0x41];
@@ -1024,8 +1301,9 @@ fn parse_record(
                     }
                     names.push((parent, name));
                     if times.deleted.is_none() && !in_use {
-                        // Deleted time unknown from SI; the change
-                        // time approximates.
+                        // Deleted time unknown from SI; the file's
+                        // modification time approximates (the record's
+                        // mtime — the best on-disk signal).
                         times.deleted = Some(ntfs_time_ms(ft(0x10)));
                     }
                 }
@@ -1095,6 +1373,7 @@ fn parse_record(
         data_streams,
         attr_list_exts,
         extension_of,
+        recovery: None,
     })
 }
 
@@ -1104,7 +1383,6 @@ fn parse_record(
 fn emit_parsed(
     p: &ParsedRecord,
     origin: NodeOrigin,
-    partial_confidence: Option<u8>,
     sink: &mut dyn ScanSink,
     stats: &mut ScanStats,
 ) {
@@ -1140,11 +1418,20 @@ fn emit_parsed(
                     extents: stream.extents.clone(),
                     confidence: {
                         let base = if stream.compressed { 70 } else { 100 };
-                        match partial_confidence {
-                            Some(pc) => pc.min(base),
-                            None => base,
+                        // The RE v2 extent-intact grade rides the
+                        // $Bitmap ratio (worker-scored inline).
+                        match p.recovery.as_ref() {
+                            Some(score) if !score.unverifiable => {
+                                ratio_confidence(score.ratio).min(base)
+                            }
+                            _ => base,
                         }
                     },
+                    recovery_ratio: p
+                        .recovery
+                        .as_ref()
+                        .filter(|s| !s.unverifiable)
+                        .map(|s| s.ratio),
                     category_hint: None,
                     dimensions: None,
                     content_key: None,
@@ -1154,6 +1441,7 @@ fn emit_parsed(
                 if let Some(rlen) = stream.resident_len {
                     e.extents = vec![Extent::new(p.offset, 0)]; // resident-marker
                     e.confidence = 100;
+                    e.recovery_ratio = None;
                     // (Resident content is re-read at recovery time
                     // from the record; the marker guides it.)
                     e.size = rlen;
@@ -1193,6 +1481,57 @@ pub fn ntfs_time_ms(ticks: i64) -> i64 {
 mod tests {
     use super::*;
     use crate::testutil::RamDevice;
+
+    /// The carve coverage plan's source: `free_cluster_ranges` reads
+    /// $Bitmap record 6 and returns the FREE spans in device bytes —
+    /// mixed/allocated words, tail bits, and the run-merging all
+    /// verified (the RE-Match spec §7 gate).
+    #[test]
+    fn free_cluster_ranges_matches_bitmap_runs() {
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let boot = boot_sector_template();
+        ram.data[..512].copy_from_slice(&boot);
+        let root = mft_record(0x0003, 5, ".", None);
+        let mft_base = 16 * 512;
+        ram.data[mft_base..mft_base + 512].copy_from_slice(&mft_record0(16, 32));
+        ram.data[mft_base + 5 * 512..mft_base + 6 * 512].copy_from_slice(&root);
+        // Record 6 = $Bitmap: one cluster at LCN 120 (512 B = 4096
+        // clusters, cluster size 512 B → the whole volume).
+        ram.data[mft_base + 6 * 512..mft_base + 7 * 512].copy_from_slice(&mft_record0(120, 1));
+        // Bitmap layout (4096 clusters): free [0..64), allocated
+        // [64..192), free [192..4160), allocated [4160..4192) — the
+        // last 96 clusters (4192..4096*... wait total = 4096) — tail
+        // past the last full word: clusters 4096..4096 don't exist.
+        // Full words: 4096/64 = 64 words exactly.
+        let mut bitmap = [0u8; 512];
+        // Word 0 (clusters 0..64): all free (0x00).
+        // Words 1..3 (64..256): all allocated.
+        for w in 1..3 {
+            bitmap[w * 8..(w + 1) * 8].fill(0xFF);
+        }
+        // Word 3 (192..256): free → 0x00.
+        // Words 4..64 (256..4096): free except a mixed band at word 6
+        // (384..448) with clusters 384..400 allocated.
+        for c in 384u64..400 {
+            bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
+        }
+        // Word 65 would be past the end — 64 words exactly. But the
+        // LAST word (63, clusters 4032..4096): mark all allocated.
+        bitmap[63 * 8..64 * 8].fill(0xFF);
+        ram.data[120 * 512..120 * 512 + 512].copy_from_slice(&bitmap);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let engine = NtfsEngine::new(dev).expect("engine");
+        let free = engine.free_cluster_ranges().expect("ranges");
+        // Free runs: [0, 64) clusters, [192, 384), [400, 4032).
+        // (Word 6's clusters 400..448 are free after the mixed band.)
+        let expect: Vec<(u64, u64)> = vec![
+            (0, 64 * 512),
+            (192 * 512, (384 - 192) * 512),
+            (400 * 512, (4032 - 400) * 512),
+        ];
+        assert_eq!(free, expect);
+    }
 
     fn boot_sector_template() -> Vec<u8> {
         let mut s = vec![0u8; 512];
@@ -1327,6 +1666,121 @@ mod tests {
         // Sub-second precision survives the wire (the og's FILETIME
         // fidelity): 1.5 s past epoch stays 1500 ms, not 1 s.
         assert_eq!(ntfs_time_ms(116_444_736_000_000_000 + 15_000_000), 1_500);
+    }
+
+    /// The RE-Match spec's hard roundtrip test: 10 000 deterministic
+    /// pseudo-random VALID FILETIMEs convert EXACTLY — the millisecond
+    /// wire value equals `ticks/10000 − 11644473600000` with ZERO
+    /// drift (the 100-ns remainder rides `*_raw`, never lost).
+    #[test]
+    fn filetime_roundtrip_is_exact_over_10k_samples() {
+        // xorshift64* — deterministic, no external rng dep.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        const EPOCH_DIFF_MS: i64 = 11_644_473_600_000;
+        for _ in 0..10_000 {
+            let ticks = next() % 132_000_000_000_000_000; // ~1601..2172
+            let ms = ntfs_time_ms(ticks as i64);
+            let expect = (ticks / 10_000) as i64 - EPOCH_DIFF_MS;
+            assert_eq!(ms, expect, "ticks {ticks}");
+            // The raw ticks' sub-ms remainder is recoverable: nothing
+            // but the conversion's floor division touches it.
+            let remainder = ticks % 10_000;
+            assert!(remainder < 10_000);
+        }
+    }
+
+    /// The Explorer-parity mapping (the session's timestamp fix):
+    /// $STANDARD_INFORMATION offset 0x08 is the FILE MODIFICATION
+    /// time (what Explorer shows); offset 0x10 is the MFT-record
+    /// change time. Four DISTINCT values prove no swap survives.
+    #[test]
+    fn standard_information_fields_map_explorer_parity() {
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let boot = boot_sector_template();
+        ram.data[..512].copy_from_slice(&boot);
+        let root = mft_record(0x0003, 5, ".", None);
+        let mut rec = mft_record(0x0001, 5, "dated.txt", Some(([0x11, 0x01, 90], 2048)));
+        // The fixture's first attribute is $FILE_NAME — prepend a
+        // $STANDARD_INFORMATION in front of it. Existing attrs span
+        // [0x38, end_marker+4).
+        let attrs_start = 0x38usize;
+        let si_len = 0x18 + 0x30; // header + 0x30 content
+        let existing_end = {
+            // Walk to the end marker (0xFFFFFFFF).
+            let mut p = attrs_start;
+            while p + 4 <= 512 {
+                if u32::from_le_bytes([rec[p], rec[p + 1], rec[p + 2], rec[p + 3]]) == 0xFFFF_FFFF {
+                    break;
+                }
+                let l =
+                    u32::from_le_bytes([rec[p + 4], rec[p + 5], rec[p + 6], rec[p + 7]]) as usize;
+                assert!(l >= 0x18, "fixture attr len");
+                p += l;
+            }
+            p + 4
+        };
+        rec.copy_within(attrs_start..existing_end, attrs_start + si_len);
+        let base = 130_000_000_000_000_000i64; // ~2011
+        let t_created = base;
+        let t_modified = base + 11_000_000_000; // +110 s later
+        let t_changed = base + 22_000_000_000; // the MFT touch, latest
+        let t_accessed = base + 5_000_000_000;
+        // $SI attribute header: kind 0x10, len, resident, content at
+        // +0x18, content_len 0x30.
+        rec[attrs_start..attrs_start + 4].copy_from_slice(&0x10u32.to_le_bytes());
+        rec[attrs_start + 4..attrs_start + 8].copy_from_slice(&(si_len as u32).to_le_bytes());
+        rec[attrs_start + 8] = 0; // resident
+        rec[attrs_start + 0x10..attrs_start + 0x14].copy_from_slice(&0x30u32.to_le_bytes()); // content len
+        rec[attrs_start + 0x14..attrs_start + 0x16].copy_from_slice(&0x18u16.to_le_bytes()); // content off
+        let c = attrs_start + 0x18;
+        rec[c..c + 8].copy_from_slice(&t_created.to_le_bytes());
+        rec[c + 8..c + 16].copy_from_slice(&t_modified.to_le_bytes());
+        rec[c + 16..c + 24].copy_from_slice(&t_changed.to_le_bytes());
+        rec[c + 24..c + 32].copy_from_slice(&t_accessed.to_le_bytes());
+        let mft_base = 16 * 512;
+        ram.data[mft_base..mft_base + 512].copy_from_slice(&mft_record0(16, 32));
+        ram.data[mft_base + 5 * 512..mft_base + 6 * 512].copy_from_slice(&root);
+        ram.data[mft_base + 7 * 512..mft_base + 8 * 512].copy_from_slice(&rec);
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = NtfsEngine::new(dev).expect("engine");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        engine
+            .quick_scan(&mut sink, &ScanControl::new())
+            .expect("scan");
+        let e = sink
+            .0
+            .iter()
+            .find(|e| e.name == "dated.txt")
+            .expect("the dated fixture");
+        let expect = |t: i64| ntfs_time_ms(t);
+        assert_eq!(e.timestamps.created, Some(expect(t_created)));
+        assert_eq!(
+            e.timestamps.modified,
+            Some(expect(t_modified)),
+            "modified = $SI +0x08 (the Explorer column), NOT the MFT touch"
+        );
+        assert_eq!(
+            e.timestamps.changed,
+            Some(expect(t_changed)),
+            "changed = $SI +0x10 (the MFT-record time)"
+        );
+        assert_eq!(e.timestamps.accessed, Some(expect(t_accessed)));
+        // And the raw 100-ns ticks survive verbatim.
+        assert_eq!(e.timestamps.modified_raw, Some(t_modified as u64));
+        assert_eq!(e.timestamps.changed_raw, Some(t_changed as u64));
+        assert_eq!(e.timestamps.created_raw, Some(t_created as u64));
     }
 
     /// Build a minimal valid MFT record with a $FILE_NAME +
@@ -1624,9 +2078,13 @@ mod tests {
         assert!(find("gone.log").is_none(), "fully re-used → destroyed");
         let p = find("partial.log").expect("partially re-used → kept");
         assert_eq!(p.origin, NodeOrigin::Deleted);
-        assert_eq!(p.confidence, 70, "intact 1/2 → 40 + 60×(1/2)");
+        // The RE v2 ratio bands (ntfs-engine-algorithms-v2 §1/§3):
+        // ratio 0.5 lands in the Poor band [0.25, 0.75) → 54.
+        assert_eq!(p.confidence, 54, "intact 1/2 → ratio band Poor");
+        assert!((p.recovery_ratio.expect("ratio") - 0.5).abs() < f64::EPSILON);
         let i = find("intact.log").expect("intact → kept");
         assert_eq!(i.confidence, 100);
+        assert!((i.recovery_ratio.expect("ratio") - 1.0).abs() < f64::EPSILON);
         let s = find("small.log").expect("under the size gate → kept");
         assert_eq!(s.confidence, 100);
         let j = find("$Journal").expect("system $ fast path → kept");

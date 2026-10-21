@@ -159,20 +159,45 @@ impl FileAttrs {
     }
 }
 
-/// Normalized timestamps (unix seconds — the UI formats).
+/// Normalized timestamps.
+///
+/// The `*` fields are unix MILLISECONDS (the frozen UI wire
+/// contract — `formatDateTime(unixMs)` in `src/lib/format.ts`);
+/// conversion from NTFS FILETIME is EXACT (`ntfs_time_ms`), never
+/// drifting past the format's own granularity.
+///
+/// The `*_raw` fields carry the native on-disk units — full 100-ns
+/// FILETIME ticks for NTFS (the RE precision contract: the same
+/// qwords Explorer's property sheet reads; `ntfs-engine--deep-dive`
+/// §timestamps) — so the precision survives the wire and any consumer
+/// (session store, future sub-ms display, verification) can recover
+/// it without re-reading the disk.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timestamps {
-    /// Last modification (content).
+    /// Last modification of the CONTENT — $STANDARD_INFORMATION
+    /// offset 0x08 (what Windows Explorer shows as "Date modified");
+    /// FAT: the write date/time.
     pub modified: Option<i64>,
     /// Creation.
     pub created: Option<i64>,
     /// Last access.
     pub accessed: Option<i64>,
-    /// Record change (NTFS $STANDARD_INFORMATION / MFT time).
+    /// Record change (NTFS $STANDARD_INFORMATION offset 0x10 — the
+    /// MFT-entry touch time, updated by renames/attribute writes
+    /// too; NOT the Explorer "modified" — see `modified`).
     pub changed: Option<i64>,
     /// Deletion time when known (FAT/inode dtime; UI date-deleted
     /// bucket).
     pub deleted: Option<i64>,
+    /// Full 100-ns FILETIME ticks since 1601-01-01 (NTFS $SI
+    /// offset 0x08 — the `modified` source, precision preserved).
+    pub modified_raw: Option<u64>,
+    /// Full 100-ns ticks — $SI offset 0x00 (creation).
+    pub created_raw: Option<u64>,
+    /// Full 100-ns ticks — $SI offset 0x18 (access).
+    pub accessed_raw: Option<u64>,
+    /// Full 100-ns ticks — $SI offset 0x10 (MFT record change).
+    pub changed_raw: Option<u64>,
 }
 
 /// Where a found node came from — the special-branch taxonomy.
@@ -261,6 +286,12 @@ pub struct FoundEntry {
     /// Engine confidence 0..=100 feeding the grade (carvers set from
     /// signature confidence; structured engines start at 100).
     pub confidence: u8,
+    /// $Bitmap extent-intact ratio 0..=1 for DELETED structured
+    /// entries (the RE `ntfs-engine-algorithms-v2` §1 gate:
+    /// intact_clusters / total_clusters of the unnamed $DATA runlist;
+    /// `None` = not scored — carved entries and live files). Feeds
+    /// [`crate::tree::grade_from`] before confidence arithmetic.
+    pub recovery_ratio: Option<f64>,
     /// Category hint already known (extension-based); tree building
     /// re-classifies as the authority.
     pub category_hint: Option<Category>,
@@ -290,6 +321,7 @@ impl FoundEntry {
             origin: NodeOrigin::Existing,
             extents: Vec::new(),
             confidence: 100,
+            recovery_ratio: None,
             category_hint: None,
             dimensions: None,
             content_key: None,

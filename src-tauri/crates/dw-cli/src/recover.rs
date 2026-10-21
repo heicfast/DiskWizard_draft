@@ -73,9 +73,9 @@ impl DestWriter for FsDest {
             let ok = unsafe {
                 GetDiskFreeSpaceExW(
                     windows::core::PCWSTR(w.as_ptr()),
-                    Some(&mut free_caller),
-                    Some(&mut total),
-                    Some(&mut free),
+                    Some(std::ptr::from_mut(&mut free_caller)),
+                    Some(std::ptr::from_mut(&mut total)),
+                    Some(std::ptr::from_mut(&mut free)),
                 )
             };
             ok.map(|()| free_caller)

@@ -222,13 +222,25 @@ impl ScanController {
 
     /// The phase machine (run's body — tree hoisted so cancellation
     /// can finish it). Returns the final report.
+    ///
+    /// The RE-matched pipeline (research `04-recovery-workflow.md` §4
+    /// + the RE-Match spec §4's thread graph):
+    ///
+    /// The structured engines for ALL scan units run concurrently
+    /// (one worker per unit, the per-unit engine itself
+    /// window-parallel internally); entries and progress flow over a
+    /// bounded crossbeam channel to THIS thread — the single merger
+    /// that owns the tree, the counters and the observer. Phase bands
+    /// follow the spec's table: discovery 0–2 %, quick 2–38 %,
+    /// deep-structured 38–68 %, RAW carving 68–95 % (wire phase:
+    /// `deep`), organizing 95–100 %.
     #[allow(clippy::too_many_lines)] // The phase machine; phases share sink/weight state by design.
     fn run_inner(
         &mut self,
         obs: &mut dyn ProgressObserver,
         tree: &mut TreeBuilder,
     ) -> CoreResult<ScanReport> {
-        // ── PREPARE ────────────────────────────────────────────────
+        // ── PREPARE (discovery, 0–2 %) ────────────────────────────
         self.phase = Phase::Preparing;
         obs.on_phase(self.phase);
         self.ctrl.checkpoint()?;
@@ -250,86 +262,40 @@ impl ScanController {
             .map(|u| u.sectors.max(1))
             .sum();
 
-        // ── QUICK ──────────────────────────────────────────────────
+        // ── QUICK (2–38 %): ALL structured units concurrently ────
         self.phase = Phase::Quick;
         obs.on_phase(self.phase);
-        let mut done_weight = 0u64;
-        for unit in &units {
-            if matches!(unit.fs, FsKind::Raw | FsKind::Unknown) {
-                continue; // carve-only unit: no quick work, no weight
-            }
-            let lo = 0.38 * weight_frac(done_weight, structured_weight);
-            let hi = 0.38 * weight_frac(done_weight + unit.sectors.max(1), structured_weight);
-            done_weight += unit.sectors.max(1);
-            let Ok(mut engine) = fs::create_engine(unit.fs, unit.dev.clone()) else {
-                continue;
-            };
-            let ctrl = self.ctrl.clone();
-            let mut sink = ControllerSink {
-                ctrl: self,
-                tree,
-                phase_percent_range: (lo, hi),
-                path_prefix: unit.prefix.as_deref(),
-                obs_slot: obs,
-            };
-            match engine.quick_scan(&mut sink, &ctrl) {
-                Ok(_) => {}
-                Err(CoreError::Cancelled) => {
-                    self.last_fs_kind = units_fs(&units);
-                    return Err(CoreError::Cancelled);
-                }
-                Err(_) => { /* engine failed — carve still runs */ }
-            }
-            // Session 8: pass-2 at the unit boundary — the MFT refs
-            // this unit emitted resolve before the next engine runs
-            // (structured entries must populate the merge maps before
-            // carving absorbs their carved duplicates).
-            tree.resolve_pending();
-        }
+        let quick_done =
+            self.run_units_parallel(obs, tree, &units, structured_weight, Phase::Quick)?;
+        tree.resolve_pending();
 
-        // ── DEEP ───────────────────────────────────────────────────
+        // ── DEEP (38–95 %): structured reanimation pass ────────────
         self.phase = Phase::Deep;
         obs.on_phase(self.phase);
         self.sectors_read = 0;
-        let mut done_weight = 0u64;
-        for unit in &units {
-            if matches!(unit.fs, FsKind::Raw | FsKind::Unknown) {
-                continue; // carve-only unit: no deep work, no weight
-            }
-            let lo = 0.38 + 0.17 * weight_frac(done_weight, structured_weight);
-            let hi =
-                0.38 + 0.17 * weight_frac(done_weight + unit.sectors.max(1), structured_weight);
-            done_weight += unit.sectors.max(1);
-            // Deep structured pass (deleted reanimation) when the
-            // engine supports it distinctly.
-            let Ok(mut engine) = fs::create_engine(unit.fs, unit.dev.clone()) else {
-                continue;
-            };
-            let ctrl = self.ctrl.clone();
-            let mut sink = ControllerSink {
-                ctrl: self,
-                tree,
-                phase_percent_range: (lo, hi),
-                path_prefix: unit.prefix.as_deref(),
-                obs_slot: obs,
-            };
-            let _ = engine.deep_scan(&mut sink, &ctrl);
-            tree.resolve_pending();
-        }
-        // RAW carving sweep over the WHOLE device (partitions +
-        // unallocated space).
+        let deep_done =
+            self.run_units_parallel(obs, tree, &units, structured_weight, Phase::Deep)?;
+        tree.resolve_pending();
+        let _ = (quick_done, deep_done);
+
+        // ── RAW carving (68–95 %): free-cluster-guided sweep ───────
+        // The coverage plan (RE-Match spec §7): NTFS units contribute
+        // their $Bitmap FREE ranges only (live files are the
+        // structured engine's job; carved duplicates of them are the
+        // essential-mode noise the merge absorbs — on a typical disk
+        // this halves-or-better the carve bytes); everything else
+        // (non-NTFS units' extents, NTFS units without a usable
+        // bitmap, and the unpartitioned/lost gaps) carves fully.
         if !self.ctrl.is_cancelled() {
-            let capacity = self.dev.capacity_bytes();
+            let carve_plan = self.carve_plan(&units);
             let carver = RawCarver::new(Arc::clone(&self.dev) as Arc<dyn BlockDevice>);
             let ctrl = self.ctrl.clone();
-            let mut sink = ControllerSink {
+            let mut sink = CarveSink {
                 ctrl: self,
                 tree,
-                phase_percent_range: (0.55, 1.0),
-                path_prefix: None,
                 obs_slot: obs,
             };
-            match carver.carve(&mut sink, &ctrl, 0, capacity) {
+            match carver.carve_ranges(&mut sink, &ctrl, &carve_plan) {
                 Ok(_) => {}
                 Err(CoreError::Cancelled) => {
                     self.last_fs_kind = units_fs(&units);
@@ -339,19 +305,20 @@ impl ScanController {
             }
         }
 
-        // ── ORGANIZE ───────────────────────────────────────────────
-        // Session 8: the final pass-2 — leftovers land on the honest
-        // lost branches, counters see every materialized node.
+        // ── ORGANIZE (95–100 %) ──────────────────────────────────
+        // The final pass-2 — leftovers land on the honest lost
+        // branches, counters see every materialized node.
         tree.finish();
         self.phase = Phase::Organizing;
         obs.on_phase(self.phase);
         self.ctrl.checkpoint()?;
-        // Session 9: the recoverability READABILITY pass (the og
+        // The recoverability READABILITY pass (the og
         // CCheckNodeThread model — `DRWUI-subsystems--assistant-
-        // grading-preview.md` §2): probe deleted files' first
-        // extents; unreadable media downgrades the grade to Poor.
+        // grading-preview.md` §2): probe deleted files' first extents
+        // (parallel); unreadable media downgrades the grade to Poor.
         // Recoverability stops being confidence arithmetic alone.
         tree.apply_readability_grades(&*self.dev, READABILITY_PROBE_CAP);
+        self.emit(obs, 0.95 + 0.05);
         self.emit(obs, 1.0);
         // (Classification ran incrementally; counters finalize here.)
         // QA-17: the LOGICAL byte total can exceed the scanned device's
@@ -367,6 +334,7 @@ impl ScanController {
         obs.on_phase(self.phase);
         self.files = files;
         self.bytes = bytes;
+        self.sectors_read = self.sectors_total;
         self.emit(obs, 1.0);
         let kind = units_fs(&units);
         self.last_fs_kind = kind;
@@ -377,6 +345,255 @@ impl ScanController {
             stopped: false,
             fs: kind,
         })
+    }
+
+    /// Run the structured engines for every unit CONCURRENTLY (the
+    /// RE Quick/Complete controller family): one worker thread per
+    /// structured unit (each engine parallelizes internally), a
+    /// bounded crossbeam channel carrying entries + progress back to
+    /// THIS thread, which alone owns the tree and the observer (the
+    /// single-merger discipline — no tree locks, no observer races).
+    ///
+    /// `phase` selects quick vs deep semantics; the band calculator
+    /// maps (unit, done, total) into the phase's percent slice.
+    /// Returns the summed `done` counters (diagnostics).
+    #[allow(clippy::too_many_lines)] // The unit pipeline: spawn loop + drain merger share the channel contract.
+    fn run_units_parallel(
+        &mut self,
+        obs: &mut dyn ProgressObserver,
+        tree: &mut TreeBuilder,
+        units: &[ScanUnit],
+        structured_weight: u64,
+        phase: Phase,
+    ) -> CoreResult<u64> {
+        let structured: Vec<(usize, &ScanUnit)> = units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| !matches!(u.fs, FsKind::Raw | FsKind::Unknown))
+            .collect();
+        if structured.is_empty() {
+            return Ok(0);
+        }
+        // The progress bands (spec §4.2): quick = 2..38 %, deep =
+        // 38..68 % — each unit's slice proportional to its weight.
+        let (band_lo, band_hi) = match phase {
+            Phase::Quick => (0.02, 0.38),
+            _ => (0.38, 0.68),
+        };
+        let mut cum_weight = 0u64;
+        let mut bands: Vec<(usize, f64, f64)> = Vec::with_capacity(structured.len());
+        for &(i, u) in &structured {
+            let lo = band_lo + (band_hi - band_lo) * weight_frac(cum_weight, structured_weight);
+            cum_weight += u.sectors.max(1);
+            let hi = band_lo + (band_hi - band_lo) * weight_frac(cum_weight, structured_weight);
+            bands.push((i, lo, hi));
+        }
+        let band_of = |unit: usize| -> (f64, f64) {
+            bands
+                .iter()
+                .find(|(i, _, _)| *i == unit)
+                .map_or((band_lo, band_hi), |&(_, lo, hi)| (lo, hi))
+        };
+        let ctrl = self.ctrl.clone();
+        let (tx, rx) = crossbeam_channel::bounded::<UnitMsg>(UNIT_CHANNEL_CAP);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let cancelled_ref = &cancelled;
+        let mut cancelled_err: Option<CoreError> = None;
+        let mut done_sum = 0u64;
+        std::thread::scope(|scope| {
+            for &(i, u) in &structured {
+                let tx = tx.clone();
+                let ctrl = ctrl.clone();
+                let fs = u.fs;
+                let dev = Arc::clone(&u.dev);
+                let cancelled = cancelled_ref;
+                scope.spawn(move || {
+                    let Ok(mut engine) = fs::create_engine(fs, dev) else {
+                        // Engine failure: the carve still covers the
+                        // unit's bytes; other units continue.
+                        return;
+                    };
+                    let mut sink = UnitChannelSink { tx, unit: i };
+                    let r = match phase {
+                        Phase::Quick => engine.quick_scan(&mut sink, &ctrl),
+                        _ => engine.deep_scan(&mut sink, &ctrl),
+                    };
+                    if matches!(r, Err(CoreError::Cancelled)) {
+                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+            drop(tx);
+            // THIS thread = the merger (tree + counters + observer).
+            'drain: loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
+                    Ok(UnitMsg::Entry(unit, boxed_entry)) => {
+                        let mut entry = *boxed_entry;
+                        // Partition prefixes ride the dedicated field
+                        // (never string-munged into `@mft:` refs — the
+                        // session-8 rule); the unit tag routes the
+                        // right partition's label.
+                        if let Some(&(_, u)) = structured.iter().find(|(j, _)| *j == unit)
+                            && let Some(prefix) = u.prefix.as_deref()
+                        {
+                            match entry.parent_hint.as_deref() {
+                                Some(h) if h.starts_with('@') => {
+                                    entry.partition = Some(prefix.to_string());
+                                }
+                                Some(h) if !h.is_empty() => {
+                                    entry.parent_hint = Some(format!("{prefix}/{h}"));
+                                }
+                                Some(_) => {
+                                    // Volume-root entry on a partition unit.
+                                    entry.parent_hint = Some(prefix.to_string());
+                                }
+                                None => {}
+                            }
+                        }
+                        self.ingest_entry(obs, tree, entry);
+                    }
+                    Ok(UnitMsg::Progress { unit, done, total }) => {
+                        done_sum = done_sum.max(done);
+                        let (lo, hi) = band_of(unit);
+                        let frac = if total == 0 {
+                            1.0
+                        } else {
+                            #[allow(clippy::cast_precision_loss)]
+                            {
+                                (done as f64 / total as f64).clamp(0.0, 1.0)
+                            }
+                        };
+                        self.emit_obs(obs, lo + (hi - lo) * frac);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'drain;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        break 'drain;
+                    }
+                }
+                if self.ctrl.checkpoint().is_err() {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cancelled_err = Some(CoreError::Cancelled);
+                    break 'drain;
+                }
+            }
+        });
+        if cancelled_err.is_some() {
+            return Err(CoreError::Cancelled);
+        }
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
+        }
+        Ok(done_sum)
+    }
+
+    /// The merger's entry path (shared by the structured units and
+    /// the carve): tree ingest + live counters + the
+    /// progressive-publish throttle.
+    fn ingest_entry(
+        &mut self,
+        obs: &mut dyn ProgressObserver,
+        tree: &mut TreeBuilder,
+        entry: FoundEntry,
+    ) {
+        let is_file = !entry.is_dir;
+        let size = entry.size;
+        tree.add(entry);
+        if is_file {
+            self.files += 1;
+            // The LIVE counter is clamped continuously (QA-17).
+            self.bytes = self.bytes.saturating_add(size).min(self.capacity);
+        }
+        // Progressive results: the FIRST publish lands at 64 nodes
+        // (small volumes stream too); steady state publishes every
+        // 512 nodes, >= 350 ms apart (the og's ~1000-item incremental
+        // BuildTree cadence).
+        self.since_publish = self.since_publish.saturating_add(1);
+        let threshold = if self.ever_published { 512 } else { 64 };
+        if self.since_publish >= threshold && self.last_publish.elapsed().as_millis() >= 350 {
+            self.since_publish = 0;
+            self.ever_published = true;
+            self.last_publish = Instant::now();
+            obs.on_tree_update(tree);
+        }
+    }
+
+    /// The carve coverage plan (RE-Match spec §7): FREE-cluster ranges
+    /// for NTFS units with a valid $Bitmap, full extents for every
+    /// other structured unit, full extents for UNRECOGNIZED units
+    /// (raw/unknown partitions are lost space — everything in them
+    /// is carve territory), and the uncovered gaps between units —
+    /// merged, sorted, device-absolute.
+    fn carve_plan(&self, units: &[ScanUnit]) -> Vec<(u64, u64)> {
+        let cap = self.dev.capacity_bytes();
+        let mut covered: Vec<(u64, u64)> = Vec::new();
+        let mut plan: Vec<(u64, u64)> = Vec::new();
+        let mut any_structured = false;
+        for u in units {
+            if matches!(u.fs, FsKind::Raw | FsKind::Unknown) {
+                // Unrecognized unit: its whole extent carves (lost
+                // space — nothing structured owns it).
+                let end = (u.start_byte + u.sectors_bytes()).min(cap);
+                let start = u.start_byte.min(cap);
+                if end > start {
+                    plan.push((start, end - start));
+                }
+                continue;
+            }
+            any_structured = true;
+            covered.push((u.start_byte, u.sectors_bytes()));
+            let end = (u.start_byte + u.sectors_bytes()).min(cap);
+            // NTFS + a valid $Bitmap → free clusters only.
+            if matches!(u.fs, FsKind::Ntfs | FsKind::Ntfs5)
+                && let Ok(engine) = crate::fs::ntfs::NtfsEngine::new(Arc::clone(&u.dev))
+                && let Some(free) = engine.free_cluster_ranges()
+            {
+                for (off, len) in free {
+                    let abs = u.start_byte + off;
+                    if abs < cap {
+                        plan.push((abs, len.min(cap - abs)));
+                    }
+                }
+            } else if end > u.start_byte {
+                plan.push((u.start_byte, end - u.start_byte));
+            }
+        }
+        if !any_structured {
+            // Nothing structured anywhere: the whole device carves
+            // (the original raw-target behavior).
+            return vec![(0, cap)];
+        }
+        // The uncovered gaps: everything outside the STRUCTURED units'
+        // extents (unpartitioned space, the tail past the last
+        // partition — the raw units above already carry theirs).
+        covered.sort_unstable();
+        let mut cursor = 0u64;
+        for &(s, l) in &covered {
+            if s > cursor {
+                plan.push((cursor, (s - cursor).min(cap - cursor)));
+            }
+            cursor = cursor.max(s + l).min(cap);
+        }
+        if cursor < cap {
+            plan.push((cursor, cap - cursor));
+        }
+        // Normalize: drop empties, sort, merge overlaps/adjacency.
+        plan.retain(|&(s, l)| l > 0 && s < cap);
+        plan.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(plan.len());
+        for (s, l) in plan {
+            match merged.last_mut() {
+                Some((ms, ml)) if s <= *ms + *ml => {
+                    let end = (*ms + *ml).max(s + l);
+                    *ml = end - *ms;
+                }
+                _ => merged.push((s, l)),
+            }
+        }
+        merged
     }
 
     fn finish_stopped(
@@ -419,54 +636,65 @@ fn clamp_report_bytes(logical_total: u64, capacity: u64) -> u64 {
     logical_total.min(capacity)
 }
 
-/// The bridge: engine sink → tree ingest + live stats + progress.
-struct ControllerSink<'a, 'o> {
+/// Merger→worker message: one unit's entry or progress tick.
+/// Boxed entry — the channel's per-message footprint stays flat
+/// (FoundEntry carries its extents/strings; 300+ bytes on the stack
+/// per slot × capacity is the noise clippy flagged).
+enum UnitMsg {
+    Entry(usize, Box<FoundEntry>),
+    Progress { unit: usize, done: u64, total: u64 },
+}
+
+/// The per-worker engine sink: ships entries + progress over the
+/// bounded channel to the merger thread (the RE CKernelQueue shape).
+struct UnitChannelSink {
+    tx: crossbeam_channel::Sender<UnitMsg>,
+    unit: usize,
+}
+
+impl ScanSink for UnitChannelSink {
+    fn on_entry(&mut self, entry: FoundEntry) {
+        let _ = self.tx.send(UnitMsg::Entry(self.unit, Box::new(entry)));
+    }
+
+    fn on_progress(&mut self, done: u64, total: u64) {
+        let _ = self.tx.send(UnitMsg::Progress {
+            unit: self.unit,
+            done,
+            total,
+        });
+    }
+}
+
+/// Unit→merger channel capacity (the RE CKernelQueue size).
+const UNIT_CHANNEL_CAP: usize = 4096;
+
+/// The merger's poll cadence (drives the drain loop's cancellation
+/// latency and keeps the UI fed between engine ticks).
+const UNIT_POLL_MS: u64 = 100;
+
+/// The carve phase's sink: the 68–95 % band, carve-relative sector
+/// pairing, and the same tree/counter/publish semantics as the
+/// structured merger path (no partition prefixes — carved entries
+/// carry none).
+struct CarveSink<'a, 'o> {
     ctrl: &'a mut ScanController,
     tree: &'a mut TreeBuilder,
-    phase_percent_range: (f64, f64),
-    /// Per-unit tree folder (whole-disk scans nest each partition's
-    /// entries under its own branch; None = target root).
-    path_prefix: Option<&'a str>,
     obs_slot: &'o mut dyn ProgressObserver,
 }
 
-impl ScanSink for ControllerSink<'_, '_> {
-    fn on_entry(&mut self, mut entry: FoundEntry) {
-        // Session 8: partition prefixes NEVER corrupt `@mft:` refs —
-        // they ride the dedicated partition field (the old string
-        // munging turned refs into literal "Partition 1\\@mft:1234"
-        // paths, one garbage dir per record).
-        if let Some(prefix) = self.path_prefix {
-            match entry.parent_hint.as_deref() {
-                Some(h) if h.starts_with('@') => {
-                    entry.partition = Some(prefix.to_string());
-                }
-                Some(h) if !h.is_empty() => {
-                    entry.parent_hint = Some(format!("{prefix}/{h}"));
-                }
-                Some(_) => {
-                    // Volume-root entry on a partition unit.
-                    entry.parent_hint = Some(prefix.to_string());
-                }
-                None => {}
-            }
-        }
+impl ScanSink for CarveSink<'_, '_> {
+    fn on_entry(&mut self, entry: FoundEntry) {
         let is_file = !entry.is_dir;
         let size = entry.size;
         self.tree.add(entry);
         if is_file {
             self.ctrl.files += 1;
-            // Session 8: the LIVE counter is clamped continuously (the
-            // QA-17 rule applied during the scan, not only at the end —
-            // the owner watched it climb into TB mid-scan).
+            // The LIVE counter is clamped continuously (QA-17).
             self.ctrl.bytes = self.ctrl.bytes.saturating_add(size).min(self.ctrl.capacity);
         }
-        // Progressive results (session-9 tuning): the FIRST publish
-        // lands at 64 nodes (small volumes stream too — the tour
-        // VHD's 155 files never crossed the old 2048 floor, so the
-        // results page stayed empty the whole scan); steady state
-        // publishes every 512 nodes, >= 350 ms apart (the og's
-        // ~1000-item incremental BuildTree cadence).
+        // The progressive-publish throttle (same cadence as the
+        // structured path).
         self.ctrl.since_publish = self.ctrl.since_publish.saturating_add(1);
         let threshold = if self.ctrl.ever_published { 512 } else { 64 };
         if self.ctrl.since_publish >= threshold
@@ -482,22 +710,19 @@ impl ScanSink for ControllerSink<'_, '_> {
     fn on_progress(&mut self, done: u64, total: u64) {
         self.ctrl.engine_done = done;
         self.ctrl.engine_total = total;
-        let (lo, hi) = self.phase_percent_range;
+        // The carve-relative sector pair (spec §4.2's honest units —
+        // the "Reading sector: X/Y" line shows the SWEEP's numbers).
+        self.ctrl.sectors_read = done;
+        self.ctrl.sectors_total = total;
         let frac = if total == 0 {
-            0.0
+            1.0
         } else {
-            // u64→f64 precision loss is irrelevant for progress math
-            // (percent display), but be explicit.
             #[allow(clippy::cast_precision_loss)]
             {
                 (done as f64 / total as f64).clamp(0.0, 1.0)
             }
         };
-        let percent = lo + (hi - lo) * frac;
-        // Deep-phase sector accounting (carver units = bytes read).
-        if matches!(self.ctrl.phase, Phase::Deep) {
-            self.ctrl.sectors_read = done;
-        }
+        let percent = 0.68 + 0.27 * frac;
         self.ctrl.emit_obs(self.obs_slot, percent);
     }
 }
@@ -520,11 +745,13 @@ impl ScanController {
     /// get layout analysis.
     fn scan_units(&self) -> Vec<ScanUnit> {
         let mut units = Vec::new();
+        let ss = self.dev.sector_size();
         let direct = fs::probe_filesystem(&*self.dev).unwrap_or(FsKind::Raw);
         if !matches!(direct, FsKind::Raw | FsKind::Unknown) {
             units.push(ScanUnit {
                 dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
                 sectors: self.dev.total_sectors(),
+                start_byte: 0,
                 prefix: None,
                 fs: direct,
             });
@@ -546,6 +773,7 @@ impl ScanController {
                 units.push(ScanUnit {
                     dev: sub,
                     sectors: p.total_sectors,
+                    start_byte: p.start_lba * u64::from(ss),
                     prefix: Some(format!("Partition {}", p.index)),
                     fs,
                 });
@@ -561,6 +789,7 @@ impl ScanController {
             units.push(ScanUnit {
                 dev: Arc::clone(&self.dev) as Arc<dyn BlockDevice>,
                 sectors: self.dev.total_sectors(),
+                start_byte: 0,
                 prefix: None,
                 fs,
             });
@@ -593,6 +822,7 @@ impl ScanController {
             units.push(ScanUnit {
                 dev: sub,
                 sectors: hint.info.total_sectors,
+                start_byte: hint.info.start_lba * u64::from(ss),
                 prefix: Some(format!("Lost Partition {}", i + 1)),
                 fs,
             });
@@ -606,9 +836,21 @@ impl ScanController {
 struct ScanUnit {
     dev: Arc<dyn BlockDevice>,
     sectors: u64,
+    /// The unit's extent start in DEVICE-absolute bytes (0 for
+    /// whole-target units) — the carve plan's coordinate translation.
+    start_byte: u64,
     /// Tree folder prefix (whole-disk partition units).
     prefix: Option<String>,
     fs: FsKind,
+}
+
+impl ScanUnit {
+    /// The unit's extent length in bytes (device-absolute pairing
+    /// for [`ScanUnit::start_byte`]).
+    fn sectors_bytes(&self) -> u64 {
+        self.sectors
+            .saturating_mul(u64::from(self.dev.sector_size()))
+    }
 }
 
 /// Weight fraction 0..1 for progress math. u64-to-f64 precision loss
