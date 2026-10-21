@@ -751,5 +751,7 @@ export function installMock(): void {
       emitMockEvent(EV_LICENSE_CHANGED, { ...license });
     },
     state: () => ({ run, license, sessions }),
+    // Raw command probe — the same handle() the UI's invoke() uses.
+    query: (cmd: string, args?: Record<string, unknown>) => handle(cmd, args),
   };
 }

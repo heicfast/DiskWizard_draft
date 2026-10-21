@@ -73,10 +73,28 @@
 
 .dw-recon-head {
   margin-top: 6px;
+  cursor: pointer;
 }
 
 .dw-recon-partition:first-child .dw-recon-head {
   margin-top: 0;
+}
+
+.dw-recon-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dw-recon-chevron:hover {
+  color: var(--text);
+  background: var(--control-active);
 }
 
 .dw-recon-icon {

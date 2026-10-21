@@ -1,37 +1,28 @@
 /**
- * The left tree panel — two modes (Folders = the path tree with the
- * special carve branches; File Types = the category tree with counts,
- * the reference design's "Images 42.8K / Documents 18.6K" panel).
+ * The left tree panel — two modes:
+ *
+ *  - Folders        the path tree with the special carve branches
+ *                   (File Path Lost / Tags Extracted — the research's
+ *                   CLeftTreeView contract).
+ *  - Reconstruction the partition-wise view of everything recovered:
+ *                   one section per partition (existing volumes first,
+ *                   then lost partitions surfaced by the deep scan —
+ *                   the "Smart Partition Scanning" presentation), each
+ *                   expandable into its reconstructed folder structure
+ *                   and clickable to scope the file table.
  */
 import { useMemo, useState } from "react";
 import { ChevronDownIcon, ChevronRightIcon, FolderIcon } from "lucide-react";
 import { formatBytes, formatCount } from "../../lib/format";
 import { useResultsStore } from "../../state/results";
-import { CATEGORY_LABELS, CATEGORY_ORDER, type FileCategory, type FileNode } from "../../types";
-import { CategoryIcon, categoryTone } from "./categoryIcon";
-
-const LOST_BRANCH_LABELS = new Set(["File Path Lost", "Tags Extracted"]);
+import type { FileNode } from "../../types";
+import { ReconstructionTree } from "./ReconstructionTree";
 
 export function TreePanel() {
   const treeMode = useResultsStore((s) => s.treeMode);
   const setTreeMode = useResultsStore((s) => s.setTreeMode);
   const snapshot = useResultsStore((s) => s.snapshot);
-  const activeCategory = useResultsStore((s) => s.activeCategory);
-  const setCategory = useResultsStore((s) => s.setCategory);
   const search = useResultsStore((s) => s.search);
-
-  /* Types mode: category rows from snapshot counts. */
-  const typeRows = useMemo(() => {
-    if (!snapshot) return [];
-    const total = snapshot.categories.reduce((a, c) => a + c.count, 0);
-    return [
-      { key: "all" as const, label: "All Files", count: total, size: snapshot.categories.reduce((a, c) => a + c.size, 0) },
-      ...CATEGORY_ORDER.map((c) => {
-        const hit = snapshot.categories.find((x) => x.category === c);
-        return { key: c, label: CATEGORY_LABELS[c], count: hit?.count ?? 0, size: hit?.size ?? 0 };
-      }).filter((r) => r.count > 0),
-    ];
-  }, [snapshot]);
 
   return (
     <aside className="dw-tree-panel dw-scroll" aria-label="Results tree">
@@ -48,38 +39,24 @@ export function TreePanel() {
         <button
           type="button"
           role="tab"
-          aria-selected={treeMode === "types"}
-          className={treeMode === "types" ? "is-on" : ""}
-          onClick={() => setTreeMode("types")}
+          aria-selected={treeMode === "recon"}
+          className={treeMode === "recon" ? "is-on" : ""}
+          onClick={() => setTreeMode("recon")}
         >
-          File Types
+          Reconstruction
         </button>
       </div>
 
-      {treeMode === "types" ? (
-        <div className="dw-type-tree" role="list">
-          {typeRows.map((row) => (
-            <button
-              key={row.key}
-              type="button"
-              role="listitem"
-              className={`dw-type-row ${activeCategory === row.key ? "is-active" : ""}`}
-              onClick={() => setCategory(row.key)}
-            >
-              <span className={`dw-type-icon ${row.key === "all" ? "" : categoryTone(row.key)}`}>
-                <CategoryIcon category={row.key === "all" ? "other" : row.key} size={15} />
-              </span>
-              <span className="dw-truncate">{row.label}</span>
-              <span className="dw-type-count dw-num">{formatCount(row.count)}</span>
-            </button>
-          ))}
-        </div>
+      {treeMode === "recon" ? (
+        <ReconstructionTree
+          nodes={snapshot?.nodes ?? []}
+          partitions={snapshot?.partitions ?? []}
+        />
       ) : (
         <FolderTree
           snapshot={snapshot?.nodes ?? []}
           rootName={snapshot?.targetName ?? "Scan"}
           search={search}
-          activeCategory={activeCategory}
         />
       )}
     </aside>
@@ -90,12 +67,10 @@ export function TreePanel() {
 function FolderTree({
   snapshot,
   rootName,
-  activeCategory,
 }: {
   snapshot: FileNode[];
   rootName: string;
   search: string;
-  activeCategory: FileCategory | "all";
 }) {
   const openPreview = useResultsStore((s) => s.openPreview);
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
@@ -155,10 +130,12 @@ function FolderTree({
   }
   return (
     <div className="dw-folder-tree">
-      <div className="dw-tree-rootnote" data-cat={activeCategory}>
+      <div className="dw-tree-rootnote">
         {rootName} — folders are rebuilt as the scan digs; carved files land under the lost branches.
       </div>
       {renderNode(root, 0)}
     </div>
   );
 }
+
+const LOST_BRANCH_LABELS = new Set(["File Path Lost", "Tags Extracted"]);

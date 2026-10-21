@@ -323,3 +323,9 @@
   opacity: 0.75;
   font-weight: 400;
 }
+
+/* The partition-scope chip (active partition filter on the toolbar). */
+.dw-partition-scope {
+  cursor: pointer;
+  gap: 6px;
+}
