@@ -459,6 +459,21 @@ impl ScanController {
                 match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
                     Ok(UnitMsg::Entry(unit, boxed_entry)) => {
                         let mut entry = *boxed_entry;
+                        // The session-11 whole-disk fix: a sub-device
+                        // unit's engine reports VOLUME-relative
+                        // extents; the tree's first-extent merge map
+                        // and the recovery reader both need
+                        // DEVICE-absolute offsets (the carve already
+                        // emits absolute — one coordinate space for
+                        // everything). Holes keep their sentinel.
+                        let start_byte = units.get(unit).map_or(0, |u| u.start_byte);
+                        if start_byte > 0 {
+                            for ext in &mut entry.extents {
+                                if ext.offset != crate::types::HOLE_EXTENT_OFFSET {
+                                    ext.offset += start_byte;
+                                }
+                            }
+                        }
                         // Partition prefixes ride the dedicated field
                         // (never string-munged into `@mft:` refs — the
                         // session-8 rule); the unit tag routes the

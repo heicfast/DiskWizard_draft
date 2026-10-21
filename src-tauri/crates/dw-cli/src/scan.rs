@@ -424,13 +424,13 @@ pub fn cmd(args: &[String]) -> Result<ExitCode, String> {
         log.info(&format!("phase-time {name}={secs:.2}s"));
     }
     // MiB-per-second for the evidence logs (documented precision
-    // exception: throughput display, not accounting).
+    // exception: throughput display, not accounting). The wall uses
+    // the PRECISE Instant (the report's integer seconds round a
+    // sub-second parallel scan to 0 — the engine benchmark's gate
+    // divided by that zero and failed on a scan that took <1 s).
+    let wall_secs = started.elapsed().as_secs_f64().max(1e-3);
     #[allow(clippy::cast_precision_loss)]
-    let throughput_mbps = if report.duration_sec > 0 {
-        (capacity_for_perf / 1024 / 1024) as f64 / report.duration_sec as f64
-    } else {
-        0.0
-    };
+    let throughput_mbps = (capacity_for_perf / 1024 / 1024) as f64 / wall_secs;
     log.info(&format!(
         "perf: throughput={throughput_mbps:.1} MiB/s peak_ws={peak_ws} peak_private={peak_priv}"
     ));

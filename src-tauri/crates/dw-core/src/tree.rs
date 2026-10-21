@@ -39,6 +39,12 @@ use crate::types::{
 /// The NTFS root-directory MFT record (self-parented).
 const MFT_ROOT_RECORD: u64 = 5;
 
+/// The per-volume record-namespace key ("" for target-root volumes —
+/// the partition label for whole-disk units; the session-11 fix).
+fn partition_key(partition: Option<&str>) -> String {
+    partition.unwrap_or("").to_string()
+}
+
 /// One node in the results tree (the wire shape mirrors the UI's
 /// `FileNode` — dense `id` = arena index).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,8 +89,12 @@ pub struct TreeBuilder {
     /// Per-category live counters.
     counts: HashMap<Category, (u64, u64)>,
     root_name: String,
-    /// Session 8: MFT record → materialized dir node id (NTFS).
-    mft_dirs: HashMap<u64, u64>,
+    /// Session 8 + the session-11 whole-disk fix: MFT record → dir node
+    /// id, keyed by (partition label, record) — the record namespace
+    /// is PER-VOLUME, and a whole-disk scan walks several volumes'
+    /// MFTs concurrently (the L:/W: collision dropped one volume's
+    /// whole tree into the other's branch).
+    mft_dirs: HashMap<(String, u64), u64>,
     /// Session 8: partition label → dir node id (whole-disk scans).
     partitions: HashMap<String, u64>,
     /// Session 8: entries whose `@mft:` parent hasn't materialized
@@ -258,7 +268,9 @@ impl TreeBuilder {
         if e.name == "." {
             if let Some(rec) = e.record_id {
                 let base = self.ensure_partition(e.partition.as_deref());
-                self.mft_dirs.entry(rec).or_insert(base);
+                self.mft_dirs
+                    .entry((partition_key(e.partition.as_deref()), rec))
+                    .or_insert(base);
             }
             return;
         }
@@ -317,17 +329,22 @@ impl TreeBuilder {
             id
         };
         if let Some(rec) = e.record_id {
-            self.mft_dirs.entry(rec).or_insert(id);
+            self.mft_dirs
+                .entry((partition_key(e.partition.as_deref()), rec))
+                .or_insert(id);
         }
     }
 
     /// Resolve an `@mft:<record>` parent hint (session 8): the root
     /// record (5) maps to the partition base (the volume root),
     /// materialized records to their dirs, `None` when not (yet)
-    /// resolvable — the fixpoint retries those.
+    /// resolvable — the fixpoint retries those. The session-11 fix:
+    /// the lookup is (partition, record) — whole-disk scans walk
+    /// several volumes whose record namespaces would otherwise
+    /// collide.
     fn resolve_mft_dir(&mut self, partition: Option<&str>, hint: &str) -> Option<u64> {
         let rec = hint.strip_prefix("@mft:")?.parse::<u64>().ok()?;
-        if let Some(&id) = self.mft_dirs.get(&rec) {
+        if let Some(&id) = self.mft_dirs.get(&(partition_key(partition), rec)) {
             return Some(id);
         }
         // The root record self-references (parent 5 == record 5) and
@@ -415,7 +432,9 @@ impl TreeBuilder {
                     self.dirs.insert(key, id);
                     self.nodes[id as usize].timestamps = e.timestamps;
                     if let Some(rec) = e.record_id {
-                        self.mft_dirs.entry(rec).or_insert(id);
+                        self.mft_dirs
+                            .entry((partition_key(e.partition.as_deref()), rec))
+                            .or_insert(id);
                     }
                 }
             }

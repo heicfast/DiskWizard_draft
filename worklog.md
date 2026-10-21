@@ -1194,3 +1194,40 @@ all targets); 238 tests green (169 dw-core incl. the 2 new percent
 regressions). dw-win tests cross-compile clean; the hammer +
 identity tests run on the Windows runners (win_api_surface rides
 every push).
+
+### Session 11 (cont. 2) — the whole-disk collision class (the lab's catch)
+
+The Recovery Lab's first real run caught a DEEP cross-volume bug no
+volume-targeted test could see:
+
+* **The tree's merge maps were volume-blind**: `mft_dirs` keyed MFT
+  record numbers ALONE and `by_first_extent` keyed extent offsets in
+  VOLUME-relative space — a whole-disk scan walks several volumes'
+  MFTs concurrently (records 5/6/7 in L: AND in the deleted W:), so
+  one volume's tree swallowed the other's (the lab: Partition 1
+  empty, everything mislabeled under Lost Partition 1; the local
+  repro: W:'s file vanished entirely — resident extents at identical
+  volume-relative offsets absorbed it).
+* **And recovery read wrong bytes**: whole-disk scans re-open the
+  disk device, but nodes carried volume-relative extents.
+
+The fix (both sides of the seam):
+1. `mft_dirs: HashMap<(partition, record), id>` — the record
+   namespace is per-volume; the partition label keys it.
+2. The merger translates every structured entry's extents to
+   DEVICE-ABSOLUTE at drain time (`+ unit.start_byte`; holes keep
+   their sentinel) — one coordinate space for the tree's dedup (the
+   carve's absolute offsets now MERGE with structured correctly —
+   the whole-disk carved-duplicate absorption that never actually
+   worked), and recovery reads true bytes on whole-disk targets.
+3. The two-volume regression test (in-table + deleted NTFS on one
+   disk, both files asserted under their own branches) — runs in
+   every CI pass now.
+
+Also: the CLI's throughput used the integer-second duration — a
+sub-second parallel scan divided by zero (the benchmark's large
+profile finished in <1 s: 219 files, 0.0 MiB/s reported). Now the
+precise Instant. And the lab's recycle-class gate matches the
+$RXXXXXX renamed copies by size+ext (Windows renames on
+SendToRecycleBin — by-name recall is a gate-design error, not an
+engine miss).
