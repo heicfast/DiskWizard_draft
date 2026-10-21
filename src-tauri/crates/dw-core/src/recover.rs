@@ -294,6 +294,23 @@ impl ExtentStream<'_> {
                 self.pos_in_ext = 0;
                 continue;
             }
+            if ext.offset == crate::types::HOLE_EXTENT_OFFSET {
+                // A sparse hole (the M2-review #2 contract): zero-fill
+                // its span — the device is never read, the positional
+                // alignment of later extents is preserved.
+                let take = (buf.len() - filled)
+                    .min(self.remaining as usize)
+                    .min((ext.len - self.pos_in_ext) as usize);
+                buf[filled..filled + take].fill(0);
+                self.remaining -= take as u64;
+                self.pos_in_ext += take as u64;
+                filled += take;
+                if self.pos_in_ext >= ext.len {
+                    self.idx += 1;
+                    self.pos_in_ext = 0;
+                }
+                continue;
+            }
             let avail = ext.len - self.pos_in_ext;
             let want = (buf.len() - filled)
                 .min(self.remaining as usize)
@@ -463,5 +480,85 @@ mod tests {
         let mut dest = RamDest::new(1 << 30);
         let r = run_recovery(&ram, &queue, &mut dest, &ctrl, |_| {});
         assert!(matches!(r, Err(CoreError::Cancelled)));
+    }
+
+    /// M2 review #2: a sparse hole between real extents zero-fills —
+    /// the post-gap data lands at its TRUE file offset, never shifts.
+    #[test]
+    fn sparse_hole_zero_fills_and_keeps_alignment() {
+        use crate::types::HOLE_EXTENT_OFFSET;
+        struct RamDest(std::sync::Mutex<Vec<(String, Vec<u8>)>>);
+        impl DestWriter for RamDest {
+            fn mkdir(&mut self, _p: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn write_file(
+                &mut self,
+                path: &str,
+                read: &mut dyn FnMut(&mut [u8]) -> usize,
+            ) -> Result<(), String> {
+                let mut all = Vec::new();
+                let mut buf = [0u8; 512];
+                loop {
+                    let n = read(&mut buf);
+                    if n == 0 {
+                        break;
+                    }
+                    all.extend_from_slice(&buf[..n]);
+                }
+                self.0.lock().unwrap().push((path.to_string(), all));
+                Ok(())
+            }
+            fn free_bytes(&self) -> Result<u64, String> {
+                Ok(u64::MAX)
+            }
+        }
+        let mut ram = crate::testutil::RamDevice::new(64 * 1024, 512);
+        // LBA 2 (offset 1024): "AA" x 1024. LBA 6 (offset 3072): "BB" x 1024.
+        for i in 0..1024 {
+            ram.data[1024 + i] = b'A';
+            ram.data[3072 + i] = b'B';
+        }
+        let node = TreeNode {
+            id: 1,
+            parent_id: Some(0),
+            name: "sparse.dat".into(),
+            path: r"R\sparse.dat".into(),
+            is_dir: false,
+            category: crate::types::Category::Other,
+            size: 1024 + 2048 + 1024,
+            modified: 0,
+            origin: crate::types::NodeOrigin::Existing,
+            recoverability: crate::types::Recoverability::Good,
+            timestamps: crate::types::Timestamps::default(),
+            attrs: crate::types::FileAttrs(0),
+            extents: vec![
+                Extent::new(1024, 1024),
+                Extent::new(HOLE_EXTENT_OFFSET, 2048),
+                Extent::new(3072, 1024),
+            ],
+            confidence: 100,
+            dimensions: None,
+            source: crate::types::FsKind::Ntfs,
+        };
+        let dev: std::sync::Arc<dyn BlockDevice> = std::sync::Arc::new(ram);
+        let dest = RamDest(std::sync::Mutex::new(Vec::new()));
+        let mut dest = dest;
+        let queue = vec![RecoveryItem {
+            node: node.clone(),
+            dest_path: "sparse.dat".into(),
+        }];
+        let ctrl = crate::fs::ScanControl::new();
+        let report = run_recovery(&*dev, &queue, &mut dest, &ctrl, |_| {}).expect("recovery");
+        assert_eq!(report.done_files, 1);
+        let files = dest.0.lock().unwrap();
+        let (_, data) = &files[0];
+        assert_eq!(data.len(), 4096);
+        // Bytes 0..1024 = 'A' (the first run).
+        assert!(data[..1024].iter().all(|&b| b == b'A'));
+        // Bytes 1024..3072 = ZEROS (the hole).
+        assert!(data[1024..3072].iter().all(|&b| b == 0));
+        // Bytes 3072..4096 = 'B' — at its TRUE offset, not shifted.
+        assert!(data[3072..].iter().all(|&b| b == b'B'));
     }
 }

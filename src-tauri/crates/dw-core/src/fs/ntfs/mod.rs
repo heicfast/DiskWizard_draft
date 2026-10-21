@@ -441,20 +441,38 @@ pub fn decode_runlist(
             // is degenerate — treat as sparse continuation).
         }
         if off_size == 0 {
-            // Sparse: emit no extent (reads as zeros).
+            // Sparse (the M2-review #2 fix): emit a HOLE extent — the
+            // gap keeps the positional alignment of every later run
+            // (content reads as zeros; recovery never shifts data
+            // left across a gap).
+            if len_clusters > 0
+                && let Some(len) = len_clusters.checked_mul(cluster_size)
+            {
+                out.push(Extent::new(crate::types::HOLE_EXTENT_OFFSET, len));
+            }
             continue;
         }
         if lcn < 0 || len_clusters == 0 || len_clusters > max_clusters {
-            continue; // implausible — skip this run, keep walking
+            // Implausible mid-list run: SKIPPING would silently shift
+            // every later extent's file offset (the corruption class
+            // the M2 review named) — fail the whole runlist instead;
+            // the entry degrades honestly (no extents → zero-fill).
+            return Err(CoreError::Corrupt {
+                structure: "runlist",
+                detail: format!("implausible run lcn={lcn} len={len_clusters}"),
+            });
         }
         // Scale to bytes with overflow discipline (the same fuzz catch
-        // as the boot math): a run whose byte scale overflows is
-        // implausible — skip it, keep walking.
+        // as the boot math): an overflowing scale is likewise
+        // implausible — the whole runlist fails rather than shifting.
         let (Some(offset), Some(len)) = (
             (lcn as u64).checked_mul(cluster_size),
             len_clusters.checked_mul(cluster_size),
         ) else {
-            continue;
+            return Err(CoreError::Corrupt {
+                structure: "runlist",
+                detail: "byte scale overflow".into(),
+            });
         };
         out.push(Extent::new(offset, len));
     }
@@ -779,6 +797,9 @@ impl NtfsEngine {
                         let mut reused = 0u64;
                         let mut unverifiable = false;
                         'runs: for e in &stream.extents {
+                            if e.offset == crate::types::HOLE_EXTENT_OFFSET {
+                                continue; // sparse hole — no clusters on disk
+                            }
                             let first = e.offset / cs;
                             let count = e.len / cs;
                             for c in first..first + count {
@@ -1247,11 +1268,50 @@ mod tests {
     }
 
     #[test]
-    fn runlist_sparse_run_emits_no_extent() {
-        // Header 0x01: len_size 1, off_size 0 → sparse len 5.
+    fn runlist_sparse_run_emits_hole_extent() {
+        // Header 0x01: len_size 1, off_size 0 → sparse len 5 clusters.
+        // The M2-review #2 fix: the hole EMITS (as the sentinel
+        // extent) so later runs keep their file offsets.
         let rl = [0x01, 0x05, 0x00];
         let ext = decode_runlist(&rl, 512, 4096).expect("decode");
-        assert_eq!(ext.len(), 0);
+        assert_eq!(ext.len(), 1);
+        assert_eq!(ext[0].offset, crate::types::HOLE_EXTENT_OFFSET);
+        assert_eq!(ext[0].len, 5 * 512);
+    }
+
+    #[test]
+    fn runlist_hole_keeps_later_runs_aligned() {
+        // real(2 clusters @ LCN 10) + sparse(3) + real(2 @ +4):
+        // the third run's data must sit AFTER the hole's span in the
+        // FILE — extents: [real 1024B, hole 1536B, real 1024B].
+        let rl = [
+            0x11, 0x02, 10, // run: len 2, LCN 10
+            0x01, 0x03, // sparse: len 3
+            0x11, 0x02, 4, // run: len 2, delta +4 → LCN 14
+            0x00,
+        ];
+        let ext = decode_runlist(&rl, 512, 4096).expect("decode");
+        assert_eq!(ext.len(), 3);
+        assert_eq!(ext[0], Extent::new(10 * 512, 1024));
+        assert_eq!(ext[1].offset, crate::types::HOLE_EXTENT_OFFSET);
+        assert_eq!(ext[1].len, 3 * 512);
+        assert_eq!(ext[2], Extent::new(14 * 512, 1024));
+    }
+
+    #[test]
+    fn runlist_implausible_mid_run_fails_whole() {
+        // The M2-review #2 directive: a mid-list implausible run must
+        // FAIL the runlist (no silent skip — skipping shifts every
+        // later extent's file offset).
+        let rl = [
+            0x11, 0x02, 10, // valid run
+            0x21, 0x01, 0xFF,
+            0xFF, // len 1, delta -1 → LCN 9? No: 0xFFFF as i16 = -1 → LCN 9. Use a >max len instead:
+        ];
+        let _ = rl; // (the real implausible case below)
+        // len_clusters 0x0100 > max_clusters 4 → implausible.
+        let rl2 = [0x12, 0x00, 0x01, 0x11, 0x02, 10, 0x00];
+        assert!(decode_runlist(&rl2, 512, 4).is_err());
     }
 
     #[test]

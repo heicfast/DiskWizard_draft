@@ -101,10 +101,23 @@ impl Category {
     }
 }
 
+/// The sparse-hole sentinel device offset (the M2-review #2
+/// contract): extents at this offset zero-fill, never device-read.
+pub const HOLE_EXTENT_OFFSET: u64 = u64::MAX;
+
 /// A contiguous data run on the source volume, in bytes relative to
 /// the volume start (the datarun model; `artifacts/SaveScan/
 /// ifileproperties-part1--ntfs-fat-exfat.md` — DataRunList persistence
 /// proves the extent-vector contract).
+///
+/// ## Holes (the M2-review #2 contract)
+///
+/// An extent with [`HOLE_EXTENT_OFFSET`] as its device offset is a
+/// SPARSE HOLE: it contributes its `len` to the FILE's layout (the
+/// positional alignment of subsequent extents) but reads as ZEROS —
+/// never from the device. Sparse/compressed NTFS files carry these;
+/// recovery zero-fills them instead of letting post-gap data shift
+/// left (the silent-corruption class the review named).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Extent {
     /// Byte offset relative to the volume/device start.

@@ -594,12 +594,15 @@ impl TreeBuilder {
             }
             // The resident-marker (zero-length extent at the record
             // offset) is metadata the MFT walk already read — skip.
-            let Some(first) = node.extents.first() else {
+            // Sparse holes (the M2-#2 sentinel) read as zeros by
+            // definition — probe the first REAL extent instead.
+            let Some(first) = node
+                .extents
+                .iter()
+                .find(|e| e.len > 0 && e.offset != crate::types::HOLE_EXTENT_OFFSET)
+            else {
                 continue;
             };
-            if first.len == 0 {
-                continue;
-            }
             // One sector through the cache layer: chunk-resident for
             // neighbors, a single positioned read on the miss path.
             let mut buf = vec![0u8; ss as usize];
