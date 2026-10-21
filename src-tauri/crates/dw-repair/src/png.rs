@@ -250,7 +250,11 @@ impl RepairEngine for PngEngine {
         }
 
         RepairOutcome {
-            repaired: has_ihdr || has_idat,
+            // The honesty contract (the fuzz corpus's catch): repaired
+            // means OUTPUT EXISTS — the IHDR-only BeyondRepair arm
+            // (an IHDR pattern survived, no IDAT payload anywhere)
+            // writes nothing and must report unrepaired.
+            repaired: !out.is_empty(),
             input_bytes: buf.len() as u64,
             output_bytes: out.len() as u64,
             partial,
@@ -638,5 +642,27 @@ mod tests {
         assert!(o.repaired);
         let r = e.analyze(&out);
         assert!(r.healthy, "resync produced a clean chain: {}", r.detail);
+    }
+
+    /// The fuzz corpus's catch (run 39544976251, crash-60498661): an
+    /// IHDR pattern with NO IDAT payload anywhere — the old
+    /// `repaired: has_ihdr || has_idat` reported a repair while the
+    /// BeyondRepair arm wrote NOTHING. The honesty contract: repaired
+    /// means output exists.
+    #[test]
+    fn ihdr_without_idat_is_unrepaired_not_empty_output_lie() {
+        let body: &[u8] = &[
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x48, 0x44, 0x52, 0x5a, 0xf0, 0x5d, 0x04,
+            0xf5, 0xff, 0x0a, 0x44, 0xff, 0xff, 0xff, 0x33,
+        ];
+        let e = super::PngEngine;
+        let mut out = Vec::new();
+        let o = e.repair_into(body, &mut out);
+        assert_eq!(o.repaired, !out.is_empty(), "the honesty invariant");
+        if o.repaired {
+            assert!(!out.is_empty());
+        } else {
+            assert!(out.is_empty(), "BeyondRepair writes nothing");
+        }
     }
 }

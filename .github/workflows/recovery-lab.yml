@@ -124,11 +124,12 @@ jobs:
           }
           function New-Jpeg([int]$len, [System.Random]$r) {
             # JFIF header + SOF0 with dims + pad + EOI — a REAL
-            # carveable JPEG (the grammar walks SOF for dimensions).
+            # carveable JPEG, EXACTLY $len bytes (the manifest's size
+            # must match what the engine sees).
             $ms = [System.IO.MemoryStream]::new()
-            $ms.Write([byte[]](0xFF,0xD8,0xFF,0xE0,0,0x10,0x4A,0x46,0x49,0x46,0,1,1,0,0,1,0,1,0,0),0,19)
+            $ms.Write([byte[]](0xFF,0xD8,0xFF,0xE0,0,0x10,0x4A,0x46,0x49,0x46,0,1,1,0,0,1,0,1,0,0),0,20)
             $ms.Write([byte[]](0xFF,0xC0,0,0x11,8,0x02,0x80,0x01,0xE0,3,0x01,0x11,0,2,0x11,0x01,0x03,0x11,0x01),0,19)
-            $pad = $len - 64
+            $pad = [Math]::Max(0, $len - 41) # 20 header + 19 SOF + 2 EOI
             if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $ms.Write([byte[]](0xFF,0xD9),0,2)
             return ,$ms.ToArray()
@@ -136,15 +137,16 @@ jobs:
           function New-Png([int]$len, [System.Random]$r) {
             $ms = [System.IO.MemoryStream]::new()
             $ms.Write([byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A),0,8)
-            $ms.Write((New-Bytes ($len - 20) $r),0,($len - 20))
+            $pad = [Math]::Max(0, $len - 16) # 8 sig + 8 IEND
+            if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $ms.Write([byte[]](0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82),0,8)
             return ,$ms.ToArray()
           }
           function New-Zip([int]$len, [System.Random]$r) {
-            # PK\x03\x04 local header + pad + EOCD with size fields.
+            # PK local header + pad + EOCD — EXACTLY $len bytes.
             $ms = [System.IO.MemoryStream]::new()
             $ms.Write([byte[]](0x50,0x4B,0x03,0x04,20,0,0,0,0,0,0,0,0,0),0,14)
-            $pad = $len - 60
+            $pad = [Math]::Max(0, $len - 34) # 14 LFH + 20 EOCD
             if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $ms.Write([byte[]](0x50,0x4B,0x05,0x06,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0),0,20)
             return ,$ms.ToArray()
@@ -152,7 +154,7 @@ jobs:
           function New-Pdf([int]$len, [System.Random]$r) {
             $ms = [System.IO.MemoryStream]::new()
             $ms.Write([System.Text.Encoding]::ASCII.GetBytes("%PDF-1.7`n"),0,9)
-            $pad = $len - 25
+            $pad = [Math]::Max(0, $len - 14) # 9 head + 5 tail
             if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $ms.Write([System.Text.Encoding]::ASCII.GetBytes("`n%%EOF"),0,5)
             return ,$ms.ToArray()
@@ -160,18 +162,18 @@ jobs:
           function New-Mp3([int]$len, [System.Random]$r) {
             $ms = [System.IO.MemoryStream]::new()
             $ms.Write([byte[]](0x49,0x44,0x33,0x03,0,0,0,0,0,0),0,10)
-            $pad = $len - 10
+            $pad = [Math]::Max(0, $len - 10)
             if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             return ,$ms.ToArray()
           }
           function New-Mp4([int]$len, [System.Random]$r) {
-            # ftyp + free (padded) + moov stub.
+            # ftyp + free (padded) + moov stub — EXACTLY $len bytes.
             $ms = [System.IO.MemoryStream]::new()
             $ftyp = [byte[]](0,0,0,0x18,0x66,0x74,0x79,0x70,0x69,0x73,0x6F,0x6D,0,0,0,0,0x69,0x73,0x6F,0x6D,0x6D,0x70,0x34,0x31)
             $ms.Write($ftyp,0,$ftyp.Length)
-            $pad = $len - $ftyp.Length - 16
-            if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $moov = [byte[]](0,0,0,0x10,0x6D,0x6F,0x6F,0x76,0,0,0,0x08,0x6D,0x76,0x68,0x64)
+            $pad = [Math]::Max(0, $len - $ftyp.Length - $moov.Length)
+            if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             $ms.Write($moov,0,$moov.Length)
             return ,$ms.ToArray()
           }
@@ -180,8 +182,8 @@ jobs:
             $total = [uint32]$len
             $ms.Write([byte[]](0x42,0x4D),0,2)
             $ms.Write([System.BitConverter]::GetBytes($total),0,4)
-            $ms.Write([byte[]](0,0,0,0,54,0,0,0,40,0,0,0,16,0,0,0,16,0,0,0,1,0,24,0),0,26)
-            $pad = $len - 60
+            $ms.Write([byte[]](0,0,0,0,54,0,0,0,40,0,0,0,16,0,0,0,16,0,0,0,1,0,24,0),0,24)
+            $pad = [Math]::Max(0, $len - 30) # 2+4+24 header
             if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             return ,$ms.ToArray()
           }
@@ -193,7 +195,8 @@ jobs:
             $ms.Write([byte[]](16,0,0,0,1,0,1,0,0x40,0x1F,0,0,0,0,0x7D,0,0,2,0,16,0),0,20)
             $ms.Write([System.Text.Encoding]::ASCII.GetBytes("data"),0,4)
             $ms.Write([System.BitConverter]::GetBytes([uint32]($len - 44)),0,4)
-            $ms.Write((New-Bytes ($len - 44) $r),0,($len - 44))
+            $pad = [Math]::Max(0, $len - 44)
+            if ($pad -gt 0) { $ms.Write((New-Bytes $pad $r),0,$pad) }
             return ,$ms.ToArray()
           }
           function New-Text([int]$len, [System.Random]$r) {
@@ -352,6 +355,7 @@ jobs:
       # ── Our scan (the production engine, release build) ────────
       - name: Scan (dw-cli, whole disk — covers the lost partition)
         shell: pwsh
+        working-directory: src-tauri
         run: |
           $lab = "$env:RUNNER_TEMP\lab"
           $diskNo = (Get-Content "$lab\disk.txt" | Select-String "DISK_NUMBER=(\d+)").Matches[0].Groups[1].Value
@@ -444,6 +448,7 @@ jobs:
       # ── Recovery byte-truth (a sample, recovered + SHA-verified) ─
       - name: Recover a sample + byte-compare (the product promise)
         shell: pwsh
+        working-directory: src-tauri
         run: |
           $ErrorActionPreference = "Stop"
           $lab = "$env:RUNNER_TEMP\lab"

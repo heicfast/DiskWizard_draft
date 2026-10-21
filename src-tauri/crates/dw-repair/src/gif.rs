@@ -113,7 +113,10 @@ impl RepairEngine for GifEngine {
             notes.push("corrupt blocks dropped, extents re-chained".to_string());
         }
         RepairOutcome {
-            repaired: blocks.iter().any(|b| b.is_image) || !blocks.is_empty(),
+            // The honesty contract (the fuzz corpus's class): repaired
+            // means OUTPUT EXISTS — a blocks list of zero-extent
+            // records writes nothing and must report unrepaired.
+            repaired: !out.is_empty(),
             input_bytes: buf.len() as u64,
             output_bytes: out.len() as u64,
             partial: !had_trailer,

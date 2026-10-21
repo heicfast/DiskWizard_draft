@@ -89,6 +89,7 @@ jobs:
       # ── RUN 1: our engine (exact numbers) ──────────────────────
       - name: "Run 1 — ours: dw-cli scan (whole OS disk)"
         shell: pwsh
+        working-directory: src-tauri
         run: |
           $evidence = "$env:RUNNER_TEMP\compare"
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
