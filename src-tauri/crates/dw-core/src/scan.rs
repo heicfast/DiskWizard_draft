@@ -459,21 +459,6 @@ impl ScanController {
                 match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
                     Ok(UnitMsg::Entry(unit, boxed_entry)) => {
                         let mut entry = *boxed_entry;
-                        // The session-11 whole-disk fix: a sub-device
-                        // unit's engine reports VOLUME-relative
-                        // extents; the tree's first-extent merge map
-                        // and the recovery reader both need
-                        // DEVICE-absolute offsets (the carve already
-                        // emits absolute — one coordinate space for
-                        // everything). Holes keep their sentinel.
-                        let start_byte = units.get(unit).map_or(0, |u| u.start_byte);
-                        if start_byte > 0 {
-                            for ext in &mut entry.extents {
-                                if ext.offset != crate::types::HOLE_EXTENT_OFFSET {
-                                    ext.offset += start_byte;
-                                }
-                            }
-                        }
                         // Partition prefixes ride the dedicated field
                         // (never string-munged into `@mft:` refs — the
                         // session-8 rule); the unit tag routes the
@@ -487,12 +472,16 @@ impl ScanController {
                             // carver emits absolute), the readability
                             // probes and the recovery stream — reads
                             // through the WHOLE-TARGET device. Translate
-                            // once, here, at the unit boundary: two
+                            // ONCE, here, at the unit boundary: two
                             // partitions' relative offsets must never
                             // collide in the merge maps (the lab run's
                             // cross-partition absorption), and carved
                             // duplicates of structured files must
-                            // actually match.
+                            // actually match. (The lab's byte-truth 0/20:
+                            // the session-11 translation block below sat
+                            // alongside this one — every extent got the
+                            // base added TWICE. One translation, one
+                            // place.)
                             let base = u.start_byte;
                             if base != 0 {
                                 for ext in &mut entry.extents {
