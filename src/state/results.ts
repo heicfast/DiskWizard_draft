@@ -16,8 +16,7 @@ import type {
 } from "../types";
 import { EV_RECOVER_DONE, EV_RECOVER_PROGRESS } from "../types";
 
-/** Original folders or the recovery engine's reconstructed structure. */
-export type TreeMode = "folders" | "reconstruction";
+export type TreeMode = "folders" | "types";
 
 export interface FilterCondition {
   /** Selected categories (empty = all). */

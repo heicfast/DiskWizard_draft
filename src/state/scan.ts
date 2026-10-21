@@ -161,18 +161,3 @@ export function scanActive(p: ScanProgress | null): boolean {
   if (!p) return false;
   return p.phase !== "done" && p.phase !== "stopped" && p.phase !== "error" && p.phase !== "idle";
 }
-
-/** Human-readable phase copy shared by every live-status surface. */
-export function scanPhaseLabel(phase: ScanProgress["phase"]): string {
-  switch (phase) {
-    case "preparing": return "Preparing scan";
-    case "quick": return "Quick scan";
-    case "deep": return "Deep scan";
-    case "organizing": return "Organizing recovered files";
-    case "paused": return "Scan paused";
-    case "done": return "Scan complete";
-    case "stopped": return "Scan stopped";
-    case "error": return "Scan needs attention";
-    case "idle": return "Ready to scan";
-  }
-}

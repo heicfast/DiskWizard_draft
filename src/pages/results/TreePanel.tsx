@@ -1,9 +1,7 @@
 /**
  * The left tree panel — two modes (Folders = the path tree with the
- * special carve branches; File reconstruction = the partition-aware
- * recovery structure. It replaces the generic "File Types" tab because a
- * recovery tool needs to explain where a result came from, not just its
- * extension.
+ * special carve branches; File Types = the category tree with counts,
+ * the reference design's "Images 42.8K / Documents 18.6K" panel).
  */
 import { useMemo, useState } from "react";
 import { ChevronDownIcon, ChevronRightIcon, FolderIcon } from "lucide-react";
@@ -12,7 +10,7 @@ import { useResultsStore } from "../../state/results";
 import { CATEGORY_LABELS, CATEGORY_ORDER, type FileCategory, type FileNode } from "../../types";
 import { CategoryIcon, categoryTone } from "./categoryIcon";
 
-const LOST_BRANCH_LABELS = new Set(["File Path Lost", "Tags Extracted", "Reconstructed"]);
+const LOST_BRANCH_LABELS = new Set(["File Path Lost", "Tags Extracted"]);
 
 export function TreePanel() {
   const treeMode = useResultsStore((s) => s.treeMode);
@@ -22,27 +20,17 @@ export function TreePanel() {
   const setCategory = useResultsStore((s) => s.setCategory);
   const search = useResultsStore((s) => s.search);
 
-  /* Reconstruction lens: category rollups stay under the scanned partition,
-   * while special branches expose files whose original structure could not
-   * be preserved. This follows the research corpus' volume / File Path Lost
-   * / Reconstructed model without inventing partitions the core has not
-   * reported. */
-  const reconstruction = useMemo(() => {
-    if (!snapshot) return { categories: [], pathLost: 0, reconstructed: 0 };
+  /* Types mode: category rows from snapshot counts. */
+  const typeRows = useMemo(() => {
+    if (!snapshot) return [];
     const total = snapshot.categories.reduce((a, c) => a + c.count, 0);
-    const categories = [
-      { key: "all" as const, label: "All recovered files", count: total, size: snapshot.categories.reduce((a, c) => a + c.size, 0) },
+    return [
+      { key: "all" as const, label: "All Files", count: total, size: snapshot.categories.reduce((a, c) => a + c.size, 0) },
       ...CATEGORY_ORDER.map((c) => {
         const hit = snapshot.categories.find((x) => x.category === c);
         return { key: c, label: CATEGORY_LABELS[c], count: hit?.count ?? 0, size: hit?.size ?? 0 };
       }).filter((r) => r.count > 0),
     ];
-    const allFiles = snapshot.nodes.filter((node) => !node.isDir);
-    const pathLost = allFiles.filter((node) => node.origin === "lost-path").length;
-    // The core identifies a name-rebuilt RAW result as `lost-name`; do not
-    // mislabel metadata-tag results as reconstructed content.
-    const reconstructed = allFiles.filter((node) => node.origin === "lost-name").length;
-    return { categories, pathLost, reconstructed };
   }, [snapshot]);
 
   return (
@@ -60,22 +48,17 @@ export function TreePanel() {
         <button
           type="button"
           role="tab"
-          aria-selected={treeMode === "reconstruction"}
-          className={treeMode === "reconstruction" ? "is-on" : ""}
-          onClick={() => setTreeMode("reconstruction")}
+          aria-selected={treeMode === "types"}
+          className={treeMode === "types" ? "is-on" : ""}
+          onClick={() => setTreeMode("types")}
         >
-          File reconstruction
+          File Types
         </button>
       </div>
 
-      {treeMode === "reconstruction" ? (
-        <div className="dw-reconstruction-tree" role="list">
-          <div className="dw-reconstruction-note">
-            <strong>{snapshot?.targetName ?? "Selected partition"}</strong>
-            <span>Recovered structure</span>
-          </div>
-          <div className="dw-type-tree" role="list" aria-label="Recovered file categories">
-          {reconstruction.categories.map((row) => (
+      {treeMode === "types" ? (
+        <div className="dw-type-tree" role="list">
+          {typeRows.map((row) => (
             <button
               key={row.key}
               type="button"
@@ -90,14 +73,6 @@ export function TreePanel() {
               <span className="dw-type-count dw-num">{formatCount(row.count)}</span>
             </button>
           ))}
-          </div>
-          <div className="dw-reconstruction-branches" aria-label="Reconstruction branches">
-            <ReconstructionBranch label="File Path Lost" count={reconstruction.pathLost} tone="lost" />
-            <ReconstructionBranch label="Reconstructed" count={reconstruction.reconstructed} tone="reconstructed" />
-          </div>
-          <p className="dw-tree-rootnote">
-            Lost partitions appear here only when the scan engine identifies and validates them.
-          </p>
         </div>
       ) : (
         <FolderTree
@@ -108,24 +83,6 @@ export function TreePanel() {
         />
       )}
     </aside>
-  );
-}
-
-function ReconstructionBranch({
-  label,
-  count,
-  tone,
-}: {
-  label: string;
-  count: number;
-  tone: "lost" | "reconstructed";
-}) {
-  return (
-    <div className={`dw-reconstruction-branch is-${tone}`} role="listitem">
-      <span className="dw-reconstruction-branch-icon"><FolderIcon size={14} strokeWidth={1.8} /></span>
-      <span className="dw-truncate">{label}</span>
-      <span className="dw-type-count dw-num">{formatCount(count)}</span>
-    </div>
   );
 }
 

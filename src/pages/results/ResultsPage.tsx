@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { FilterIcon, SearchIcon, XIcon, ChevronRightIcon } from "lucide-react";
 import { formatBytes, formatCountFull, formatDuration } from "../../lib/format";
-import { scanActive, scanPhaseLabel, useScanStore } from "../../state/scan";
+import { scanActive, useScanStore } from "../../state/scan";
 import { filterIsActive, useResultsStore, isVisible } from "../../state/results";
 import { useViewStore } from "../../state/view";
 import { CATEGORY_LABELS, CATEGORY_ORDER, type FileCategory, type FileNode } from "../../types";
@@ -145,7 +145,7 @@ export function ResultsPage() {
             <p className="dw-page-sub dw-num">
               {scanning && progress ? (
                 <>
-                  {scanPhaseLabel(progress.phase)} {Math.round(progress.percent)}% · {formatCountFull(progress.stats.filesFound)} files found ({formatBytes(progress.stats.bytesFound)})
+                  Deep scanning {Math.round(progress.percent)}% · {formatCountFull(progress.stats.filesFound)} files found ({formatBytes(progress.stats.bytesFound)})
                 </>
               ) : doneInfo ? (
                 <>
@@ -187,7 +187,7 @@ export function ResultsPage() {
                   {progress.searchingLabel}
                 </span>
                 <span className="dw-scan-strip-meta dw-num">
-                  {formatBytes(progress.stats.bytesFound)} found · {progress.remainingSec > 0 ? `${Math.ceil(progress.remainingSec)}s remaining` : "Estimating time remaining…"}
+                  {formatBytes(progress.stats.bytesFound)} found · {Math.max(1, Math.round(progress.remainingSec))}s remaining
                 </span>
               </div>
             </motion.div>
@@ -271,7 +271,7 @@ export function ResultsPage() {
       <footer className="dw-results-foot">
         <div className="dw-results-foot-status dw-num">
           {scanning && progress ? (
-            <>{scanPhaseLabel(progress.phase)} — {formatCountFull(progress.stats.filesFound)} files found ({formatBytes(progress.stats.bytesFound)})</>
+            <>Deep scanning — {formatCountFull(progress.stats.filesFound)} files found ({formatBytes(progress.stats.bytesFound)})</>
           ) : doneInfo ? (
             <>Scan Completed · Files Found: {formatCountFull(doneInfo.stats.filesFound)} ({formatBytes(doneInfo.stats.bytesFound)})</>
           ) : (

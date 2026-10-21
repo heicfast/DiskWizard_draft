@@ -192,7 +192,7 @@ async function runTour(hooks: DevHooks): Promise<void> {
     { name: "results-images", apply: () => useResultsStore.getState().setCategory("images") },
     { name: "results-videos", apply: () => useResultsStore.getState().setCategory("videos") },
     { name: "results-documents", apply: () => useResultsStore.getState().setCategory("documents") },
-    { name: "results-tree-reconstruction", apply: () => useResultsStore.getState().setTreeMode("reconstruction") },
+    { name: "results-tree-types", apply: () => useResultsStore.getState().setTreeMode("types") },
     { name: "results-tree-folders", apply: () => useResultsStore.getState().setTreeMode("folders") },
     { name: "results-search", apply: () => useResultsStore.getState().setSearch("photo") },
     { name: "results-search-clear", apply: () => useResultsStore.getState().setSearch("") },

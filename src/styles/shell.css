@@ -89,18 +89,6 @@
   color: var(--text-secondary);
 }
 
-.dw-page-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  flex: 1;
-  min-height: 180px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 580;
-}
-
 .dw-page-head-actions {
   display: flex;
   gap: var(--space-2);

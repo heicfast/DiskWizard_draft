@@ -8,9 +8,7 @@
 
 .dw-drive-grid {
   display: grid;
-  /* Keep the source inventory compact and comparable. The old 320px
-   * auto-fill floor collapsed an ordinary desktop into two oversized cards. */
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: var(--space-3);
 }
 
@@ -245,10 +243,7 @@
   gap: var(--space-3);
 }
 
-@media (max-width: 1179px) {
-  .dw-drive-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+@media (max-width: 1420px) {
   .dw-quick-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
