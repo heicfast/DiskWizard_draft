@@ -1,0 +1,141 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * App frame — the root layout, page scaffolding, sections
+ * (shell/app.css).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.dw-app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* Ambient wash behind everything (theme-reactive; strongest in Blossom). */
+.dw-app::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--ambient-grad);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dw-app > * {
+  position: relative;
+  z-index: 1;
+}
+
+.dw-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.dw-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Page scaffolding ─────────────────────────────────────────────────── */
+
+.dw-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px var(--content-pad) 32px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.dw-page-swap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: dw-settle-in var(--dur-base) var(--ease-out);
+}
+
+.dw-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+}
+
+.dw-page-title {
+  margin: 6px 0 8px;
+  font-size: 30px;
+  line-height: 1.14;
+  font-weight: 750;
+  letter-spacing: -0.022em;
+  color: var(--text);
+}
+
+.dw-page-sub {
+  margin: 0;
+  max-width: 560px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.dw-page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding-top: 6px;
+}
+
+/* Sections */
+.dw-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.dw-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.dw-section-title {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dw-section-sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 450;
+}
+
+/* Generic helpers */
+.dw-text-cap {
+  text-transform: capitalize;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

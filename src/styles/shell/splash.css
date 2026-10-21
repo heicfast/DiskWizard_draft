@@ -1,0 +1,232 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Splash, elevation gate & UAC simulation (shell/splash.css).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.dw-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  background: var(--ambient-grad), var(--background);
+}
+
+.dw-splash-bloom {
+  position: absolute;
+  width: 520px;
+  height: 520px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--ink-soft) 0%, transparent 62%);
+  filter: blur(14px);
+  animation: dw-bloom 2.6s var(--ease-in-out) infinite alternate;
+}
+
+@keyframes dw-bloom {
+  from {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 0.95;
+    transform: scale(1.06);
+  }
+}
+
+.dw-splash-mark {
+  position: relative;
+}
+
+.dw-splash-wording {
+  text-align: center;
+}
+
+.dw-splash-name {
+  font-size: 34px;
+  font-weight: 780;
+  letter-spacing: -0.028em;
+  color: var(--text);
+}
+
+.dw-splash-tagline {
+  margin-top: 7px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+}
+
+.dw-splash-status {
+  position: absolute;
+  bottom: 46px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+}
+
+.dw-splash-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--track);
+  border-top-color: var(--ink);
+  animation: dw-spin 0.92s linear infinite;
+}
+
+@keyframes dw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dw-spin {
+  animation: dw-spin 0.92s linear infinite;
+}
+
+/* ── Elevation gate (simulated UAC) ──────────────────────────────────── */
+
+.dw-elevation-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 190;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.dw-uac {
+  width: min(460px, calc(100vw - 48px));
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  background: #1f1f1f;
+  color: #f2f2f2;
+  border: 1px solid #3a3a3a;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+.dw-uac-head {
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid #3a3a3a;
+  background: #2b2b2b;
+}
+
+.dw-uac-head-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dw-uac-head-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #b8b8b8;
+}
+
+.dw-uac-body {
+  display: flex;
+  gap: 14px;
+  padding: 18px 16px 8px;
+}
+
+.dw-uac-shield {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  color: #7fb2ff;
+  background: rgba(127, 178, 255, 0.12);
+  flex-shrink: 0;
+}
+
+.dw-uac-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dw-uac-line {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dw-uac-app {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dw-uac-app-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dw-uac-app-pub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: #b8b8b8;
+}
+
+.dw-uac-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 16px 16px;
+}
+
+.dw-uac-btn {
+  min-width: 96px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1px solid #454545;
+  background: #333;
+  color: #f2f2f2;
+  font-size: 12px;
+}
+
+.dw-uac-btn.is-yes {
+  background: #0078d4;
+  border-color: #0078d4;
+}
+
+.dw-uac-btn:hover {
+  filter: brightness(1.12);
+}
+
+.dw-elevation-card {
+  width: min(420px, calc(100vw - 48px));
+  padding: 24px;
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  border: 1px solid var(--divider);
+  box-shadow: var(--shadow-pop);
+  text-align: center;
+}
+
+.dw-elevation-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.dw-elevation-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.dw-elevation-copy {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}

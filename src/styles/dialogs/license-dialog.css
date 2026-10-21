@@ -1,0 +1,151 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * License dialog — activation entry, key field, typed server-error
+ * copy, success state (dialogs/license-dialog.css).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.dw-license-dialog {
+  width: min(460px, calc(100vw - 48px));
+}
+
+.dw-license-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.dw-license-title {
+  font-size: 18px;
+  font-weight: 720;
+  letter-spacing: -0.016em;
+}
+
+.dw-license-sub {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.dw-license-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.dw-license-field-icon {
+  position: absolute;
+  left: 13px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.dw-license-field input {
+  width: 100%;
+  height: 42px;
+  padding: 0 38px 0 38px;
+  border-radius: var(--radius-m);
+  border: 1.5px solid var(--control-border);
+  background: var(--card);
+  font: 600 13.5px var(--font-mono);
+  letter-spacing: 0.02em;
+  transition: border-color var(--dur-micro) ease, box-shadow var(--dur-micro) ease;
+}
+
+.dw-license-field input:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px var(--ink-soft);
+}
+
+.dw-license-field input::placeholder {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.dw-license-clear {
+  position: absolute;
+  right: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: var(--chip);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.dw-license-error {
+  margin: 9px 0 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-s);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--used);
+  background: var(--used-soft);
+}
+
+.dw-license-note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.dw-license-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.dw-license-buy {
+  text-decoration: none;
+}
+
+.dw-license-foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.dw-license-foot a {
+  color: var(--ink);
+  font-weight: 620;
+}
+
+.dw-license-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 18px 6px 10px;
+}
+
+.dw-license-success-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 14px;
+  border-radius: 50%;
+  color: var(--free);
+  background: var(--free-soft);
+}
+
+.dw-license-success-title {
+  font-size: 18px;
+  font-weight: 720;
+}
+
+.dw-license-success-sub {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}

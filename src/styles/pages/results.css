@@ -1,0 +1,325 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Results — the page chrome: the COMPACT header (breadcrumb, title
+ * row, scan strip, category tabs + tools in one row), the 3-pane
+ * body, the bottom status bar (pages/results.css).
+ *
+ * Layout contract (the reference):
+ *   row 1 — breadcrumb (11px, quiet)
+ *   row 2 — title + subtitle ⟷ search + filter  (one row, baseline aligned)
+ *   row 3 — scan strip (only while scanning, slim)
+ *   row 4 — category tabs ⟷ essential/complete switch (one row)
+ * then the 3-pane body fills everything else. Four rows, never seven.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+.dw-page-results {
+  padding: 18px var(--space-7) 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* Header block */
+.dw-results-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dw-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  min-height: 16px;
+}
+
+.dw-crumb {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  font-weight: 570;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.dw-crumb:hover {
+  color: var(--ink);
+}
+
+.dw-crumb.is-here {
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.dw-crumb-sep {
+  opacity: 0.6;
+}
+
+/* Row 2 — title ⟷ tools */
+.dw-results-titlebar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-top: 6px;
+}
+
+.dw-results-titlebar .dw-page-title {
+  font-size: 24px;
+  margin: 0 0 4px;
+}
+
+.dw-results-titlebar .dw-page-sub {
+  font-size: 12.5px;
+  max-width: none;
+}
+
+.dw-results-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 2px;
+  flex-shrink: 0;
+}
+
+/* Row 3 — the scan strip (live ticker, slim) */
+.dw-scan-strip {
+  position: relative;
+  margin-top: 12px;
+  border-radius: var(--radius-m);
+  background: var(--ink-soft);
+  border: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+  overflow: hidden;
+}
+
+.dw-scan-strip-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ink) 16%, transparent), transparent);
+  background-size: 28px 100%;
+  animation: dw-strip 1.15s linear infinite;
+  transition: width 0.26s linear;
+}
+
+.dw-scan-strip-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 14px;
+}
+
+.dw-scan-strip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 590;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-scan-strip-ticker {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  border-top-color: var(--ink);
+  animation: dw-spin 0.92s linear infinite;
+  flex-shrink: 0;
+}
+
+.dw-scan-strip-meta {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* Row 4 — tabs + tools on ONE line */
+.dw-results-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-top: 12px;
+  flex-wrap: nowrap;
+  min-height: 38px;
+}
+
+.dw-cat-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+.dw-cat-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.dw-cat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--divider);
+  background: var(--card);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 590;
+  white-space: nowrap;
+  transition: all var(--dur-micro) ease;
+}
+
+.dw-cat-tab:hover {
+  border-color: color-mix(in srgb, var(--ink) 34%, var(--divider));
+  color: var(--text);
+}
+
+.dw-cat-tab.is-active {
+  color: var(--on-ink);
+  background: var(--ink-grad);
+  border-color: transparent;
+  box-shadow: var(--ink-glow);
+  font-weight: 640;
+}
+
+.dw-cat-tab .dw-cat-count {
+  font-size: 10.5px;
+  font-weight: 640;
+  opacity: 0.72;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.dw-results-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Filter bar (collapsible row under the toolbar) */
+.dw-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-m);
+  background: var(--card);
+  border: 1px solid var(--divider);
+  overflow-x: auto;
+}
+
+/* Mode switch (essential / complete) — pill pair on the toolbar row */
+.dw-mode-switch {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  background: var(--card);
+  padding: 3px;
+  width: fit-content;
+  flex-shrink: 0;
+}
+
+.dw-mode-switch button {
+  height: 24px;
+  padding: 0 13px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  transition: all var(--dur-micro) ease;
+}
+
+.dw-mode-switch button.is-on {
+  background: var(--ink-soft);
+  color: var(--ink-deep);
+}
+
+/* ── 3-pane body ─────────────────────────────────────────────────────── */
+
+.dw-results-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--space-3);
+  margin-top: 12px;
+  padding-bottom: var(--space-3);
+}
+
+/* ── Bottom bar ──────────────────────────────────────────────────────── */
+
+.dw-results-foot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin: 0 calc(var(--space-7) * -1);
+  padding: 11px var(--space-7);
+  border-top: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.dw-results-foot-status {
+  font-size: 12.5px;
+  font-weight: 590;
+  color: var(--text-secondary);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-results-foot-cta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.dw-selection-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dw-recover-cta {
+  height: 38px;
+  border-radius: 999px;
+  padding: 0 22px;
+  font-size: 13px;
+  font-weight: 660;
+}
+
+/* Empty state (no results yet) */
+.dw-results-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* QA-8 (§5.1-8 disclosure): the live-scan consistency note in the
+ * results header — a mounted-volume scan is honest about its limits
+ * (no VSS snapshot; files changed mid-scan may be missed). */
+.dw-live-scan-note {
+  opacity: 0.75;
+  font-weight: 400;
+}

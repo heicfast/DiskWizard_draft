@@ -29,11 +29,25 @@ import { useScanStore } from "./state/scan";
 import "./theme/tokens.css";
 import "./styles/fonts.css";
 import "./styles/base.css";
-import "./styles/shell.css";
-import "./styles/sidebar.css";
-import "./styles/pages.css";
-import "./styles/results.css";
-import "./styles/dialogs.css";
+import "./styles/components/buttons.css";
+import "./styles/components/chips.css";
+import "./styles/components/controls.css";
+import "./styles/components/cards.css";
+import "./styles/components/dialogs.css";
+import "./styles/shell/app.css";
+import "./styles/shell/titlebar.css";
+import "./styles/shell/sidebar.css";
+import "./styles/shell/splash.css";
+import "./styles/pages/recover.css";
+import "./styles/pages/results.css";
+import "./styles/pages/tree.css";
+import "./styles/pages/filetable.css";
+import "./styles/pages/preview.css";
+import "./styles/pages/tools.css";
+import "./styles/pages/settings.css";
+import "./styles/pages/help.css";
+import "./styles/dialogs/results-dialogs.css";
+import "./styles/dialogs/license-dialog.css";
 
 /** Page-swap wrapper (CSS-driven settle-in): the entering view fades
  * 0→1 over the solid page background; the old view unmounts instantly
