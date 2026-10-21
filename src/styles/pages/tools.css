@@ -6,7 +6,9 @@
 
 .dw-tool-disk-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
+  /* 4-up at full HD (7 disks → 4+3, balanced); wraps to 2/1 on
+   * narrower windows without orphaning a single card at 6+1. */
+  grid-template-columns: repeat(auto-fill, minmax(312px, 1fr));
   gap: var(--space-3);
 }
 
@@ -40,7 +42,7 @@
 
 .dw-tool-disk-meta {
   font-size: 11px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .dw-health-chip {

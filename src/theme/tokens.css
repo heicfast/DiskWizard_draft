@@ -391,18 +391,18 @@
 
 /* ── Tide (deep marine + lagoon cyan) ───────────────────────────────── */
 [data-theme="tide"] {
-  --background: #101722;
+  --background: #0e1520;
   --panel: #18202e;
-  --card: #1c2534;
-  --border: #3c4a61;
-  --divider: #263040;
+  --card: #1d2839;
+  --border: #3f4f68;
+  --divider: #273348;
   --chip: #223046;
   --track: #263149;
   --overlay: rgba(2, 6, 14, 0.55);
 
   --text: #eef4fb;
-  --text-secondary: #a5b3c8;
-  --text-tertiary: #8393ab;
+  --text-secondary: #b7c4d8;
+  --text-tertiary: #93a3bc;
 
   --skeleton: #1f2837;
   --shimmer: rgba(224, 242, 254, 0.06);

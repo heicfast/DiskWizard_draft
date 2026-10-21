@@ -37,6 +37,7 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+  max-width: 560px;
   border: 1px solid var(--divider);
   border-radius: var(--radius-m);
   overflow: hidden;

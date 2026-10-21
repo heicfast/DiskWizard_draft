@@ -53,6 +53,21 @@
   padding: 17px;
 }
 
+/* Grid rows are equal height (default stretch); the copy column
+ * flexes so the tag badges baseline-align across cards regardless of
+ * body-text length. */
+.dw-help-copy {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.dw-help-copy .dw-tag {
+  margin-top: auto;
+}
+
 .dw-help-icon {
   display: inline-flex;
   align-items: center;
@@ -65,12 +80,7 @@
   flex-shrink: 0;
 }
 
-.dw-help-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
+
 
 .dw-help-title {
   font-size: 13.5px;
