@@ -29,6 +29,7 @@
 
 pub mod lznt1;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::blockdev::{AlignedBuf, BlockDevice, BlockRead};
@@ -658,6 +659,11 @@ impl NtfsEngine {
             .map_or(1, std::num::NonZero::get)
             .clamp(1, 8);
         let mut record_no: u64 = 0;
+        // The forking state (M2 review #1): stashed extension-record
+        // fragments keyed by BASE record number + the deferred
+        // forked-base records awaiting the post-walk merge.
+        let mut ext_stash: HashMap<u64, Vec<ExtFragments>> = HashMap::new();
+        let mut deferred: Vec<ParsedRecord> = Vec::new();
         'all: for ext in self.mft_extents.clone() {
             let recs_here = ext.len / rs;
             let mut done = 0u64;
@@ -709,12 +715,39 @@ impl NtfsEngine {
                     });
                 }
                 // Sequential emission — identical ordering + semantics
-                // to the record-number loop it replaces.
+                // to the record-number loop it replaces. Extension
+                // records STASH (the forking merge); forked base
+                // records DEFER to the post-walk merge pass.
                 for p in parsed.into_iter().flatten() {
                     if p.record_no == 4 {
                         continue; // $AttrDef — pure metadata
                     }
                     ctrl.checkpoint()?;
+                    if let Some(base) = p.extension_of {
+                        // The stash: streams + names + times flow into
+                        // the base entry (M2 review #1). Bounded against
+                        // hostile media.
+                        if ext_stash.len() < 65_536 {
+                            let e = ext_stash.entry(base).or_insert_with(Vec::new);
+                            if e.len() < 64 {
+                                e.push(ExtFragments {
+                                    names: p.names,
+                                    times: p.times,
+                                    streams: p.data_streams,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    if !p.attr_list_exts.is_empty() {
+                        // A forked base: defer emission until every
+                        // extension record has been seen (they can sit
+                        // anywhere in the MFT).
+                        if deferred.len() < 65_536 {
+                            deferred.push(p);
+                        }
+                        continue;
+                    }
                     let origin = if p.in_use {
                         NodeOrigin::Existing
                     } else {
@@ -780,9 +813,61 @@ impl NtfsEngine {
                 }
             }
         }
+        // ── The forking merge pass (M2 review #1) ──
+        // Every extension record has now been stashed; the deferred
+        // forked bases merge them and emit (ordering after the main
+        // walk is safe — the tree builder resolves parent links in a
+        // post-pass fixpoint, not by record order).
+        for mut p in deferred {
+            ctrl.checkpoint()?;
+            if let Some(exts) = ext_stash.remove(&p.record_no) {
+                for e in exts {
+                    for (parent, name) in e.names {
+                        if !p.names.iter().any(|(_, n)| *n == name) {
+                            p.names.push((parent, name));
+                        }
+                    }
+                    // Times: the freshest wins (extension records
+                    // carry the same file's timestamps).
+                    if e.times.modified > p.times.modified {
+                        p.times = e.times;
+                    }
+                    for st in e.streams {
+                        // Merge by stream name: same-name streams
+                        // concatenate (VCN-ordered fragments across
+                        // records); new names append as extra streams.
+                        if let Some(existing) = p
+                            .data_streams
+                            .iter_mut()
+                            .find(|x| x.name == st.name && x.resident_len.is_none())
+                        {
+                            existing.extents.extend(st.extents);
+                            existing.size = existing.size.max(st.size);
+                            existing.compressed |= st.compressed;
+                        } else {
+                            p.data_streams.push(st);
+                        }
+                    }
+                }
+            }
+            let origin = if p.in_use {
+                NodeOrigin::Existing
+            } else {
+                NodeOrigin::Deleted
+            };
+            emit_parsed(&p, origin, None, sink, &mut stats);
+        }
         sink.on_progress(total, total);
         Ok(stats)
     }
+}
+
+/// The stashed fragments of one extension record (the forking merge
+/// input — M2 review #1).
+struct ExtFragments {
+    names: Vec<(u64, String)>,
+    times: Timestamps,
+    streams: Vec<ParsedStream>,
 }
 
 /// Streaming chunk target: 4 MiB of MFT per bulk read (the og's
@@ -811,6 +896,15 @@ struct ParsedRecord {
     times: Timestamps,
     dos_attrs: u32,
     data_streams: Vec<ParsedStream>,
+    /// $ATTRIBUTE_LIST fork target record numbers (the base-record
+    /// side of the M2-review forking fix — heavily-fragmented or
+    /// many-stream files overflow their attributes into extension
+    /// records listed here).
+    attr_list_exts: Vec<u64>,
+    /// Some(base record number) when THIS record is an extension
+    /// (base_ref != 0) — the walk stashes it for the merge instead
+    /// of emitting it standalone.
+    extension_of: Option<u64>,
 }
 
 /// Parse + fixup one MFT record from an in-memory slice. `None` =
@@ -840,16 +934,19 @@ fn parse_record(
         b.copy_from_slice(&data[0x20..0x28]);
         b
     });
-    if base_ref != 0 {
-        // Extension record (ATTRIBUTE_LIST child): attributes merge
-        // into the base record's entry — emitting it standalone
-        // would duplicate.
-        return None;
-    }
     let mut names: Vec<(u64, String)> = Vec::new();
     let mut times = Timestamps::default();
     let mut dos_attrs = 0u32;
     let mut data_streams: Vec<ParsedStream> = Vec::new();
+    let mut attr_list_exts: Vec<u64> = Vec::new();
+    let extension_of = if base_ref != 0 {
+        // Extension record (ATTRIBUTE_LIST child): its attributes
+        // merge into the base record's entry — the walk stashes it
+        // (never emitted standalone).
+        Some(base_ref & MFT_REF_MASK)
+    } else {
+        None
+    };
     for attr in iter_attrs(&data) {
         match attr.kind {
             ATTR_STANDARD_INFORMATION => {
@@ -912,6 +1009,35 @@ fn parse_record(
                     }
                 }
             }
+            ATTR_ATTRIBUTE_LIST => {
+                // The fork index: entries {type u32, len u16, name_len
+                // u8, name_off u8, lowest_vcn u64, file_ref u64,
+                // attr_id u16, pad} — collect the referenced RECORD
+                // numbers (the extension records holding the overflow
+                // attributes). Bounded: hostile media caps at 64 KiB
+                // of list (2048 entries).
+                if let Some(r) = attr.resident.as_deref().map(|x| &x[..])
+                    && r.len() >= 0x20
+                {
+                    let mut p = 0usize;
+                    while p + 0x20 <= r.len() && attr_list_exts.len() < 2048 {
+                        let elen = u16::from_le_bytes([r[p + 4], r[p + 5]]) as usize;
+                        if elen < 0x20 || p + elen > r.len() {
+                            break;
+                        }
+                        let ref_bytes = u64::from_le_bytes({
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&r[p + 0x10..p + 0x18]);
+                            b
+                        });
+                        let rec = ref_bytes & MFT_REF_MASK;
+                        if rec != record_no && rec != 0 {
+                            attr_list_exts.push(rec);
+                        }
+                        p += elen;
+                    }
+                }
+            }
             ATTR_DATA => {
                 let (size, resident_len) = if let Some(r) = attr.resident {
                     (r.len() as u64, Some(r.len() as u64))
@@ -933,7 +1059,8 @@ fn parse_record(
             _ => {}
         }
     }
-    if names.is_empty() {
+    if names.is_empty() && extension_of.is_none() {
+        // Neither emittable nor mergeable.
         return None;
     }
     Some(ParsedRecord {
@@ -945,6 +1072,8 @@ fn parse_record(
         times,
         dos_attrs,
         data_streams,
+        attr_list_exts,
+        extension_of,
     })
 }
 
@@ -1293,6 +1422,87 @@ mod tests {
         let readme_entry = sink.0.iter().find(|e| e.name == "readme.txt").unwrap();
         assert_eq!(readme_entry.extents, vec![Extent::new(100 * 512, 1024)]);
         assert_eq!(readme_entry.size, 1024);
+    }
+
+    /// M2 review #1 — the $ATTRIBUTE_LIST forking regression: a base
+    /// record whose attributes overflow into an extension record must
+    /// surface ONE entry carrying the MERGED streams, and the
+    /// extension record must NEVER emit standalone.
+    #[test]
+    fn attribute_list_forking_merges_extension_streams() {
+        let mut ram = RamDevice::new(512 * 4096, 512);
+        let boot = boot_sector_template();
+        ram.data[..512].copy_from_slice(&boot);
+        let root = mft_record(0x0003, 5, ".", None);
+        // The BASE: "bigfork.dat" with the first $DATA run (LCN 100,
+        // 2 clusters) + a resident $ATTRIBUTE_LIST pointing at rec 9.
+        let mut base = mft_record(0x0001, 5, "bigfork.dat", Some(([0x11, 0x02, 100], 2048)));
+        let end_at = 0x38
+            + (0x18 + 0x42 + "bigfork.dat".len() * 2) // $FILE_NAME
+            + (0x48 + 3); // $DATA
+        {
+            let pos = end_at;
+            let content_len = 0x20usize;
+            let attr_len = 0x18 + content_len;
+            base[pos..pos + 4].copy_from_slice(&ATTR_ATTRIBUTE_LIST.to_le_bytes());
+            base[pos + 4..pos + 8].copy_from_slice(&(attr_len as u32).to_le_bytes());
+            base[pos + 8] = 0; // resident
+            base[pos + 0x10..pos + 0x14].copy_from_slice(&(content_len as u32).to_le_bytes());
+            base[pos + 0x14..pos + 0x16].copy_from_slice(&0x18u16.to_le_bytes());
+            let c = pos + 0x18;
+            // Entry: type=$DATA, len=0x20, lowest_vcn=0, ref=record 9.
+            base[c..c + 4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+            base[c + 4..c + 6].copy_from_slice(&0x20u16.to_le_bytes());
+            base[c + 0x10..c + 0x18].copy_from_slice(&9u64.to_le_bytes());
+            let e = pos + attr_len;
+            base[e..e + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        }
+        // The EXTENSION: base_ref = record 8, carrying the overflow
+        // $DATA run (LCN 200, 2 clusters) + the same name.
+        let mut ext = mft_record(0x0001, 5, "bigfork.dat", Some(([0x11, 0x02, 110], 2048)));
+        ext[0x20..0x28].copy_from_slice(&8u64.to_le_bytes()); // base record ref
+
+        let mft_base = 16 * 512;
+        ram.data[mft_base..mft_base + 512].copy_from_slice(&mft_record0(16, 32));
+        ram.data[mft_base + 5 * 512..mft_base + 6 * 512].copy_from_slice(&root);
+        ram.data[mft_base + 8 * 512..mft_base + 9 * 512].copy_from_slice(&base);
+        ram.data[mft_base + 9 * 512..mft_base + 10 * 512].copy_from_slice(&ext);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut engine = NtfsEngine::new(Arc::clone(&dev)).expect("engine");
+        struct Collector(Vec<FoundEntry>);
+        impl crate::fs::ScanSink for Collector {
+            fn on_entry(&mut self, e: FoundEntry) {
+                self.0.push(e);
+            }
+        }
+        let mut sink = Collector(Vec::new());
+        let ctrl = ScanControl::new();
+        engine.quick_scan(&mut sink, &ctrl).expect("scan");
+
+        let forks: Vec<&FoundEntry> = sink.0.iter().filter(|e| e.name == "bigfork.dat").collect();
+        assert_eq!(
+            forks.len(),
+            1,
+            "the forked file surfaces exactly once (got {})",
+            forks.len()
+        );
+        let f = forks[0];
+        assert_eq!(f.origin, NodeOrigin::Existing);
+        assert!(
+            f.extents.iter().any(|e| e.offset == 110 * 512),
+            "the extension record's run (LCN 110) is present: {:?}",
+            f.extents
+        );
+        assert!(
+            f.extents.iter().any(|e| e.offset == 100 * 512),
+            "the base record's run (LCN 100) is present: {:?}",
+            f.extents
+        );
+        assert!(
+            !sink.0.iter().any(|e| e.record_id == Some(9)),
+            "the extension record never emits standalone"
+        );
     }
 
     #[test]

@@ -293,7 +293,7 @@ fn scan_chunks(buf: &[u8], damage: &mut Vec<DamageKind>) -> Vec<Chunk> {
                     start: i,
                     end: buf.len(),
                     kind,
-                    stored_len: (buf.len() - i - 12) as u32,
+                    stored_len: buf.len().saturating_sub(i + 12) as u32,
                 });
                 damage.push(DamageKind::Truncated);
             } else {

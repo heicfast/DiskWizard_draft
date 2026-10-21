@@ -260,6 +260,11 @@ fn walk(buf: &[u8], damage: &mut Vec<DamageKind>) -> Vec<Segment> {
                 None => break,
             }
         }
+        if i + 1 >= buf.len() {
+            // A trailing 0xFF with no marker byte — truncation.
+            damage.push(DamageKind::Truncated);
+            break;
+        }
         let kind = buf[i + 1];
         if kind == 0xFF || kind == 0x00 {
             // Not a real marker (stuffing or garbage) — resync.

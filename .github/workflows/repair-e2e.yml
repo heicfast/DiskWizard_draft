@@ -52,6 +52,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install Pillow pypdf python-docx
+          # ffmpeg rides the image but not always on pwsh's PATH —
+          # resolve or install (choco is idempotent, ~2 min).
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install -y ffmpeg --no-progress | Out-Null
+            Add-Content $env:GITHUB_ENV "PATH=C:\ProgramData\chocolatey\bin;$env:PATH"
+            $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+          }
           ffmpeg -version | Select-Object -First 1
 
       - name: Generate REAL files + corrupt them
