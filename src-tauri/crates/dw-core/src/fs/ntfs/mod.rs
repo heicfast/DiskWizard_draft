@@ -746,7 +746,7 @@ impl NtfsEngine {
                         // the base entry (M2 review #1). Bounded against
                         // hostile media.
                         if ext_stash.len() < 65_536 {
-                            let e = ext_stash.entry(base).or_insert_with(Vec::new);
+                            let e = ext_stash.entry(base).or_default();
                             if e.len() < 64 {
                                 e.push(ExtFragments {
                                     names: p.names,
@@ -1037,7 +1037,7 @@ fn parse_record(
                 // numbers (the extension records holding the overflow
                 // attributes). Bounded: hostile media caps at 64 KiB
                 // of list (2048 entries).
-                if let Some(r) = attr.resident.as_deref().map(|x| &x[..])
+                if let Some(r) = attr.resident.as_ref()
                     && r.len() >= 0x20
                 {
                     let mut p = 0usize;
