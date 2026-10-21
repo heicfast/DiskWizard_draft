@@ -1,0 +1,253 @@
+name: Comparison vs OG (same runner, same disk, head-to-head)
+
+# The owner's comparison mandate: run OUR release engine and the OG
+# application against the SAME disk on the SAME runner in the SAME
+# session — record both durations, both found-file surfaces, and the
+# screenshots — then publish the comparison evidence.
+#
+# The OG application comes from the research repository (og-codebase,
+# driven per the research's own UI ground-truth pattern: launch
+# DRW.exe, click the proven "Search for Lost Data" button, poll the
+# window census, capture screenshots at every phase). Our engine runs
+# dw-cli (release) over the same physical disk via raw access.
+#
+# Fairness notes (recorded in the report):
+# * Both runs are READ-ONLY scans of the same disk.
+# * The og's found-count is extracted best-effort from window text
+#   (its Qt UI exposes limited UIA); the screenshots are the
+#   authoritative evidence. Our count is exact (JSON).
+# * The og's duration = launch-to-results-screen (includes its UI);
+#   ours = engine pipeline only (the CLI has no UI to wait on).
+
+on:
+  workflow_dispatch:
+    inputs:
+      og_wait_seconds:
+        description: "Seconds to wait for the og landing page"
+        required: true
+        default: "60"
+      og_scan_seconds:
+        description: "Seconds to wait for the og scan completion"
+        required: true
+        default: "1200"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Head-to-head (dw-cli release vs the og application)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build dw-cli (release — the production engine)
+        run: cargo build --release -p dw-cli
+        working-directory: src-tauri
+
+      - name: Checkout the research repository (the og application)
+        uses: actions/checkout@v4
+        with:
+          repository: heicfast/easeus-drw-research
+          path: research
+          sparse-checkout: |
+            og-codebase
+
+      - name: Environment recording (the comparison's context)
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\compare"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          $osDisk = Get-Disk | Where-Object IsBoot -eq $true | Select-Object -First 1
+          [pscustomobject]@{
+            time    = (Get-Date -AsUTC).ToString("o")
+            runner  = "windows-latest"
+            cores   = $env:NUMBER_OF_PROCESSORS
+            ramGB   = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+            cpu     = (Get-CimInstance Win32_Processor).Name
+            disk    = $osDisk.FriendlyName
+            diskGB  = [math]::Round($osDisk.Size / 1GB, 1)
+            diskNo  = $osDisk.Number
+            commit  = "${{ github.sha }}"
+            ours    = "dw-cli release (the production engine)"
+            og      = "DRW.exe from easeus-drw-research og-codebase"
+          } | ConvertTo-Json | Set-Content "$evidence\environment.json"
+          Get-Content "$evidence\environment.json"
+          "OS_DISK=$($osDisk.Number)" | Add-Content $env:GITHUB_ENV
+
+      # ── RUN 1: our engine (exact numbers) ──────────────────────
+      - name: "Run 1 — ours: dw-cli scan (whole OS disk)"
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\compare"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          & cargo run --release -p dw-cli -- scan "disk$env:OS_DISK" --out "$evidence\ours-results.json" --log "$evidence\ours-scan.log" -v --max-seconds 2400
+          if ($LASTEXITCODE -ne 0) { throw "dw-cli scan failed" }
+          $ourWall = $sw.Elapsed.TotalSeconds
+          "OUR_WALL_SECONDS=$([math]::Round($ourWall,1))" | Add-Content $env:GITHUB_ENV
+          $r = Get-Content "$evidence\ours-results.json" | ConvertFrom-Json
+          "OUR_FILES_FOUND=$($r.filesFound)" | Add-Content $env:GITHUB_ENV
+          Write-Host ("ours: files={0} wall={1:N1}s engine-duration={2}s mbps={3}" -f `
+            $r.filesFound, $ourWall, $r.durationSec, [math]::Round($r.throughputMbps,1))
+          Write-Host ("ours phases: {0}" -f ($r.phaseTimings -join " | "))
+
+      # ── RUN 2: the og application (evidence + best-effort counts) ──
+      - name: "Run 2 — the og: DRW.exe default scan (same disk)"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $evidence = "$env:RUNNER_TEMP\compare"
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class ClickHelper {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr extra);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+            public static void Click(int x, int y) {
+              SetCursorPos(x, y);
+              mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+              mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+            }
+          }
+          "@
+          function Shot([string]$name) {
+            $p = Join-Path $evidence $name
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen
+            $w = $b.Bounds.Width; $h = $b.Bounds.Height
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+            $bmp.Save($p, [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "shot: $name"
+          }
+          Push-Location research/og-codebase
+          $ogStart = Get-Date
+          $proc = Start-Process -FilePath ".\DRW.exe" -WorkingDirectory (Get-Location) -PassThru
+          Pop-Location
+          "launched og pid=$($proc.Id)" | Tee-Object "$evidence\og-launch.txt" | Write-Host
+          Start-Sleep -Seconds ${{ inputs.og_wait_seconds }}
+          Shot "og-01-landing.png"
+          # The proven scan button (the research's ground-truth run):
+          # bottom-right of the landing page.
+          $drw = Get-Process DRWUI -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+          if (-not $drw) { $drw = Get-Process DRWUI -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          $ogScanStart = Get-Date
+          if ($drw) {
+            $r = New-Object ClickHelper+RECT
+            [ClickHelper]::GetWindowRect($drw.MainWindowHandle, [ref]$r) | Out-Null
+            $w = $r.R - $r.L; $h = $r.B - $r.T
+            $cx = $r.L + [int]($w * 0.90); $cy = $r.T + [int]($h * 0.92)
+            Write-Host "clicking scan at ($cx,$cy) window ${w}x${h}"
+            [ClickHelper]::Click($cx, $cy)
+          } else {
+            Write-Host "::warning::no DRWUI window — screenshot only"
+          }
+          # Poll for the results phase: the window census changes
+          # (title/children) — capture shots every 3 minutes + the
+          # census text; stop early when the process exits or the
+          # census goes quiet with a results-like title.
+          $ogScanSecs = [int]"${{ inputs.og_scan_seconds }}"
+          $foundText = ""
+          $deadline = (Get-Date).AddSeconds($ogScanSecs)
+          $n = 0
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 60
+            $n++
+            $alive = Get-Process DRWUI -ErrorAction SilentlyContinue
+            $census = ($alive | Select-Object Id, ProcessName, MainWindowTitle |
+              Out-String).Trim()
+            $census | Add-Content "$evidence\og-census.txt"
+            if ($n % 3 -eq 1) { Shot ("og-02-scan-{0:D2}.png" -f $n) }
+            # Best-effort: the results page's found-count text rides
+            # the window title on some builds.
+            if ($census -match '(\d[\d,\.]*)\s*(files|个文件|文件)') {
+              $foundText = $Matches[0]
+              Shot "og-03-results.png"
+              break
+            }
+            if (-not $alive) { break }
+          }
+          Shot "og-04-final.png"
+          $ogWall = ((Get-Date) - $ogStart).TotalSeconds
+          $ogScanWall = ((Get-Date) - $ogScanStart).TotalSeconds
+          "OG_WALL_SECONDS=$([math]::Round($ogWall,1))" | Add-Content $env:GITHUB_ENV
+          "OG_SCAN_SECONDS=$([math]::Round($ogScanWall,1))" | Add-Content $env:GITHUB_ENV
+          "OG_FOUND_TEXT=$foundText" | Add-Content $env:GITHUB_ENV
+          Write-Host ("og: launch-to-final={0:N1}s scan-to-final={1:N1}s foundText='{2}'" -f `
+            $ogWall, $ogScanWall, $foundText)
+          # Close the og (leave the runner clean).
+          Get-Process DRWUI, DRW, DRWReport, DRWService -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+
+      # ── The comparison report ─────────────────────────────────
+      - name: The comparison report
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP\compare"
+          $ours = Get-Content "$evidence\ours-results.json" | ConvertFrom-Json
+          $report = [pscustomobject]@{
+            ours = [pscustomobject]@{
+              engine        = "dw-cli (release, the production engine)"
+              filesFound    = $ours.filesFound
+              engineSeconds = $ours.durationSec
+              launchToDoneWallSeconds = [double]$env:OUR_WALL_SECONDS
+              throughputMbps = [math]::Round($ours.throughputMbps, 2)
+              peakWorkingSetMiB = [math]::Round($ours.peakWorkingSet / 1MB, 1)
+              phaseTimings  = $ours.phaseTimings
+            }
+            og = [pscustomobject]@{
+              engine        = "Data Recovery Wizard (og-codebase, DRW.exe)"
+              launchToFinalWallSeconds = [double]$env:OG_WALL_SECONDS
+              scanToFinalWallSeconds  = [double]$env:OG_SCAN_SECONDS
+              foundTextExtracted = $env:OG_FOUND_TEXT
+              note          = "The og's found-count is best-effort window text; the screenshots are the authoritative evidence. Its wall includes GUI interaction."
+            }
+            reference = "og documented reference: quick scan ~=21s on 129GB NTFS (dynamic-ground-truth--scan-phase-captured.md section 8)"
+          }
+          $report | ConvertTo-Json -Depth 5 | Set-Content "$evidence\comparison.json"
+          $report | ConvertTo-Json -Depth 5 | Write-Host
+          # The speed table for the job summary.
+          $speedup = if ($env:OG_SCAN_SECONDS) {
+            [math]::Round(([double]$env:OG_SCAN_SECONDS) / [math]::Max(1, $ours.durationSec), 2)
+          } else { 0 }
+          $summary = @"
+          ## Head-to-head: DiskWizard core vs the OG application
+
+          | | ours (dw-cli release) | the og (DRW.exe) |
+          |---|---|---|
+          | files found | $($ours.filesFound) | best-effort: '$($env:OG_FOUND_TEXT)' |
+          | wall (scan) | $($ours.durationSec) s | $env:OG_SCAN_SECONDS s |
+          | throughput | $([math]::Round($ours.throughputMbps,1)) MB/s | (GUI-bound) |
+          | peak WS | $([math]::Round($ours.peakWorkingSet / 1MB,1)) MiB | - |
+
+          Speed ratio (og wall / our engine): ${speedup}x
+          Screenshots + JSON uploaded as artifacts.
+          "@
+          $summary | Set-Content "$env:GITHUB_STEP_SUMMARY" -ErrorAction SilentlyContinue
+          Write-Host $summary
+
+      - name: Upload the comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-vs-og-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/compare/
+          retention-days: 60
+          if-no-files-found: warn

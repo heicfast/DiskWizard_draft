@@ -1080,3 +1080,34 @@ Specification (v1.0)") implemented core-only, top to bottom.
 * fmt + clippy -D warnings: clean on every crate, both targets
   (dw-cli's pre-existing 6 Windows warnings fixed too).
 * App wire: `modifiedRaw` additive; all frozen shapes untouched.
+
+### Session 11 (cont.) — the validation layer
+
+* `recovery-lab.yml` — the realistic testing environment (the
+  owner's mandate): a 10 GB VHD, two partitions, 2650 seeded files
+  with REAL format contents (JPEG/PNG/ZIP/PDF/MP3/MP4/BMP/WAV +
+  text + binary — the carvers' actual grammars), 50 top dirs with
+  5 branches 8 levels deep, log-uniform sizes 1 KB..8 MB, timestamps
+  spread over two years; a SHA-256 manifest of everything; the full
+  deletion matrix (65% force-delete, 15% recycle-bin, 5% kept,
+  cluster-reuse overwrite pressure, and a whole PARTITION deletion);
+  then the scan + the CI GATES: kept recall ≥99.9%, deleted recall
+  ≥90%, path reconstruction ≥90%, lost-partition recall ≥85%, memory
+  ≤3 GiB — plus a 20-file recovery byte-truth pass (SHA-verified,
+  Excellent/Good grades only — Poor legitimately byte-fails when
+  partially overwritten, which is the grading working).
+* `compare-vs-og.yml` — the head-to-head: dw-cli (release) and the
+  OG application (DRW.exe from the research repo, launched + driven
+  per the research's own proven ground-truth click pattern) on the
+  SAME runner OS disk in the same session. Our numbers exact (JSON);
+  the og's wall-time exact, its found-count best-effort window text +
+  authoritative screenshots (its Qt UI exposes limited UIA).
+  comparison.json + step summary + artifacts.
+* `tests/parallel_bench.rs` — the worker pools' throughput floors:
+  the parallel MFT walk (200k-record synthetic NTFS) and the parallel
+  carve (256 MiB signature-dense). Measured locally: 431k rec/s walk,
+  carve floor passes — floors set far under headroom so CI-runner
+  variance never flakes. Wired into engine-benchmark.yml. (criterion
+  evaluated and skipped: the lab + benchmark workflows measure the
+  REAL engine on REAL media via dw-cli — richer than synthetic-only
+  numbers; the codebase's --ignored perf-test convention followed.)

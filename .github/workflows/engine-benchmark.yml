@@ -164,6 +164,10 @@ jobs:
             ogReference = @{ quickScanSec129GB = 21; fullSessionMBps = 170; source = "drw-research dynamic-ground-truth--scan-phase-captured.md §8" }
           } | ConvertTo-Json -Depth 6 | Set-Content "$evidence\comparison.json"
 
+      - name: Parallel-pipeline floors (the worker pools' CI gates)
+        run: cargo test -p dw-core --test parallel_bench -- --ignored --nocapture
+        working-directory: src-tauri
+
       - name: Detach + clean
         if: always()
         shell: pwsh
