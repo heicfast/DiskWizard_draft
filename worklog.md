@@ -1355,3 +1355,17 @@ accuracy PASS, carve-plan bitmap-guided 94.5%/215 ranges on the
    died). Standard CI practice applied:
    `Add-MpPreference -ExclusionPath L:\, W:\` before seeding — the
    evidence must measure OUR engine, not the antivirus.
+
+### Session 12 (cont. cont. cont.) — the 65f0ab1 catches
+
+- **Recovery Lab**: the Add-MpPreference line needed the ARRAY form
+  (`-ExclusionPath "L:\","W:\"` — the parameter can't be given twice);
+  the run died at attach before any seeding.
+- **The engines fuzzer caught a real panic**: dw-repair's SVG engine
+  sliced the ORIGINAL text at an index found in the LOWERCASED copy —
+  case-folding-expanding chars (İ → i+combining dot) grow the
+  lowercased byte length, and the prolog index (1201) exceeded the
+  original's (1199). Fixed with an ASCII-fold search over the
+  original (`find_ascii_ci` — the needle is pure ASCII, every match
+  boundary is a char boundary) + the exact-class regression test
+  (600× İ before the prolog).

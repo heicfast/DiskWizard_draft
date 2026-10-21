@@ -90,8 +90,14 @@ impl RepairEngine for SvgEngine {
         let mut notes = Vec::new();
 
         // The inner content: skip past any existing <?xml …?> prolog
-        // (search for '>').
-        let inner = if let Some(xml_at) = tl.find("<?xml") {
+        // (search for '>'). The fuzzer's catch (session 12): the
+        // prolog offset MUST be found in `text` itself — `tl`'s byte
+        // indices diverge from the original whenever case-folding
+        // changes a byte length before the match (İ → i+combining
+        // dot), and slicing `text` at a `tl` index panicked
+        // out-of-bounds. ASCII-fold search over the original.
+        let xml_at = find_ascii_ci(&text, "<?xml");
+        let inner = if let Some(xml_at) = xml_at {
             if let Some(gt) = text[xml_at..].find('>') {
                 &text[(xml_at + gt + 1).min(text.len())..]
             } else {
@@ -146,9 +152,54 @@ impl RepairEngine for SvgEngine {
     }
 }
 
+/// ASCII-case-insensitive substring search over the ORIGINAL string —
+/// byte indices that are safe to slice it with (`str::to_lowercase`
+/// changes byte lengths on Unicode case folding; the engines-fuzz
+/// catch). `needle` must be pure ASCII.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    debug_assert!(needle.is_ascii());
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    'outer: for i in 0..=h.len() - n.len() {
+        for (j, &nb) in n.iter().enumerate() {
+            let hb = h[i + j];
+            let eq = hb == nb || (hb.is_ascii_alphabetic() && (hb | 0x20) == (nb | 0x20));
+            if !eq {
+                continue 'outer;
+            }
+        }
+        // The needle is ASCII: any match boundary is a char boundary.
+        return Some(i);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engines-fuzz catch (session 12): a case-folding-EXPANDING
+    /// char (İ → i + combining dot, +1 byte per char) before the
+    /// `<?xml` prolog made the lowercased string's find-index exceed
+    /// the ORIGINAL's length — the old code sliced `text` at a `tl`
+    /// index and panicked out-of-bounds. The ASCII-fold search keeps
+    /// every index in the original's coordinate space.
+    #[test]
+    fn case_folding_expansion_before_prolog_never_panics() {
+        let evil = format!(
+            "{}{}",
+            "İ".repeat(600),
+            r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#
+        );
+        let e = SvgEngine;
+        let mut out = Vec::new();
+        // The whole contract: no panic, a typed outcome either way.
+        let _ = e.analyze(evil.as_bytes());
+        let _ = e.repair_into(evil.as_bytes(), &mut out);
+    }
 
     #[test]
     fn healthy_svg_passes_through() {

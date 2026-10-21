@@ -104,7 +104,7 @@ jobs:
           # else can delete records there). Exclude the lab letters
           # before seeding: the evidence must measure OUR engine, not
           # the antivirus.
-          Add-MpPreference -ExclusionPath "L:\" -ExclusionPath "W:\" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "L:\","W:\" -ErrorAction SilentlyContinue
           $diskNo = ($new | Select-Object -First 1)
           if ($null -eq $diskNo) { throw "could not identify the lab disk" }
           "DISK_NUMBER=$diskNo" | Add-Content $env:GITHUB_ENV
