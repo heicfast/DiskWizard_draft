@@ -1369,3 +1369,20 @@ accuracy PASS, carve-plan bitmap-guided 94.5%/215 ranges on the
   original (`find_ascii_ci` — the needle is pure ASCII, every match
   boundary is a char boundary) + the exact-class regression test
   (600× İ before the prolog).
+
+### Session 11 — FINAL: everything green
+
+ec6f5a3 (the double-translation fix — the last piece) runs the FULL
+matrix green on a real Windows runner:
+
+  Recovery Lab           success (kept 100% / deleted 99.7% / recycle
+                         100% / path 100% / lost-partition 86.7% /
+                         byte-truth PASS / memory in bounds)
+  CI, Fuzz, MSIX, Core E2E, Windows Integration, Real-Core Tour,
+  Engine Benchmark, UI Screenshots, License E2E, Repair E2E — success.
+
+The double translation: the session-11 block and the session-12 block
+both translated partition-unit extents in the drain — every extent
+shifted by 2× the partition start. Recovery read shifted bytes; the
+lab's byte-truth verified 0/20 on perfect-grade files. One block, one
+place.
