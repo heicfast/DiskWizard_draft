@@ -1111,3 +1111,86 @@ Specification (v1.0)") implemented core-only, top to bottom.
   evaluated and skipped: the lab + benchmark workflows measure the
   REAL engine on REAL media via dw-cli — richer than synthetic-only
   numbers; the codebase's --ignored perf-test convention followed.)
+
+---
+
+## Session 12 (2026-10-21) — the freeze trio: percent scale, completion stealing, drain deadlock
+
+Fresh-context session. Both repos re-cloned; the 3918ca6 CI state
+audited FIRST: Core E2E cancelled at the job timeout with the scan
+process hung 38 minutes past its --max-seconds deadline — the runner
+log preserved the exact failure signature the owner reported
+("progress never above 1%", frozen carve, zombie process).
+
+### The diagnosis (three defects, one CI log)
+
+1. **The percent scale** — `snapshot()` computed
+   `(percent * 100).round() / 100` on a 0..1 FRACTION: 0.9267 became
+   0.93, displayed "0.9%". The whole scan reported 0.0→1.0% max
+   (the run's DONE line would have read "1.0%"). The app's ETA
+   divides (100 − p) by a 0..100-scale rate → the exploding
+   "remaining time". One line, every symptom the owner named.
+2. **Completion stealing (the carve freeze)** — the Windows batch
+   path shared ONE completion port across every concurrent carve
+   worker. `GetQueuedCompletionStatus` pops FIFO with no owner
+   identity: an interleaved harvest popped a FOREIGN packet, matched
+   it against its own slots, and DROPPED it; the victim waited the
+   120 s timeout, issued a `CancelIoEx` that is a no-op on an
+   already-completed read, and spun forever — while its spinning
+   harvest ate every later packet, cascading to all workers. Runner
+   evidence: carve raced to 91.4 % (956288/1046400 sectors) in 3 s,
+   then zero progress for 10 minutes until --max-seconds, then the
+   38-minute zombie.
+3. **Drain-stop deadlock (the zombie)** — all three channel sites
+   (units merger, NTFS walk, carve) stop draining on cancel while a
+   worker may be parked in `send()` on a full bounded channel;
+   `thread::scope` joins only when the sender lands. The
+   cooperative-cancel contract could never complete.
+
+### The fixes
+
+* **Percent**: fraction→0..100 with 2-decimal precision, clamped —
+  `(f * 100).clamp(0,100) * 100).round() / 100`. Regression tests
+  pin the phase bands (quick 2..38, deep 38..95 with the carve's
+  terminal 95, organizing 95..100, done == 100) and the
+  "max ≥ 100" smoking gun.
+* **Batch IO**: the shared port is GONE. Every batch read carries a
+  POOLED manual-reset event with the low bit set (the documented
+  event-only mechanism, same as the single-read path): each caller
+  harvests exactly its own reads — cross-thread completion theft is
+  structurally impossible. `wait_for_slots`: per-slot event waits
+  bounded by IO_WAIT_TIMEOUT_MS, one-shot CancelIoEx on deadline,
+  post-cancel sweep collects the aborts; the loop is total. The
+  settle semantics (short-tail/failed salvage) unchanged. The
+  `concurrent_batch_reads_never_steal_each_others_completions`
+  hammer test: 4 workers × 25 batches × 8 aligned 64 KiB windows on
+  the real OS disk, byte-identity vs sequential, detached workers +
+  channel timeout so a regression FAILS instead of hanging the
+  runner. (The old batch-identity test also moved to AlignedBuf —
+  plain Vecs could silently exercise the sequential fallback.)
+* **Drain-to-disconnect × 3**: after a cancel break, the merger
+  keeps receiving (discarding) until every sender drops — parked
+  senders land, observe the cancel flag, exit, the scope joins.
+  Applied to run_units_parallel, the NTFS walk drain, and
+  carve_ranges.
+* **The CLI watchdog is two-stage now**: cooperative cancel at
+  --max-seconds, then a hard `exit(75)` after 90 s grace with loud
+  WATCHDOG diagnostics — a scan path that wedges past every
+  cooperative checkpoint can never zombie a runner again.
+* **Carve-plan evidence**: ScanReport carries carve_plan_bytes /
+  carve_plan_capacity / carve_free_ranges (additive; resume fills
+  zeros); dw-cli logs "carve-plan: X% of capacity (bitmap-guided, N
+  free ranges | full-extent)" and serializes them — the CI record
+  now shows whether $Bitmap guidance engaged (the core-e2e run's
+  plan covered the FULL 511 MiB volume: sectors_total 1046400 —
+  either free-range merge ≈ everything after the mass delete, or the
+  bitmap read failed; the next run's evidence line will say which).
+
+### Gates
+
+fmt clean; clippy -D warnings clean on linux (dw-core/dw-cli/
+dw-repair/dw-license) AND x86_64-pc-windows-msvc (dw-win/dw-cli,
+all targets); 238 tests green (169 dw-core incl. the 2 new percent
+regressions). dw-win tests cross-compile clean; the hammer +
+identity tests run on the Windows runners (win_api_surface rides
+every push).

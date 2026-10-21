@@ -244,9 +244,9 @@ impl BlockDevice for CachedDevice {
     }
 
     /// The pipelined batch rides the SAME bypass: delegate to the
-    /// parent's batch implementation so the platform IOCP pipeline
-    /// (§5.1 item 3) actually engages for the carve sweep. The
-    /// previous silence here meant the trait's sequential default
+    /// parent's batch implementation so the platform overlapped-events
+    /// pipeline (§5.1 item 3) actually engages for the carve sweep.
+    /// The previous silence here meant the trait's sequential default
     /// ran — queue depth 1 on every media class, the owner's
     /// "very very slow" carve.
     fn read_sectors_sparse_batch(

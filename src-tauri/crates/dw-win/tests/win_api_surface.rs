@@ -57,24 +57,28 @@ fn ioctl_read_returns_real_bytes() {
 
 #[test]
 fn ioctl_batch_read_completes_identically() {
-    // The IOCP batch path: two windows read together must return the
-    // same bytes as two sequential reads (the §5.1 item 3 identity).
-    use dw_core::blockdev::BatchRead;
+    // The event-signaled batch path: two windows read together must
+    // return the same bytes as two sequential reads (the §5.1 item 3
+    // identity). AlignedBuf keeps the buffers on the FAST batch path
+    // (plain Vecs can miss the NO_BUFFERING address alignment and
+    // silently test the sequential fallback instead).
+    use dw_core::blockdev::{AlignedBuf, BatchRead};
     let dev = Arc::new(dw_win::blockdev::RawHandleDevice::open_physical(DISK).unwrap());
+    let align = dev.preferred_read_alignment().max(512);
     let mut a1 = vec![0u8; 8192];
     let mut b1 = vec![0u8; 8192];
-    let mut a2 = vec![0u8; 8192];
-    let mut b2 = vec![0u8; 8192];
+    let mut a2 = AlignedBuf::zeroed(8192, align);
+    let mut b2 = AlignedBuf::zeroed(8192, align);
     dev.read_sectors(2048, &mut a1).expect("seq a");
     dev.read_sectors(8192, &mut b1).expect("seq b");
     let mut batch = vec![
         BatchRead {
             start_lba: 2048,
-            buf: &mut a2,
+            buf: &mut a2[..],
         },
         BatchRead {
             start_lba: 8192,
-            buf: &mut b2,
+            buf: &mut b2[..],
         },
     ];
     let bad = dev
@@ -84,8 +88,8 @@ fn ioctl_batch_read_completes_identically() {
         bad.iter().all(std::vec::Vec::is_empty),
         "no bad ranges on a healthy disk"
     );
-    assert_eq!(a1, a2, "batch ≡ sequential (window A)");
-    assert_eq!(b1, b2, "batch ≡ sequential (window B)");
+    assert_eq!(a1, &a2[..], "batch ≡ sequential (window A)");
+    assert_eq!(b1, &b2[..], "batch ≡ sequential (window B)");
 }
 
 #[test]
@@ -206,4 +210,127 @@ fn thread_priority_raise_round_trips() {
     // The og's compute-worker posture: raising must succeed and not
     // disturb the process (best-effort by contract).
     let _ = dw_win::raise_thread_priority_highest();
+}
+
+/// Session 12 — the concurrent batch hammer: N threads issue
+/// overlapping pipelined batches on ONE shared device handle, exactly
+/// like the carve worker pool does in a real scan.
+///
+/// The regression this pins: the retired shared-completion-port design
+/// let one thread's harvest pop (and DROP) another thread's
+/// completion; the victim then waited the full 120 s timeout, issued a
+/// no-op CancelIoEx and spun forever while eating every later packet —
+/// freezing the carve at 91.4 % on the CI runner with the process
+/// unkillable until the job timeout. With per-read event identity the
+/// cross-pop is structurally impossible; this test FAILS (not hangs)
+/// if that ever regresses — detached workers report through a channel
+/// the main thread bounds with a timeout.
+#[test]
+fn concurrent_batch_reads_never_steal_each_others_completions() {
+    use dw_core::blockdev::{AlignedBuf, BatchRead};
+    use std::sync::mpsc;
+
+    const WORKERS: usize = 4;
+    const BATCHES_PER_WORKER: usize = 25;
+    const WINDOWS_PER_BATCH: usize = 8;
+    const WINDOW_SECTORS: u64 = 128; // 64 KiB windows
+
+    let dev = Arc::new(dw_win::blockdev::RawHandleDevice::open_physical(DISK).unwrap());
+    let align = dev
+        .preferred_read_alignment()
+        .max(dev.sector_size())
+        .max(512) as usize;
+    let ss = u64::from(dev.sector_size());
+    let window_bytes = usize::try_from(WINDOW_SECTORS * ss).unwrap_or(64 * 1024);
+    let max_lba = dev.total_sectors().saturating_sub(WINDOW_SECTORS + 16);
+    assert!(max_lba > 1024, "a disk big enough to hammer");
+
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let barrier = Arc::new(std::sync::Barrier::new(WORKERS));
+    for w in 0..WORKERS {
+        let tx = tx.clone();
+        let dev = Arc::clone(&dev);
+        let barrier = Arc::clone(&barrier);
+        // Detached (not scoped): a deadlock must FAIL this test via
+        // the main thread's timeout — not hang the runner until the
+        // job timeout kills us (the exact failure mode this replaces).
+        std::thread::Builder::new()
+            .name(format!("batch-hammer-{w}"))
+            .spawn(move || {
+                let report = |m: String| {
+                    let _ = tx.send(Err(m));
+                };
+                // Aligned windows → the FAST batch path (the event
+                // pipeline), not the sequential fallback.
+                let mut bufs: Vec<AlignedBuf> = (0..WINDOWS_PER_BATCH)
+                    .map(|_| AlignedBuf::zeroed(window_bytes, u32::try_from(align).unwrap_or(512)))
+                    .collect();
+                // Synchronize the start so the workers genuinely
+                // interleave their submit/harvest windows.
+                barrier.wait();
+                for it in 0..BATCHES_PER_WORKER {
+                    // Worker-staggered, iteration-swept LBAs: heavy
+                    // overlap between workers' address ranges.
+                    let base = 2048 + (w as u64 * 997 + it as u64 * 6151) % 40_000;
+                    let lbas: Vec<u64> = (0..WINDOWS_PER_BATCH)
+                        .map(|i| (base + i as u64 * WINDOW_SECTORS).min(max_lba))
+                        .collect();
+                    // Sequential reference FIRST (its own buffers).
+                    let mut expect: Vec<Vec<u8>> = Vec::with_capacity(WINDOWS_PER_BATCH);
+                    for &lba in &lbas {
+                        let mut r = vec![0u8; window_bytes];
+                        if let Err(e) = dev.read_sectors(lba, &mut r) {
+                            return report(format!("worker {w}: reference read {e}"));
+                        }
+                        expect.push(r);
+                    }
+                    let mut batch: Vec<BatchRead<'_>> = bufs
+                        .iter_mut()
+                        .zip(&lbas)
+                        .map(|(b, &lba)| BatchRead {
+                            start_lba: lba,
+                            buf: &mut b[..],
+                        })
+                        .collect();
+                    let bad = match dev.read_sectors_sparse_batch(&mut batch) {
+                        Ok(b) => b,
+                        Err(e) => return report(format!("worker {w}: batch {e}")),
+                    };
+                    if bad.iter().any(|v| !v.is_empty()) {
+                        return report(format!("worker {w}: bad ranges on a healthy disk"));
+                    }
+                    for (i, e) in expect.iter().enumerate() {
+                        if &bufs[i][..] != e.as_slice() {
+                            return report(format!(
+                                "worker {w} iter {it}: window {i} batch ≢ sequential"
+                            ));
+                        }
+                    }
+                }
+                let _ = tx.send(Ok(()));
+            })
+            .expect("spawn hammer worker");
+    }
+    drop(tx);
+    // Bounded wait: healthy completion is seconds; the bound turns a
+    // regression into a hard FAIL with the diagnosis in the message.
+    let deadline = std::time::Duration::from_secs(180);
+    let mut ok = 0usize;
+    let mut first_err: Option<String> = None;
+    while ok < WORKERS {
+        match rx.recv_timeout(deadline) {
+            Ok(Ok(())) => ok += 1,
+            Ok(Err(m)) => {
+                first_err = Some(m);
+                break;
+            }
+            Err(_) => break, // timeout or all senders gone early
+        }
+    }
+    assert!(
+        ok == WORKERS,
+        "concurrent batch hammer: {ok}/{WORKERS} workers completed{} — the shared-handle \
+         completion identity regressed (a worker's completion was consumed by another)",
+        first_err.map_or_else(String::new, |e| format!(" ({e})"))
+    );
 }

@@ -905,6 +905,21 @@ impl NtfsEngine {
                     last_progress = std::time::Instant::now();
                 }
             }
+            // Session 12 — drain-to-disconnect: a parse worker may be
+            // parked in `send` (channel cap 4096 record batches) at the
+            // moment this drain breaks on cancel; the scope joins only
+            // when that send lands. Keep receiving (discarding) until
+            // every worker drops its sender — without this, a cancel-
+            // time full channel wedged the join forever.
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                loop {
+                    match wrx.recv_timeout(std::time::Duration::from_millis(PROGRESS_TICK_MS)) {
+                        Ok(_) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
         });
         if let Some(e) = drain_err {
             return Err(e);

@@ -82,6 +82,15 @@ pub struct ScanReport {
     pub duration_sec: u64,
     pub stopped: bool,
     pub fs: FsKind,
+    /// Session 12 evidence — the carve coverage plan's total bytes
+    /// (free-cluster-guided on a healthy NTFS, full-extent otherwise).
+    pub carve_plan_bytes: u64,
+    /// The scanned capacity (the plan ratio's denominator).
+    pub carve_plan_capacity: u64,
+    /// Free-cluster ranges the NTFS $Bitmap contributed (0 with a
+    /// nonzero plan = the bitmap was unavailable and the plan fell
+    /// back to full extents — the slower-but-correct path).
+    pub carve_free_ranges: u32,
 }
 
 /// Live observer the app layer installs (event emission seam).
@@ -127,6 +136,11 @@ pub struct ScanController {
     /// stopped-report's label when cancellation lands between the
     /// units' lifetimes.
     last_fs_kind: FsKind,
+    /// Session 12: the carve-plan evidence (reported even on stopped
+    /// scans that reached the carve phase).
+    carve_plan_bytes: u64,
+    carve_plan_capacity: u64,
+    carve_free_ranges: u32,
 }
 
 impl ScanController {
@@ -159,6 +173,9 @@ impl ScanController {
             last_publish: Instant::now(),
             ever_published: false,
             last_fs_kind: FsKind::Raw,
+            carve_plan_bytes: 0,
+            carve_plan_capacity: 0,
+            carve_free_ranges: 0,
         }
     }
 
@@ -171,7 +188,14 @@ impl ScanController {
     fn snapshot(&self, percent: f64) -> Progress {
         Progress {
             phase: self.phase,
-            percent: (percent * 100.0).round() / 100.0,
+            // `percent` arrives as a 0..1 fraction from every call
+            // site (phase bands, carve mapping, the 1.0 done markers);
+            // the wire field is 0..100 with two decimals of precision.
+            // Session 12: the old `(percent * 100).round() / 100`
+            // rounded the FRACTION to two decimals (0.9267 → 0.93) —
+            // the UI bar sat under 1% for the whole scan and the ETA
+            // (which divides 100−p by a 0..100 rate) exploded.
+            percent: ((percent * 100.0).clamp(0.0, 100.0) * 100.0).round() / 100.0,
             files_found: self.files,
             bytes_found: self.bytes,
             sectors_read: self.sectors_read,
@@ -287,7 +311,10 @@ impl ScanController {
         // (non-NTFS units' extents, NTFS units without a usable
         // bitmap, and the unpartitioned/lost gaps) carves fully.
         if !self.ctrl.is_cancelled() {
-            let carve_plan = self.carve_plan(&units);
+            let (carve_plan, plan_stats) = self.carve_plan(&units);
+            self.carve_plan_bytes = plan_stats.plan_bytes;
+            self.carve_plan_capacity = self.dev.capacity_bytes();
+            self.carve_free_ranges = plan_stats.free_ranges;
             let carver = RawCarver::new(Arc::clone(&self.dev) as Arc<dyn BlockDevice>);
             let ctrl = self.ctrl.clone();
             let mut sink = CarveSink {
@@ -344,6 +371,9 @@ impl ScanController {
             duration_sec: self.started.elapsed().as_secs(),
             stopped: false,
             fs: kind,
+            carve_plan_bytes: self.carve_plan_bytes,
+            carve_plan_capacity: self.carve_plan_capacity,
+            carve_free_ranges: self.carve_free_ranges,
         })
     }
 
@@ -480,6 +510,24 @@ impl ScanController {
                     break 'drain;
                 }
             }
+            // Session 12 — drain-to-disconnect: a worker may be parked
+            // in `send` on this bounded channel at the very moment the
+            // merger stopped (the cancel break). The scope below joins
+            // only when every worker returns, and a parked sender never
+            // returns unless its message LANDS — so keep receiving
+            // (discarding) until all senders drop. Without this, a
+            // cancel-time full channel wedged `thread::scope` forever
+            // (the runner's 38-minute zombie process until the job
+            // timeout killed it).
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                loop {
+                    match rx.recv_timeout(std::time::Duration::from_millis(UNIT_POLL_MS)) {
+                        Ok(_) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
         });
         if cancelled_err.is_some() {
             return Err(CoreError::Cancelled);
@@ -526,12 +574,15 @@ impl ScanController {
     /// other structured unit, full extents for UNRECOGNIZED units
     /// (raw/unknown partitions are lost space — everything in them
     /// is carve territory), and the uncovered gaps between units —
-    /// merged, sorted, device-absolute.
-    fn carve_plan(&self, units: &[ScanUnit]) -> Vec<(u64, u64)> {
+    /// merged, sorted, device-absolute. Returns the plan + the
+    /// evidence stats (session 12: the CLI/CI record whether the
+    /// bitmap guidance actually engaged).
+    fn carve_plan(&self, units: &[ScanUnit]) -> (Vec<(u64, u64)>, CarvePlanStats) {
         let cap = self.dev.capacity_bytes();
         let mut covered: Vec<(u64, u64)> = Vec::new();
         let mut plan: Vec<(u64, u64)> = Vec::new();
         let mut any_structured = false;
+        let mut free_ranges: u32 = 0;
         for u in units {
             if matches!(u.fs, FsKind::Raw | FsKind::Unknown) {
                 // Unrecognized unit: its whole extent carves (lost
@@ -551,6 +602,8 @@ impl ScanController {
                 && let Ok(engine) = crate::fs::ntfs::NtfsEngine::new(Arc::clone(&u.dev))
                 && let Some(free) = engine.free_cluster_ranges()
             {
+                free_ranges =
+                    free_ranges.saturating_add(u32::try_from(free.len()).unwrap_or(u32::MAX));
                 for (off, len) in free {
                     let abs = u.start_byte + off;
                     if abs < cap {
@@ -564,7 +617,13 @@ impl ScanController {
         if !any_structured {
             // Nothing structured anywhere: the whole device carves
             // (the original raw-target behavior).
-            return vec![(0, cap)];
+            return (
+                vec![(0, cap)],
+                CarvePlanStats {
+                    plan_bytes: cap,
+                    free_ranges: 0,
+                },
+            );
         }
         // The uncovered gaps: everything outside the STRUCTURED units'
         // extents (unpartitioned space, the tail past the last
@@ -593,7 +652,14 @@ impl ScanController {
                 _ => merged.push((s, l)),
             }
         }
-        merged
+        let plan_bytes = merged.iter().map(|&(_, l)| l).sum();
+        (
+            merged,
+            CarvePlanStats {
+                plan_bytes,
+                free_ranges,
+            },
+        )
     }
 
     fn finish_stopped(
@@ -616,6 +682,9 @@ impl ScanController {
                 duration_sec: self.started.elapsed().as_secs(),
                 stopped: true,
                 fs: fs_kind,
+                carve_plan_bytes: self.carve_plan_bytes,
+                carve_plan_capacity: self.carve_plan_capacity,
+                carve_free_ranges: self.carve_free_ranges,
             },
         )
     }
@@ -634,6 +703,13 @@ const READABILITY_PROBE_CAP: usize = 20_000;
 /// evidence: bytes_found 546,825,304 on a 267 MB volume).
 fn clamp_report_bytes(logical_total: u64, capacity: u64) -> u64 {
     logical_total.min(capacity)
+}
+
+/// Session 12 — the carve-plan evidence (what the CLI/CI record about
+/// coverage guidance).
+struct CarvePlanStats {
+    plan_bytes: u64,
+    free_ranges: u32,
 }
 
 /// Merger→worker message: one unit's entry or progress tick.
@@ -1091,6 +1167,114 @@ mod tests {
         assert_eq!(obs.1.last(), Some(&Phase::Done));
         // The FAT engine found README + the carver may add — assert ≥.
         assert!(tree.totals().0 >= 1);
+    }
+
+    /// Session 12 — the percent-scale regression: `Progress.percent`
+    /// is a 0..100 aggregate (the wire contract the app's ETA divides
+    /// into), fed by 0..1 phase-band fractions. The old snapshot math
+    /// rounded the FRACTION to two decimals (0.9267 → 0.93) — the
+    /// owner's "progress never goes above 1 %" for the whole scan and
+    /// the ETA's (100 − p)/rate explosion on a sub-1 % scale. Every
+    /// phase band must now report in its documented percentage range.
+    #[test]
+    fn progress_percent_lives_on_the_0_to_100_scale_per_phase() {
+        // The NTFS fixture (not FAT): its walk emits per-window
+        // progress, so the QUICK band actually reports — the FAT
+        // engine emits no intermediate ticks (a known gap, not this
+        // regression's subject).
+        let ram = ntfs_volume();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut obs = Recorder(Vec::new(), Vec::new());
+        let (_tree, report) = run_scan(dev, "Test (V:)", &mut obs).expect("scan");
+        assert!(!report.stopped, "the fixture scan completes");
+        assert!(!obs.0.is_empty(), "progress was emitted");
+        // 1. Scale: nothing outside [0, 100] — ever.
+        for p in &obs.0 {
+            assert!(
+                (0.0..=100.0).contains(&p.percent),
+                "percent {} out of range in phase {}",
+                p.percent,
+                p.phase.wire()
+            );
+        }
+        // 2. The DONE snapshot is exactly 100 — not 1.0.
+        let done: Vec<&Progress> = obs.0.iter().filter(|p| p.phase == Phase::Done).collect();
+        assert!(
+            done.iter().any(|p| (p.percent - 100.0).abs() < 0.005),
+            "done reports 100 (got {:?})",
+            done.iter().map(|p| p.percent).collect::<Vec<_>>()
+        );
+        // 3. Phase bands (the RE-Match spec table): quick lives in
+        //    [2, 38], deep-structured + carve in [38, 95], organizing
+        //    in [95, 100]. The carve's final on_progress(total, total)
+        //    must reach 95.0 while still in the deep phase.
+        let max_quick = obs
+            .0
+            .iter()
+            .filter(|p| p.phase == Phase::Quick)
+            .map(|p| p.percent)
+            .fold(0.0_f64, f64::max);
+        let max_deep = obs
+            .0
+            .iter()
+            .filter(|p| p.phase == Phase::Deep)
+            .map(|p| p.percent)
+            .fold(0.0_f64, f64::max);
+        let max_org = obs
+            .0
+            .iter()
+            .filter(|p| p.phase == Phase::Organizing)
+            .map(|p| p.percent)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (2.0..=38.0).contains(&max_quick),
+            "quick band 2..38 (max {max_quick})"
+        );
+        assert!(
+            max_deep >= 95.0,
+            "the carve completes at 95 while phase=deep (max {max_deep})"
+        );
+        assert!(
+            (95.0..=100.0).contains(&max_org),
+            "organizing band 95..100 (max {max_org})"
+        );
+        // 4. The old bug's smoking gun: a fraction-scale percent can
+        //    never exceed 1.0 — the observed maximum must.
+        let overall = obs.0.iter().map(|p| p.percent).fold(0.0_f64, f64::max);
+        assert!(
+            overall >= 100.0,
+            "max percent {overall} — not fraction-scale"
+        );
+    }
+
+    /// Session 12 — the carve's LIVE progress must move within the
+    /// deep band as the sweep advances (68 + 27·frac), so the UI's bar
+    /// and the CLI's percent line track real work instead of freezing
+    /// at the phase floor.
+    #[test]
+    fn carve_progress_maps_into_the_deep_band() {
+        let ram = ntfs_volume();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let mut obs = Recorder(Vec::new(), Vec::new());
+        let _ = run_scan(dev, "Test (V:)", &mut obs).expect("scan");
+        // Carve-relative sector pairs ride the same Progress; during
+        // phase=deep the sectors pair is the SWEEP's own numbers.
+        let deep_with_sectors: Vec<&Progress> = obs
+            .0
+            .iter()
+            .filter(|p| p.phase == Phase::Deep && p.sectors_total > 0)
+            .collect();
+        assert!(!deep_with_sectors.is_empty());
+        for p in &deep_with_sectors {
+            assert!(p.sectors_read <= p.sectors_total, "carve sector math");
+        }
+        // At least one mid-sweep snapshot in the open band (not just
+        // the terminal 95): proves the mapping is continuous through
+        // the sweep, not a single end-of-phase jump.
+        let mid = deep_with_sectors
+            .iter()
+            .any(|p| (68.0..95.0).contains(&p.percent));
+        assert!(mid, "a mid-carve percent lands strictly inside 68..95");
     }
 
     #[test]

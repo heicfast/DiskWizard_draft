@@ -17,6 +17,17 @@ use dw_core::tree::TreeNode;
 use crate::logging::Log;
 use crate::target;
 
+/// Grace period between the cooperative cancel and the hard exit
+/// (seconds). The pipeline unwinds in well under 10 s when healthy
+/// (engine checkpoints fire per window/entry; IO waits are bounded);
+/// 90 s tolerates a slow final readability probe or a deep validator
+/// checkpoint gap without ever approaching a CI job timeout.
+const HARD_STOP_GRACE_S: u64 = 90;
+
+/// The hard-stop exit code (distinct from every cargo/IO failure so
+/// CI evidence can attribute the kill to the watchdog alone).
+const HARD_STOP_EXIT_CODE: i32 = 75;
+
 /// The CLI results envelope — everything `recover` (and CI analysis)
 /// needs: the report, the target spec for re-opening, and the FULL
 /// node set including recovery extents (the UI wire omits them; the
@@ -43,6 +54,13 @@ pub struct CliResults {
     pub phase_timings: Vec<(String, f64)>,
     /// Aggregate read throughput: scanned capacity / wall seconds.
     pub throughput_mbps: f64,
+    /// Session 12 — the carve coverage plan's bytes (0 = never reached
+    /// the carve phase).
+    pub carve_plan_bytes: u64,
+    /// The scanned capacity (the plan ratio's denominator).
+    pub carve_plan_capacity: u64,
+    /// Free-cluster ranges the NTFS $Bitmap contributed.
+    pub carve_free_ranges: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -263,15 +281,36 @@ pub fn cmd(args: &[String]) -> Result<ExitCode, String> {
         t.live_volume
     ));
 
-    // The CI guard: a watchdog cancels the control token after N
-    // seconds (partial results are KEPT — same semantics as Stop).
+    // The CI guard: a TWO-STAGE watchdog (session 12). Stage one
+    // cancels the control token after N seconds — partial results are
+    // KEPT (same semantics as Stop; the pipeline unwinds
+    // cooperatively: engine checkpoints, channel drain-to-disconnect,
+    // bounded IO waits). Stage two is the belt-and-suspenders net: if
+    // the process is STILL alive GRACE seconds later, some path wedged
+    // past every cooperative checkpoint — exit hard with a loud
+    // diagnostic instead of zombie-ing until the CI job timeout kills
+    // us (the observed 38-minute hang). Exit code 75 distinguishes
+    // "watchdog hard-stop" from every other failure in CI evidence.
     let control = ScanControl::new();
     if let Some(secs) = max_seconds {
         let ctrl = control.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(secs));
-            ctrl.cancel();
-        });
+        std::thread::Builder::new()
+            .name("dw-cli-watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(secs));
+                ctrl.cancel();
+                eprintln!(
+                    "WATCHDOG: max-seconds {secs} reached — cooperative cancel issued; \
+                     hard exit in {HARD_STOP_GRACE_S}s if the pipeline does not unwind"
+                );
+                std::thread::sleep(Duration::from_secs(HARD_STOP_GRACE_S));
+                eprintln!(
+                    "WATCHDOG: pipeline failed to unwind within {HARD_STOP_GRACE_S}s of \
+                     cancellation — hard exit (a stuck scan path; report the scan log)."
+                );
+                std::process::exit(HARD_STOP_EXIT_CODE);
+            })
+            .ok();
     }
 
     let started = Instant::now();
@@ -323,6 +362,24 @@ pub fn cmd(args: &[String]) -> Result<ExitCode, String> {
         report.duration_sec,
         report.fs.wire()
     ));
+    // Session 12 — the carve coverage evidence: did the $Bitmap
+    // guidance engage, and how much of the device did the sweep
+    // actually have to read? (A plan ≈ capacity with 0 free ranges on
+    // NTFS = the bitmap was unavailable and the fallback swept
+    // everything — correct but slower; the CI record now shows which.)
+    if report.carve_plan_capacity > 0 {
+        #[allow(clippy::cast_precision_loss)] // percent display
+        let pct = (report.carve_plan_bytes as f64 / report.carve_plan_capacity as f64) * 100.0;
+        let guided = if report.carve_free_ranges > 0 {
+            format!("bitmap-guided, {} free ranges", report.carve_free_ranges)
+        } else {
+            "full-extent (no bitmap guidance)".to_string()
+        };
+        log.info(&format!(
+            "carve-plan: {pct:.1}% of capacity ({} of {} bytes, {})",
+            report.carve_plan_bytes, report.carve_plan_capacity, guided
+        ));
+    }
 
     // Auto-save the .rsf session (the app contract: resume-ready).
     // Fixture-grade times: the wrap window is centuries out.
@@ -392,6 +449,9 @@ pub fn cmd(args: &[String]) -> Result<ExitCode, String> {
         peak_private_bytes: peak_priv,
         phase_timings,
         throughput_mbps,
+        carve_plan_bytes: report.carve_plan_bytes,
+        carve_plan_capacity: report.carve_plan_capacity,
+        carve_free_ranges: report.carve_free_ranges,
     };
     write_results(&results, out.as_deref(), &log)?;
     Ok(ExitCode::SUCCESS)
