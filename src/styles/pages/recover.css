@@ -6,13 +6,17 @@
 
 /* ── Drive cards (2-column reference grid) ───────────────────────────── */
 
+/* The reference 2-column grid. The app's enforced window floor is
+ * 1180px, so the 2-col layout holds across the ENTIRE supported
+ * range (~440px cards at the floor); the 1-col fallback only exists
+ * for narrower debug contexts. */
 .dw-drive-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 1024px) {
   .dw-drive-grid {
     grid-template-columns: 1fr;
   }
