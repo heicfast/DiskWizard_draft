@@ -163,6 +163,11 @@ impl RepairEngine for Mp4Engine {
         }
         let detail = if atoms.is_empty() {
             "MP4 BeyondRepair: no atoms located.".to_string()
+        } else if !has_moov {
+            // The honest verdict: without the index atom the file is
+            // not decodable — the advanced sample-file transplant is
+            // the vendor's path for this class (queued, phase-2 §3).
+            "MP4 BeyondRepair without the sample file: the moov index atom is gone — Advanced Repair (a healthy sample from the same device) is required.".to_string()
         } else if notes.is_empty() {
             "MP4 canonical re-emit: atom tree validated, payloads byte-exact.".to_string()
         } else {
@@ -170,7 +175,9 @@ impl RepairEngine for Mp4Engine {
         };
         let partial = !has_moov || damage.contains(&DamageKind::Truncated);
         RepairOutcome {
-            repaired: !atoms.is_empty(),
+            // The honesty contract: a moov-less tree is NOT a usable
+            // repair — repaired stays false until the transplant.
+            repaired: !atoms.is_empty() && has_moov,
             input_bytes: buf.len() as u64,
             output_bytes: out.len() as u64,
             partial,
@@ -347,8 +354,10 @@ mod tests {
         assert!(r.detail.contains("sample file"));
         let mut out = Vec::new();
         let o = e.repair_into(&mp4, &mut out);
-        assert!(o.repaired);
+        // The honesty contract: no moov = NOT a usable repair.
+        assert!(!o.repaired);
         assert!(o.partial);
+        assert!(o.detail.contains("BeyondRepair"));
     }
 
     #[test]

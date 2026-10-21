@@ -161,8 +161,28 @@ impl RepairEngine for JpegEngine {
             .filter(|s| s.scan)
             .map(|s| s.end.saturating_sub(s.start))
             .sum::<usize>();
-        let repaired = found_sos || scan_bytes > 0 || !segs.is_empty();
-        let detail = if found_soi && found_eoi && damage.is_empty() {
+        // The decodable-skeleton contract: without a frame header
+        // (SOF), the scan (SOS), Huffman (DHT) and quantization
+        // (DQT) tables, the marker stream cannot decode — no
+        // container-level repair exists (the salvage would lie).
+        let found_sof = segs.iter().any(|s| SOF_SET.contains(&s.kind));
+        let found_dqt = segs.iter().any(|s| s.kind == DQT);
+        let found_dht = segs.iter().any(|s| s.kind == DHT);
+        let decodable = found_sof && found_sos && found_dht && found_dqt;
+        let repaired = decodable && (scan_bytes > 0 || !segs.is_empty());
+        let detail = if !decodable {
+            let missing = [
+                (!found_sof).then_some("frame header (SOF)"),
+                (!found_dqt).then_some("quantization tables (DQT)"),
+                (!found_dht).then_some("Huffman tables (DHT)"),
+                (!found_sos).then_some("scan (SOS)"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+            format!("JPEG BeyondRepair: {missing} destroyed — no container-level repair exists.")
+        } else if found_soi && found_eoi && damage.is_empty() {
             "Canonical re-emit: marker chain validated, bytes preserved.".to_string()
         } else {
             let mut notes = Vec::new();
@@ -437,20 +457,38 @@ mod tests {
 
     #[test]
     fn corrupt_marker_is_dropped_and_resynced() {
+        let jpeg = build_jpeg(&[0xAB; 300]);
+        // Insert a corrupt APP0 segment between SOI and DQT: its
+        // length is garbage — the walk must drop it and resync
+        // WITHOUT losing the decodable skeleton (SOF/DQT/DHT/SOS).
+        let mut damaged = vec![0xFF, SOI, 0xFF, 0xE0, 0xFF, 0xFF, 0x11, 0x22];
+        damaged.extend_from_slice(&jpeg[2..]);
+        let e = JpegEngine;
+        let mut out = Vec::new();
+        let o = e.repair_into(&damaged, &mut out);
+        assert!(o.repaired, "{}", o.detail);
+        assert!(out.starts_with(&[0xFF, SOI]));
+        assert!(out.ends_with(&[0xFF, EOI]));
+        // The SOF must still be present (resync recovered it).
+        assert!(out.windows(2).any(|w| w == [0xFF, 0xC0]));
+        let r = e.analyze(&damaged);
+        assert!(r.damage.contains(&DamageKind::BadMarker));
+    }
+
+    #[test]
+    fn destroyed_dqt_is_honestly_beyond_repair() {
         let mut jpeg = build_jpeg(&[0xAB; 300]);
-        // Corrupt the DQT segment's length to garbage.
+        // Corrupt the DQT segment's length to garbage — DQT is
+        // dropped and without quantization tables no container-level
+        // repair exists (the honesty contract).
         jpeg[4] = 0xFF;
         jpeg[5] = 0xFF;
         let e = JpegEngine;
         let mut out = Vec::new();
         let o = e.repair_into(&jpeg, &mut out);
-        assert!(o.repaired);
-        assert!(out.starts_with(&[0xFF, SOI]));
-        assert!(out.ends_with(&[0xFF, EOI]));
-        // The SOF must still be present (resync recovered it).
-        assert!(out.windows(2).any(|w| w == [0xFF, 0xC0]));
-        let r = e.analyze(&jpeg);
-        assert!(r.damage.contains(&DamageKind::BadMarker));
+        assert!(!o.repaired);
+        assert!(o.detail.contains("BeyondRepair"));
+        assert!(o.detail.contains("quantization tables"));
     }
 
     #[test]
@@ -468,7 +506,9 @@ mod tests {
 
     #[test]
     fn marker_count_is_bounded() {
-        // A pathological stream of TEM markers — the walk must bound.
+        // A pathological stream of TEM markers — the walk must bound
+        // AND the verdict must be honest (no SOF/tables/scan = no
+        // decodable skeleton, whatever the marker count).
         let mut v = vec![0xFF, SOI];
         for _ in 0..20_000 {
             v.extend_from_slice(&[0xFF, 0x01]);
@@ -476,7 +516,8 @@ mod tests {
         let e = JpegEngine;
         let mut out = Vec::new();
         let o = e.repair_into(&v, &mut out);
-        assert!(o.repaired);
+        assert!(!o.repaired);
+        assert!(o.detail.contains("BeyondRepair"));
         // 0x400 bound + skeleton.
         assert!(out.len() < 0x400 * 2 + 16);
     }

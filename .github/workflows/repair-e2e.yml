@@ -1,0 +1,96 @@
+name: Repair E2E (corrupt fixtures → engines → real-decoder verification)
+
+# Phase-2 §7: "Windows-runner end-to-end (corrupt-file fixtures →
+# repair → verify bytes decodable)". Real files generated with real
+# encoders (Pillow JPEG/PNG, reportlab PDF, python-docx OOXML, ffmpeg
+# MP4), corrupted in realistic damage classes (truncation, header
+# smash, mid-file corruption, tail/CD destruction), repaired by the
+# RELEASE dw-cli, and verified by REAL DECODERS (Pillow, pypdf,
+# zipfile/python-docx, ffprobe) — the vendor's decode-as-validation
+# posture (libwebp WebPDecode as the WebP check).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/crates/dw-repair/**"
+      - "src-tauri/crates/dw-cli/**"
+      - ".github/workflows/repair-e2e.yml"
+  schedule:
+    - cron: "0 4 * * 0" # weekly deep run
+
+concurrency:
+  group: repair-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  repair-e2e:
+    name: Corrupt → repair → verify (real decoders)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build release dw-cli
+        run: cargo build --release -p dw-cli
+        working-directory: src-tauri
+
+      - name: Install the real encoders/decoders
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install Pillow pypdf python-docx
+          ffmpeg -version | Select-Object -First 1
+
+      - name: Generate REAL files + corrupt them
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "$env:RUNNER_TEMP\repair-e2e"
+          New-Item -ItemType Directory -Force -Path "$root\orig", "$root\corrupt", "$root\fixed" | Out-Null
+          Write-Output "ROOT=$root" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          python .github/scripts/repair_fixtures.py make --orig "$root\orig" --corrupt "$root\corrupt"
+          Get-ChildItem "$root\corrupt" | Format-Table Name, Length
+
+      - name: Analyze every damaged file (the honest verdicts)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "$env:ROOT\corrupt" -File
+          & src-tauri\target\release\dw-cli.exe repair --analyze @($files.FullName) --json --out "$env:ROOT\analyze.json" -v
+          # Every fixture must report damage (the corpus is damaged by construction).
+          python .github/scripts/repair_fixtures.py check-analyze --report "$env:ROOT\analyze.json"
+
+      - name: Repair (the release engines)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "$env:ROOT\corrupt" -File
+          & src-tauri\target\release\dw-cli.exe repair @($files.FullName) --dest "$env:ROOT\fixed" --json --out "$env:ROOT\repair.json" -v
+          Write-Output "exit=$LASTEXITCODE"
+
+      - name: Verify with REAL decoders
+        shell: pwsh
+        run: |
+          python .github/scripts/repair_fixtures.py verify --fixed "$env:ROOT\fixed" --report "$env:ROOT\repair.json" --orig "$env:ROOT\orig"
+
+      - name: Evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-e2e-evidence
+          path: |
+            ${{ env.ROOT }}/analyze.json
+            ${{ env.ROOT }}/repair.json
+          if-no-files-found: warn
+          retention-days: 30

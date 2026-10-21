@@ -43,18 +43,16 @@ fn run_analyze(path: &str) -> Result<Value, String> {
         return Err("FILE_TOO_LARGE. Repair analysis caps at 256 MB.".into());
     }
     let buf = std::fs::read(path).map_err(|e| format!("READ_FAILED. {e}"))?;
-    let report = dw_repair::analyze(&buf).map_err(|e| e.to_string())?;
-    // Serialize with the extension-known format when dispatch missed
-    // the signature (a destroyed header is exactly the damage class
-    // the user is asking about).
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    // The by-name dispatch: signature first, extension fallback (a
+    // destroyed header is exactly the damage class being asked about).
+    let report = dw_repair::analyze_by_name(name, &buf).map_err(|e| e.to_string())?;
     let mut v = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-    if let Some(name) = path.rsplit(['\\', '/']).next() {
-        if let Some(fmt) = dw_repair::format_for_name(name) {
-            v["format"] = json!(fmt);
-            v["family"] = json!(fmt.family());
-        }
+    if let Some(fmt) = dw_repair::format_for_name(name) {
+        v["format"] = json!(fmt);
+        v["family"] = json!(fmt.family());
     }
-    v["fileName"] = json!(path.rsplit(['\\', '/']).next().unwrap_or(path));
+    v["fileName"] = json!(name);
     v["fileSize"] = json!(meta.len());
     Ok(v)
 }
@@ -140,7 +138,7 @@ fn run_repair_one(path: &str, dest: &std::path::Path) -> Result<Value, String> {
     }
     let buf = std::fs::read(path).map_err(|e| format!("READ_FAILED. {e}"))?;
     let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
-    let report = dw_repair::analyze(&buf).map_err(|e| e.to_string())?;
+    let report = dw_repair::analyze_by_name(name, &buf).map_err(|e| e.to_string())?;
     if report.healthy {
         // The honest skip: nothing to do (CHKRepairFileSign's pass).
         return Ok(json!({
@@ -151,7 +149,7 @@ fn run_repair_one(path: &str, dest: &std::path::Path) -> Result<Value, String> {
         }));
     }
     let mut out = Vec::new();
-    let outcome = dw_repair::repair(&buf, &mut out).map_err(|e| e.to_string())?;
+    let outcome = dw_repair::repair_by_name(name, &buf, &mut out).map_err(|e| e.to_string())?;
     let target = unique_dest(dest, name);
     std::fs::write(&target, &out).map_err(|e| format!("WRITE_FAILED. {e}"))?;
     Ok(json!({
@@ -220,14 +218,14 @@ pub fn repair_recovered_tree(root: &std::path::Path) -> (usize, usize) {
                 continue;
             };
             scanned += 1;
-            let Ok(report) = dw_repair::analyze(&buf) else {
+            let Ok(report) = dw_repair::analyze_by_name(name, &buf) else {
                 continue;
             };
             if report.healthy {
                 continue;
             }
             let mut out = Vec::new();
-            if let Ok(outcome) = dw_repair::repair(&buf, &mut out)
+            if let Ok(outcome) = dw_repair::repair_by_name(name, &buf, &mut out)
                 && outcome.repaired
                 && std::fs::write(&p, &out).is_ok()
             {

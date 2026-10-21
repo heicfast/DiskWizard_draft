@@ -79,9 +79,13 @@ pub fn cmd(args: &[String]) -> Result<ExitCode, String> {
                 if outcome.repaired {
                     repaired_count += 1;
                 }
+                // The honest-skip signal: nothing was written when
+                // the analysis said healthy (target empty).
+                let healthy = !outcome.repaired && target.is_empty() && !outcome.partial;
                 results.push(serde_json::json!({
                     "fileName": name,
                     "repaired": outcome.repaired,
+                    "healthy": healthy,
                     "partial": outcome.partial,
                     "inputBytes": outcome.input_bytes,
                     "outputBytes": outcome.output_bytes,
@@ -183,7 +187,8 @@ fn analyze_one(path: &str) -> Result<dw_repair::DamageReport, String> {
         return Err("FILE_TOO_LARGE. Repair analysis caps at 256 MB.".into());
     }
     let buf = std::fs::read(path).map_err(|e| format!("READ_FAILED. {e}"))?;
-    dw_repair::analyze(&buf)
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    dw_repair::analyze_by_name(name, &buf)
 }
 
 fn repair_one(
@@ -195,7 +200,8 @@ fn repair_one(
         return Err("FILE_TOO_LARGE. Repair caps at 256 MB.".into());
     }
     let buf = std::fs::read(path).map_err(|e| format!("READ_FAILED. {e}"))?;
-    let report = dw_repair::analyze(&buf)?;
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    let report = dw_repair::analyze_by_name(name, &buf)?;
     if report.healthy {
         return Ok((
             dw_repair::RepairOutcome {
@@ -203,14 +209,16 @@ fn repair_one(
                 input_bytes: buf.len() as u64,
                 output_bytes: buf.len() as u64,
                 partial: false,
-                detail: "Healthy — nothing to repair (the honest skip).".to_string(),
+                detail: format!(
+                    "Healthy — nothing to repair (the honest skip). {}",
+                    report.detail
+                ),
             },
             String::new(),
         ));
     }
     let mut out = Vec::new();
-    let outcome = dw_repair::repair(&buf, &mut out)?;
-    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    let outcome = dw_repair::repair_by_name(name, &buf, &mut out)?;
     let target = unique_dest(dest, name);
     std::fs::write(&target, out).map_err(|e| format!("WRITE_FAILED. {e}"))?;
     Ok((outcome, target.display().to_string()))

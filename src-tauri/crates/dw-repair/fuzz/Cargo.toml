@@ -1,0 +1,33 @@
+[package]
+name = "dw-repair-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.dw-repair]
+path = ".."
+
+# The fuzz crate is its OWN workspace (detached from the app-crate
+# workspace above) — cargo-fuzz drives it with the nightly sanitizer
+# profile from this directory.
+[workspace]
+
+[[bin]]
+name = "engines"
+path = "fuzz_targets/engines.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "salvage"
+path = "fuzz_targets/salvage.rs"
+test = false
+doc = false
+bench = false

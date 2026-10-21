@@ -140,7 +140,12 @@ impl RepairEngine for PngEngine {
         out.clear();
         let detail;
         let partial;
-        if has_ihdr {
+        // The decodability gate (decode-as-validation, the vendor's
+        // posture): the concatenated IDAT payload must inflate AND
+        // cover the declared geometry. Truncation or mid-IDAT damage
+        // fails it — the honest repair is the height-adjusted prefix.
+        let idat_ok = has_ihdr && idat_coverage_ok(&chunks, buf);
+        if has_ihdr && idat_ok {
             // ---- BasisRepair: re-emit the chunk chain with re-stamped
             // CRCs and re-derived lengths, synthesize IEND when
             // truncated.
@@ -194,17 +199,49 @@ impl RepairEngine for PngEngine {
             let salvaged = inflate_prefix(&payload);
             let recovered = salvaged.len() as u64;
             let dims = width_from_anywhere(buf);
-            let (w, h) = match dims {
-                Some((w, h)) => (w.max(1), h.max(1)),
-                None => (1, 1),
+            // The geometry: width survives from any IHDR fragment;
+            // the height is ADJUSTED to the rows the salvaged prefix
+            // actually covers (the vendor's viewable-prefix model —
+            // a decodable partial image beats an undecodable whole).
+            let (w, declared_h, bpp) = match dims {
+                Some((w, h)) => (w.max(1), h.max(1), 4),
+                None => (1, 1, 4),
             };
+            let stride = 1 + w as usize * bpp;
+            let covered_rows = (salvaged.len() / stride).min(usize::from(u16::MAX)) as u32;
+            let h = covered_rows.clamp(1, declared_h);
+            let usable = (h as usize) * stride;
+            // A short/zero salvage (destroyed stream head) still
+            // yields valid rows — a decodable partial beats nothing.
+            let mut raw: Vec<u8> = if salvaged.len() >= usable {
+                salvaged[..usable].to_vec()
+            } else if salvaged.is_empty() {
+                vec![0u8; stride]
+            } else {
+                let mut v = salvaged.clone();
+                v.resize(usable, 0);
+                v
+            };
+            // Filter-byte normalization: garbage-decoded rows carry
+            // out-of-range filter bytes — decoders reject them. Zero
+            // (filter None) makes every row decodable.
+            for row in raw.chunks_exact_mut(stride) {
+                if row[0] > 4 {
+                    row[0] = 0;
+                }
+            }
             out.extend_from_slice(&SIG);
             emit_chunk(out, *b"IHDR", &build_ihdr(w, h));
-            emit_chunk(out, *b"IDAT", &redeflate(&payload));
+            emit_chunk(out, *b"IDAT", &deflate_raw(&raw));
             out.extend_from_slice(&IEND_LITERAL);
-            partial = recovered < total;
+            partial = recovered < total || h < declared_h;
+            let height_note = if h < declared_h {
+                format!(" (geometry adjusted to {h}/{declared_h} rows)")
+            } else {
+                String::new()
+            };
             detail = format!(
-                "PNG SampleRepair: header synthesized around the salvaged IDAT stream — {}",
+                "PNG SampleRepair: viewable prefix rebuilt from the salvaged IDAT stream{height_note} — {}",
                 salvage_detail("zlib", recovered, total)
             );
         } else {
@@ -362,14 +399,104 @@ fn inflate_prefix(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Re-inflate then re-deflate: a canonical clean zlib stream around
-/// whatever payload decodes (the sample tier's stream rebuild).
-fn redeflate(data: &[u8]) -> Vec<u8> {
+/// The decodability gate: the concatenated IDAT payload must inflate
+/// cleanly AND cover the IHDR-declared geometry (filter byte + row
+/// per height). Truncation and mid-stream corruption fail here.
+fn idat_coverage_ok(chunks: &[Chunk], buf: &[u8]) -> bool {
+    let Some(ihdr) = chunks.iter().find(|c| c.kind == *b"IHDR") else {
+        return false;
+    };
+    let start = ihdr.start + 8;
+    let end = (start + ihdr.stored_len as usize).min(buf.len());
+    if start + 13 > end {
+        return false;
+    }
+    let w = u32::from_be_bytes([buf[start], buf[start + 1], buf[start + 2], buf[start + 3]]);
+    let h = u32::from_be_bytes([
+        buf[start + 4],
+        buf[start + 5],
+        buf[start + 6],
+        buf[start + 7],
+    ]);
+    let depth = buf[start + 8];
+    let color = buf[start + 9];
+    let Some(bpp) = png_bpp(depth, color) else {
+        return false;
+    };
+    let mut payload = Vec::new();
+    for c in chunks {
+        if c.kind == *b"IDAT" {
+            let s = c.start + 8;
+            let e = (s + c.stored_len as usize).min(buf.len());
+            if s < e {
+                payload.extend_from_slice(&buf[s..e]);
+            }
+        }
+    }
+    // STRICT inflation: a mid-stream/adler32 error means the stream
+    // is broken — the honest repair is the salvage, not a re-stamp.
+    let mut raw = Vec::new();
+    use std::io::Read;
+    if flate2::read::ZlibDecoder::new(&payload[..])
+        .read_to_end(&mut raw)
+        .is_err()
+    {
+        return false;
+    }
+    let need = (h as u64) * (1 + w as u64 * bpp as u64);
+    if (raw.len() as u64) < need {
+        return false;
+    }
+    // Filter-byte validity: every row's leading filter byte must be
+    // 0..=4 — garbage-decoded rows (mid-IDAT corruption that still
+    // inflates) fail here and route to the sanitizing salvage.
+    let stride = 1 + w as usize * bpp as usize;
+    for row in raw.chunks_exact(stride).take(h as usize) {
+        if row[0] > 4 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Bytes per pixel from IHDR depth/color-type.
+fn png_bpp(depth: u8, color: u8) -> Option<u8> {
+    Some(match color {
+        0 => match depth {
+            1 => 1,
+            2 => 1,
+            4 => 1,
+            8 => 1,
+            16 => 2,
+            _ => return None,
+        },
+        2 => match depth {
+            8 => 3,
+            16 => 6,
+            _ => return None,
+        },
+        3 => 1,
+        4 => match depth {
+            8 => 2,
+            16 => 4,
+            _ => return None,
+        },
+        6 => match depth {
+            8 => 4,
+            16 => 8,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Zlib-wrapped deflate (PNG IDAT requires the zlib stream framing —
+/// CMF/FLG header + adler32 trailer).
+fn deflate_raw(data: &[u8]) -> Vec<u8> {
     use flate2::{Compression, write::ZlibEncoder};
     use std::io::Write;
-    let raw = inflate_prefix(data);
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    let _ = enc.write_all(&raw);
+    let _ = enc.write_all(data);
     enc.finish().unwrap_or_default()
 }
 

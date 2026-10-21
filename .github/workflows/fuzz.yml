@@ -27,7 +27,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [carve, ntfs, fat, exfat, ext, hfsplus, refs, partition, repair, scan_pipeline]
+        include:
+          - { dir: src-tauri/crates/dw-core/fuzz, target: carve }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: ntfs }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: fat }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: exfat }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: ext }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: hfsplus }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: refs }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: partition }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: repair }
+          - { dir: src-tauri/crates/dw-core/fuzz, target: scan_pipeline }
+          - { dir: src-tauri/crates/dw-repair/fuzz, target: engines }
+          - { dir: src-tauri/crates/dw-repair/fuzz, target: salvage }
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +49,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri/crates/dw-core/fuzz
+          workspaces: ${{ matrix.dir }}
 
       - name: Install cargo-fuzz (latest)
         run: cargo install cargo-fuzz --locked
@@ -46,9 +58,11 @@ jobs:
         run: |
           secs="${{ github.event.inputs.seconds }}"
           if [ -z "$secs" ]; then secs=90; fi
-          cargo fuzz run ${{ matrix.target }} -- -max_total_time="$secs" -rss_limit_mb=4096 -timeout=10 -max_len=1048576 -dict=dw.dict
+          DICT=""
+          if [ -f dw.dict ]; then DICT="-dict=dw.dict"; fi
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time="$secs" -rss_limit_mb=4096 -timeout=10 -max_len=1048576 $DICT
         shell: bash
-        working-directory: src-tauri/crates/dw-core/fuzz
+        working-directory: ${{ matrix.dir }}
         env:
           RUSTUP_TOOLCHAIN: nightly
 
@@ -57,5 +71,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: crash-${{ matrix.target }}
-          path: src-tauri/crates/dw-core/fuzz/artifacts
+          path: ${{ matrix.dir }}/artifacts
           if-no-files-found: ignore

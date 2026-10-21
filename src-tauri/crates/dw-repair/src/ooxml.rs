@@ -75,6 +75,35 @@ impl RepairEngine for OoxmlEngine {
         if !cd_survives {
             damage.push(DamageKind::BrokenIndex);
         }
+        // EOCD consistency: the archive must END with a sane EOCD
+        // whose entry count matches the parsed central directory —
+        // the tail-destroy damage class (7z next-header analog).
+        match eocd_count(buf) {
+            Some((want, eocd_at)) => {
+                let have = cd_entry_count(buf);
+                if have != want {
+                    damage.push(DamageKind::BrokenIndex);
+                }
+                let _ = eocd_at;
+            }
+            None => damage.push(DamageKind::Truncated),
+        }
+        // The per-part CRC audit (the mid-corruption damage class the
+        // EOCD check cannot see): inflate each stored part, compare
+        // against the recorded CRC32 — zipfile.testzip parity.
+        let mut crc_bad = 0usize;
+        for p in &parts {
+            if p.method == 8
+                && p.crc32 != 0
+                && (!inflate_part(&p.data).is_empty() || p.uncompressed > 0)
+                && crc32fast::hash(&inflate_part(&p.data)) != p.crc32
+            {
+                crc_bad += 1;
+            }
+        }
+        if crc_bad > 0 {
+            damage.push(DamageKind::ChecksumBad);
+        }
         if !has_manifest {
             damage.push(DamageKind::MissingHeader);
         }
@@ -121,6 +150,26 @@ impl RepairEngine for OoxmlEngine {
 
         // The re-derived manifest (§2.2): Default entries by extension
         // + Override entries for the known part registry.
+        // The mid-corruption salvage: a part whose CRC fails gets its
+        // decodable prefix re-deflated (the honest "repaired prefix").
+        let mut salvaged_parts = 0usize;
+        let mut partial_any = false;
+        let mut parts = parts;
+        for p in &mut parts {
+            if p.method == 8 && p.crc32 != 0 {
+                let raw = inflate_part(&p.data);
+                if crc32fast::hash(&raw) != p.crc32 {
+                    let salvaged_len = raw.len() as u32;
+                    p.data = deflate_raw(&raw);
+                    p.crc32 = crc32fast::hash(&raw);
+                    p.uncompressed = salvaged_len;
+                    salvaged_parts += 1;
+                    if (salvaged_len as u64) < p.uncompressed as u64 {
+                        partial_any = true;
+                    }
+                }
+            }
+        }
         let manifest = synthesize_manifest(&parts);
 
         // Rebuild order: [Content_Types].xml first (the OPC
@@ -194,6 +243,12 @@ impl RepairEngine for OoxmlEngine {
 
         let detail = if parts.is_empty() {
             "OOXML BeyondRepair: no parts recoverable.".to_string()
+        } else if salvaged_parts > 0 {
+            format!(
+                "OOXML package rebuilt: {} parts preserved byte-exact, {} part(s) salvage-re-deflated from their decodable prefixes, central directory + manifest re-derived.",
+                names.len().saturating_sub(salvaged_parts),
+                salvaged_parts
+            )
         } else {
             format!(
                 "OOXML package rebuilt: {} parts preserved byte-exact, central directory + manifest re-derived.",
@@ -204,10 +259,71 @@ impl RepairEngine for OoxmlEngine {
             repaired: !names.is_empty(),
             input_bytes: buf.len() as u64,
             output_bytes: out.len() as u64,
-            partial: parts.is_empty(),
+            partial: parts.is_empty() || partial_any,
             detail,
         }
     }
+}
+
+/// Inflate a raw DEFLATE member (the ZIP method-8 payload).
+fn inflate_part(data: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let _ = flate2::read::DeflateDecoder::new(data).read_to_end(&mut out);
+    out
+}
+
+/// Re-deflate to a raw DEFLATE member.
+fn deflate_raw(data: &[u8]) -> Vec<u8> {
+    use flate2::{Compression, write::DeflateEncoder};
+    use std::io::Write;
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+    let _ = enc.write_all(data);
+    enc.finish().unwrap_or_default()
+}
+
+/// Parse the EOCD near the tail: (entry count, offset). None when the
+/// archive has no sane EOCD (the tail-destroy class).
+fn eocd_count(buf: &[u8]) -> Option<(u16, usize)> {
+    // The EOCD parks within the last 65 KiB + 22 bytes (the same
+    // parking zone the carver's ZIP analyser scans).
+    let window = buf.len().saturating_sub(66_000);
+    let mut best: Option<(u16, usize)> = None;
+    let mut i = window;
+    while let Some(p) = memmem::find(&buf[i..], &EOCD_MAGIC) {
+        let abs = i + p;
+        if abs + 22 <= buf.len() {
+            let count = u16::from_le_bytes([buf[abs + 10], buf[abs + 11]]);
+            let cd_size =
+                u32::from_le_bytes([buf[abs + 12], buf[abs + 13], buf[abs + 14], buf[abs + 15]]);
+            let cd_off =
+                u32::from_le_bytes([buf[abs + 16], buf[abs + 17], buf[abs + 18], buf[abs + 19]])
+                    as usize;
+            // Sanity: the CD must sit inside the file, before the EOCD.
+            if cd_off + cd_size as usize <= abs {
+                best = Some((count, abs));
+            }
+        }
+        i = abs + 4;
+    }
+    best
+}
+
+/// Count parseable central-directory entries.
+fn cd_entry_count(buf: &[u8]) -> u16 {
+    let mut n = 0u16;
+    let mut i = 0usize;
+    while let Some(p) = memmem::find(&buf[i..], &CDE_MAGIC) {
+        let abs = i + p;
+        if parse_cde(buf, abs).is_some() {
+            n = n.saturating_add(1);
+        }
+        i = abs + 4;
+        if i >= buf.len() {
+            break;
+        }
+    }
+    n
 }
 
 /// Recover the part inventory: central-directory-first (the truth),
@@ -512,15 +628,17 @@ mod tests {
             central.extend_from_slice(name.as_bytes());
             offset = v.len() as u32;
         }
+        let body_len = v.len();
+        let cd_offset = (body_len - central.len()) as u32; // == body_len
         v.extend_from_slice(&central);
         v.extend_from_slice(&EOCD_MAGIC);
-        v.extend_from_slice(&0u16.to_le_bytes());
-        v.extend_from_slice(&0u16.to_le_bytes());
-        v.extend_from_slice(&2u16.to_le_bytes());
-        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes()); // disk
+        v.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        v.extend_from_slice(&2u16.to_le_bytes()); // entries this disk
+        v.extend_from_slice(&2u16.to_le_bytes()); // total entries
         v.extend_from_slice(&(central.len() as u32).to_le_bytes());
-        v.extend_from_slice(&((v.len() - central.len()) as u32).to_le_bytes());
-        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&cd_offset.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes()); // comment len
         v
     }
 
@@ -588,6 +706,41 @@ mod tests {
         assert!(
             text.contains("wordprocessingml.document.main+xml"),
             "override missing: {text}"
+        );
+    }
+
+    #[test]
+    fn mid_corrupted_part_is_detected_and_salvaged() {
+        let mut pkg = build_docx();
+        // Corrupt 4 bytes inside the DEFLATED document.xml payload
+        // (the mid-corruption class — the CRC catches what the
+        // container walk cannot see).
+        let doc_at = memmem::find(
+            &pkg,
+            &deflate_bytes(b"<w:document xmlns:w=\"ns\"><w:body><w:p/></w:body></w:document>"),
+        )
+        .expect("the deflated document payload must be locatable");
+        for b in &mut pkg[doc_at + 10..doc_at + 14] {
+            *b ^= 0xFF;
+        }
+        let e = OoxmlEngine;
+        let r = e.analyze(&pkg);
+        assert!(
+            r.damage.contains(&DamageKind::ChecksumBad),
+            "CRC audit must catch mid-stream corruption: {}",
+            r.detail
+        );
+        let mut out = Vec::new();
+        let o = e.repair_into(&pkg, &mut out);
+        assert!(o.repaired);
+        assert!(o.detail.contains("salvage"));
+        // The rebuilt package passes its own analysis (CRCs re-stamped
+        // against the salvaged content).
+        let r2 = e.analyze(&out);
+        assert!(
+            !r2.damage.contains(&DamageKind::ChecksumBad),
+            "salvage re-stamps: {}",
+            r2.detail
         );
     }
 

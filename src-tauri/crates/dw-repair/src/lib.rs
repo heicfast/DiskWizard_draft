@@ -193,6 +193,76 @@ pub fn analyze(buf: &[u8]) -> Result<DamageReport, String> {
     Ok(engine.analyze(buf))
 }
 
+/// The by-name dispatch (the destroyed-header damage class): signature
+/// first, then the extension-known engine — a smashed head is exactly
+/// the damage the user is asking about, and the name still knows the
+/// format (the CHKRepairFileSign + FileFilter.xml path).
+///
+/// # Errors
+/// String error when neither signature nor extension resolves.
+pub fn analyze_by_name(name: &str, buf: &[u8]) -> Result<DamageReport, String> {
+    let engine = engine_for(buf).or_else(|| format_for_name(name).and_then(engine_for_format));
+    let Some(engine) = engine else {
+        return Err(format!(
+            "UNSUPPORTED_FORMAT. No engine claims this signature or the `{}` extension.",
+            name.rsplit('.').next().unwrap_or(name)
+        ));
+    };
+    let mut r = engine.analyze(buf);
+    if engine_for(buf).is_none() {
+        // The dispatch used the name: the report's format stays the
+        // name-known one (the honest "signature unreadable" note).
+        r.detail = format!(
+            "Signature unreadable — dispatched by extension. {}",
+            r.detail
+        );
+    }
+    Ok(r)
+}
+
+/// Repair through the by-name dispatch.
+///
+/// # Errors
+/// String error when neither signature nor extension resolves.
+pub fn repair_by_name(name: &str, buf: &[u8], out: &mut Vec<u8>) -> Result<RepairOutcome, String> {
+    let engine = engine_for(buf).or_else(|| format_for_name(name).and_then(engine_for_format));
+    let Some(engine) = engine else {
+        return Err(format!(
+            "UNSUPPORTED_FORMAT. No engine claims this signature or the `{}` extension.",
+            name.rsplit('.').next().unwrap_or(name)
+        ));
+    };
+    out.clear();
+    Ok(engine.repair_into(buf, out))
+}
+
+/// The engine instance for a known format.
+#[must_use]
+pub fn engine_for_format(fmt: Format) -> Option<&'static dyn RepairEngine> {
+    const JPEG: jpeg::JpegEngine = jpeg::JpegEngine;
+    const PNG: png::PngEngine = png::PngEngine;
+    const GIF: gif::GifEngine = gif::GifEngine;
+    const BMP: bmp::BmpEngine = bmp::BmpEngine;
+    const TIFF: tiff::TiffEngine = tiff::TiffEngine;
+    const WEBP: webp::WebpEngine = webp::WebpEngine;
+    const SVG: svg::SvgEngine = svg::SvgEngine;
+    const PDF: pdf::PdfEngine = pdf::PdfEngine;
+    const OOXML: ooxml::OoxmlEngine = ooxml::OoxmlEngine;
+    const MP4: mp4::Mp4Engine = mp4::Mp4Engine;
+    Some(match fmt {
+        Format::Jpeg => &JPEG,
+        Format::Png => &PNG,
+        Format::Gif => &GIF,
+        Format::Bmp => &BMP,
+        Format::Tiff => &TIFF,
+        Format::Webp => &WEBP,
+        Format::Svg => &SVG,
+        Format::Pdf => &PDF,
+        Format::Ooxml => &OOXML,
+        Format::Mp4 => &MP4,
+    })
+}
+
 /// The engine registry — signature dispatch in vendor priority order
 /// (photo first, then documents, then video — the FileRepairHomePage
 /// wizard ordering; MP4 last because ISO-BMFF magic is the loosest).

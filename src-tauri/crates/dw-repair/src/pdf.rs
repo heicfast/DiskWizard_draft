@@ -159,13 +159,56 @@ impl RepairEngine for PdfEngine {
 
         // The /Root resolution (§1.2): the trailer's ref when it
         // matches a discovered object, else the catalog scan (an
-        // object whose body carries /Type /Catalog), else the first
-        // object — a truncated trailer still yields a usable pointer.
+        // object whose body carries /Type /Catalog). When the catalog
+        // itself is destroyed (the head-smash class), SYNTHESIZE one
+        // around a surviving /Pages object — the vendor's fresh-shell
+        // model (EuOfficeRepairWin32's package-shell synthesis is the
+        // OOXML sibling of this move).
         let root = facts
             .root_ref
             .filter(|r| entries.iter().any(|(n, _)| n == r))
-            .or_else(|| catalog_scan(buf, &objs, &entries))
-            .or_else(|| entries.first().map(|(n, _)| *n));
+            .or_else(|| catalog_scan(buf, &objs, &entries));
+        let mut synthesized_catalog: Option<u64> = None;
+        let root = if let Some(r) = root {
+            Some(r)
+        } else {
+            let next_num = entries.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+            if let Some(p) = pages_scan(buf, &objs, &entries) {
+                // A /Pages object survived: the catalog wraps it.
+                let cat =
+                    format!("{next_num} 0 obj\n<< /Type /Catalog /Pages {p} 0 R >>\nendobj\n");
+                entries.push((next_num, out.len() as u64));
+                out.extend_from_slice(cat.as_bytes());
+                synthesized_catalog = Some(next_num);
+                Some(next_num)
+            } else {
+                // No /Pages either: synthesize BOTH the catalog and a
+                // page tree around the surviving /Page objects (the
+                // fresh-shell model — the pages keep their content
+                // streams).
+                let kids = page_objects(buf, &objs, &entries);
+                if kids.is_empty() {
+                    // Nothing structural survives — the honest verdict.
+                    None
+                } else {
+                    let count = kids.len();
+                    let kids_list = kids
+                        .iter()
+                        .map(|k| format!("{k} 0 R"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let pages_obj = next_num + 1;
+                    let cat = format!(
+                        "{next_num} 0 obj\n<< /Type /Catalog /Pages {pages_obj} 0 R >>\nendobj\n{pages_obj} 0 obj\n<< /Type /Pages /Kids [{kids_list}] /Count {count} >>\nendobj\n"
+                    );
+                    entries.push((next_num, out.len() as u64));
+                    out.extend_from_slice(cat.as_bytes());
+                    entries.push((pages_obj, (out.len() as u64).saturating_sub(1)));
+                    synthesized_catalog = Some(next_num);
+                    Some(next_num)
+                }
+            }
+        };
 
         // The fresh classic xref — canonical strings, byte-exact.
         let xref_at = out.len() as u64;
@@ -191,6 +234,7 @@ impl RepairEngine for PdfEngine {
             .size
             .unwrap_or_else(|| entries.iter().map(|(n, _)| *n).max().unwrap_or(0) + 1);
         let size = size.max(entries.iter().map(|(n, _)| *n + 1).max().unwrap_or(1));
+        let _ = &synthesized_catalog;
         out.extend_from_slice(b"trailer\n<< ");
         out.extend_from_slice(format!("/Size {size} ").as_bytes());
         match root {
@@ -206,21 +250,26 @@ impl RepairEngine for PdfEngine {
         out.extend_from_slice(b">>\n");
         out.extend_from_slice(format!("startxref\n{xref_at}\n%%EOF").as_bytes());
 
-        let repaired = !entries.is_empty();
+        let repaired = !entries.is_empty() && root.is_some();
+        let detail = if root.is_none() {
+            "PDF BeyondRepair: no Catalog, Pages or Page object survives — nothing to build a document around.".to_string()
+        } else {
+            format!(
+                "PDF xref re-synthesized: {} objects re-indexed byte-exact{}.",
+                entries.len(),
+                if synthesized_catalog.is_some() {
+                    ", /Root synthesized around the survivors"
+                } else {
+                    ", /Root resolved"
+                }
+            )
+        };
         RepairOutcome {
             repaired,
             input_bytes: buf.len() as u64,
             output_bytes: out.len() as u64,
             partial: false,
-            detail: format!(
-                "PDF xref re-synthesized: {} objects re-indexed byte-exact{}.",
-                entries.len(),
-                if root.is_some() {
-                    ", /Root resolved"
-                } else {
-                    " (no /Root — first-object fallback)"
-                }
-            ),
+            detail,
         }
     }
 }
@@ -372,6 +421,63 @@ fn catalog_scan(buf: &[u8], objs: &[PdfObject], entries: &[(u64, u64)]) -> Optio
         }
     }
     None
+}
+
+/// Find a discovered object whose body declares `/Type /Pages` (the
+/// catalog-synthesis anchor).
+fn pages_scan(buf: &[u8], objs: &[PdfObject], entries: &[(u64, u64)]) -> Option<u64> {
+    for obj in objs {
+        let start = obj.src_start.min(buf.len());
+        let end = obj.src_end.min(buf.len());
+        if start < end {
+            let body = &buf[start..end];
+            if memmem::find(body, b"/Type").is_some_and(|t| {
+                let after = trim_leading_ws(&body[(t + 5).min(body.len())..]);
+                if let Some(name) = after.strip_prefix(b"/") {
+                    let name_end = name
+                        .iter()
+                        .position(|b| !b.is_ascii_alphanumeric())
+                        .unwrap_or(name.len());
+                    &name[..name_end] == b"Pages"
+                } else {
+                    false
+                }
+            }) && entries.iter().any(|(n, _)| *n == obj.num)
+            {
+                return Some(obj.num);
+            }
+        }
+    }
+    None
+}
+
+/// Find every discovered object whose body declares `/Type /Page`
+/// (the page-tree synthesis anchors).
+fn page_objects(buf: &[u8], objs: &[PdfObject], entries: &[(u64, u64)]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for obj in objs {
+        let start = obj.src_start.min(buf.len());
+        let end = obj.src_end.min(buf.len());
+        if start < end {
+            let body = &buf[start..end];
+            if memmem::find(body, b"/Type").is_some_and(|t| {
+                let after = trim_leading_ws(&body[(t + 5).min(body.len())..]);
+                if let Some(name) = after.strip_prefix(b"/") {
+                    let name_end = name
+                        .iter()
+                        .position(|b| !b.is_ascii_alphanumeric())
+                        .unwrap_or(name.len());
+                    &name[..name_end] == b"Page"
+                } else {
+                    false
+                }
+            }) && entries.iter().any(|(n, _)| *n == obj.num)
+            {
+                out.push(obj.num);
+            }
+        }
+    }
+    out
 }
 
 /// Parse `%%PDF-x.y` at the head (or within the first KiB).
