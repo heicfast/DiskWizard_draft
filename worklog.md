@@ -874,3 +874,105 @@ dw-cli + their tests locally (the app crate still rides CI — aws-lc-sys
 blocks the cross-check; a ring-provider swap is queued as follow-up).
 TypeScript 7; Cargo.lock refreshed; `docs/dependencies.md` update
 pending with the next docs pass.
+
+## Session 10 (2026-10-21) — Phase-2 file repair ships + the M2 engine gaps close
+
+The session opened with full context recovery (fresh environment):
+both repos re-cloned, the 9-workflow green state on 3511a5a verified,
+the worklog + gap registers re-read, and the repair research corpus
+(deepening-batch2, image-repair format-grammar/state-machines/
+gif-bmp-svg-tiff-walks, repair-architecture, 06-repair-chain, 7z,
+x3f) read line-by-line before any code.
+
+### The dw-repair crate (phase-2 §1-5, delivery steps 1-5)
+
+Ten grammar engines, in-process Rust (no exe spawning — phase-2 §5):
+
+- **The contract**: RepairEngine = the IImageInfo 5-slot virtual
+  (Drop + check_magic + analyze + factory + repair_into);
+  DamageReport with exact verdicts; RepairTier::Basis/Sample.
+- **JPEG** (CJpegInfo): marker-grammar walk with resync, corrupt-
+  marker drop, synthesized EOI, the 0x400 marker bound + 0x7FFF
+  length clamps, the FFD8/FFD9 skeleton. The decodable-skeleton
+  honesty: no SOF+DQT+DHT+SOS → BeyondRepair.
+- **PNG** (CPngInfo): ScanCriticalChunks as content-search, CRC
+  re-stamping, length re-derivation, IEND literal synthesis, and
+  the height-adjusted viewable-prefix salvage (strict-inflate +
+  geometry + filter-byte-validity gate routes damage to it).
+- **PDF** (EuPDFRepairFile): whole-body N M obj scan, byte-exact
+  canonical xref strings, /Root cascade (trailer → catalog scan →
+  synthesize Catalog around /Pages → synthesize Catalog+Pages/Kids
+  around /Page objects), honest BeyondRepair when nothing
+  structural survives.
+- **OOXML**: the OPC rebuild — CD-truth inventory, LFH fallback,
+  [Content_Types].xml re-derivation (byte-exact Default/Override
+  templates + the part registry), the per-part CRC audit
+  (zipfile.testzip parity) + salvage re-deflate of decodable
+  prefixes.
+- **MP4/MOV**: the weighted atom grammar (13 4CCs), two-scan,
+  successor-anchored extent normalization, honest no-moov
+  BeyondRepair (the sample transplant is the vendor's only path).
+- **GIF/BMP/TIFF/WebP/SVG** per the walks artifact (GCT-aware
+  header + LZW-min-code skip; the 12/40/108/124 DIB taxonomy +
+  palette arithmetic + offBits recompute; endian arbitration by
+  IFD vote + tail backward scan; RIFF rebuild; envelope injection).
+
+**App layer**: repair_analyze_file + repair_files (license-gated,
+destination-only, per-file progress events, healthy files honestly
+skipped); repair-during-recovery wired (the enable-file-repair
+toggle walks the recovered copies — repairedFiles counts real
+repairs in recover-done, was hardcoded 0); the by-name dispatch
+(signature first, extension fallback — the destroyed-header class).
+**dw-cli**: the repair subcommand (--dest batch + --analyze, JSON +
+exit codes for CI gates).
+
+### The decode-as-validation loop (the local hardening pass)
+
+The fixture harness (Pillow JPEG/PNG, a raw multi-object PDF
+writer, python-docx, ffmpeg MP4 — REAL encoders) + four damage
+classes (trunc60/headsmash/midcorrupt/taildestroy) + REAL decoders
+as the gates (Pillow/pypdf/zipfile/ffprobe) caught five engine
+defects in one pass — the zlib-wrapper bug, the PNG height/
+filter-byte gap, the JPEG missing-skeleton lie, the PDF /Root
+fallback pointing at non-catalogs, the MP4 moov-less 'repaired'
+lie. All fixed; 20/20 local checks pass. The repair-e2e workflow
+runs the same harness on windows runners (ffmpeg resolve-or-choco).
+
+### The M2 engine gaps close
+
+1. **$ATTRIBUTE_LIST forking**: the walk parses the 0x20 entry list,
+   STASHES extension records (base_ref != 0), DEFERS forked bases to
+   a post-walk merge (names dedup, freshest times, same-name streams
+   concatenate extents). Heavily-fragmented files no longer vanish.
+2. **Hole-aware extents**: the HOLE_EXTENT_OFFSET sentinel — sparse
+   runs emit holes that zero-fill (post-gap data keeps its TRUE file
+   offset); implausible mid-list runs fail the whole runlist instead
+   of silently shifting offsets; QA-4 + grading guards.
+
+### The fuzz + workflow catches
+
+The new dw-repair fuzz crate (engines + salvage) caught a JPEG
+trailing-0xFF bounds panic and a PNG extent underflow on its FIRST
+CI run. The fuzz.yml restructure also fixed the pre-existing
+'branches: ain]' corruption that had silently filtered the fuzz
+push trigger. The repair-e2e's first run caught ffmpeg missing from
+pwsh's PATH on windows-2025 (resolve-or-choco fix).
+
+### The ring-provider follow-up: CLOSED with evidence
+
+reqwest 0.13.5's `rustls` feature hardwires aws-lc-rs (feature-edge
+traced: rustls → __rustls-aws-lc-rs → hyper-rustls/aws-lc-rs); the
+ring swap needs rustls-no-provider + a runtime install — but BOTH
+providers need an MSVC-compatible C toolchain for local
+linux→msvc cross-checks of the app crate (no clang-cl/nasm on this
+box, no root). The app crate stays CI-verified; the swap is
+documented as evaluation-complete.
+
+### State at session pause
+
+164 dw-core + 41 dw-repair tests; fmt + clippy -D warnings clean
+everywhere. Pushes: 48ffbd0 (crate), ff3e77d (wiring + CLI),
+d306f07 (hardening, artifacts untracked in 88ae319), 97deaff
+(M2 #1 + fuzz fixes), 837d322/933f946 (M2 #2 + nits). CI green on
+88ae319: CI, Core E2E, License E2E, Engine Benchmark; the repair
+e2e + fuzz re-run on the fix pushes.
