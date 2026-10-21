@@ -1421,3 +1421,24 @@ Work Log:
 
 Stage Summary:
 - All pages reference-matched and VLM-validated (multi-crop loop); push to origin
+
+---
+Task ID: uiux-overhaul-s12 (close-out)
+Agent: main (UI/UX overhaul session)
+
+Work Log:
+- VLM validation loop completed across every surface (strict independent prompts,
+  multi-crop): recover page, compact results header, telemetry strip, scan widget,
+  Reconstruction tab (both partitions + scope chip + filtered table), preview panel,
+  file table, tools/settings/help, all 5 themes, 1180px floor, empty state,
+  pause/resume, stop dialog, destination picker, recovery summary
+- Flows verified end-to-end: scan → progressive fill → pause → resume → stop-confirm,
+  select → destination → recover → success summary; tour driver 19 steps to completion
+- Rust workspace: dw-cli partition field; 200 tests, cargo fmt clean, clippy 0 warnings
+- Production web build passes (CI parity: tsc + vitest 89 + build)
+- Responsive fix: drive grid holds 2-col across the full supported range
+
+Stage Summary:
+- The overhaul is complete and pushed: reference-matched UI, File Reconstruction
+  (partition-wise + lost partitions), realtime telemetry, AA contrast, granular CSS
+  architecture (21 files), 89 FE + 200 Rust tests green
