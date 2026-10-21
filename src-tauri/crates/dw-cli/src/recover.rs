@@ -255,7 +255,6 @@ fn cli_node_to_tree(n: &CliNode) -> TreeNode {
         confidence: n.confidence,
         dimensions: None,
         source: dw_core::types::FsKind::Raw,
-        partition: None,
     }
 }
 

@@ -1,8 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════════════════
  * Sidebar — navigation, brand, the live scan widget, help card.
  * The reference design: white sidebar on the blush app background,
- * rose active state, 42px rows, the scan widget pinned above the
- * help card while a scan runs (shell/sidebar.css).
+ * rose active state with a 3px ink rail, 44px rows.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 .dw-sidebar {
@@ -109,30 +108,20 @@
   }
 }
 
-/* ── Scan widget (the reference layout) ──────────────────────────────── */
-
+/* Scan widget */
 .dw-sidebar-foot {
   margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 .dw-scan-widget {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 12px;
-  padding: 14px;
+  padding: 13px 13px 12px;
   border-radius: var(--radius-l);
   background: var(--card);
   border: 1px solid color-mix(in srgb, var(--ink) 26%, var(--divider));
   box-shadow: var(--shadow-2), 0 0 0 4px var(--ink-soft);
-}
-
-.dw-scan-widget-top {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 
 .dw-scan-ring {
@@ -148,6 +137,7 @@
 }
 
 .dw-scan-ring-fill {
+  stroke: url(#dw-ink-grad) var(--ink);
   stroke: var(--ink);
   transition: stroke-dashoffset 0.3s linear;
 }
@@ -158,8 +148,8 @@
 
 .dw-scan-ring-num {
   position: absolute;
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 680;
   color: var(--text);
 }
 
@@ -189,75 +179,27 @@
 
 .dw-scan-widget-stats {
   font-size: 11px;
-  line-height: 1.4;
   color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Actions row: pause icon + the full-width Stop (reference). */
 .dw-scan-widget-actions {
   display: flex;
-  align-items: stretch;
   gap: 6px;
+  margin-top: 2px;
 }
 
-.dw-scan-widget-pause {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-s);
-  background: var(--card);
-  color: var(--on-control);
-  transition: background var(--dur-micro) ease;
-  flex-shrink: 0;
-}
-
-.dw-scan-widget-pause:hover {
-  background: var(--control-hover);
-}
-
-.dw-scan-widget-stop {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  flex: 1;
-  height: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-s);
-  background: var(--card);
-  color: var(--used);
-  font-size: 12px;
-  font-weight: 620;
-  transition: background var(--dur-micro) ease, border-color var(--dur-micro) ease;
-}
-
-.dw-scan-widget-stop:hover {
-  border-color: color-mix(in srgb, var(--used) 42%, transparent);
-  background: var(--used-soft);
-}
-
-/* ── Help card (the reference "Need help?" block) ────────────────────── */
-
+/* Help card */
 .dw-help-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   padding: 15px 14px 14px;
   border-radius: var(--radius-l);
   background: linear-gradient(150deg, var(--ink-soft), transparent 72%), var(--card);
   border: 1px solid var(--divider);
-}
-
-.dw-help-card-row {
-  display: flex;
-  align-items: center;
-  gap: 11px;
 }
 
 .dw-help-card-art {
@@ -271,11 +213,6 @@
   background: var(--card);
   border: 1px solid color-mix(in srgb, var(--ink) 22%, var(--divider));
   box-shadow: var(--shadow-1);
-  flex-shrink: 0;
-}
-
-.dw-help-card-copy {
-  min-width: 0;
 }
 
 .dw-help-card-title {

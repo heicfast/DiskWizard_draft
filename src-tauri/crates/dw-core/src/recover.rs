@@ -540,7 +540,6 @@ mod tests {
             confidence: 100,
             dimensions: None,
             source: crate::types::FsKind::Ntfs,
-            partition: None,
         };
         let dev: std::sync::Arc<dyn BlockDevice> = std::sync::Arc::new(ram);
         let dest = RamDest(std::sync::Mutex::new(Vec::new()));

@@ -1,10 +1,8 @@
 /**
  * The sidebar — DiskWizard's primary navigation (the reference
- * design): brand lockup, four nav rows (Recover Data / Scan Results /
- * Disk Tools / Settings), the live scan-status widget while a scan is
- * active (progress ring, found counters, stop), and the help card
- * pinned at the bottom. Help Center is reachable through the card —
- * the nav itself stays exactly the four reference items.
+ * design): brand lockup, six nav rows, the live scan-status widget
+ * while a scan is active (progress ring, found counters, pause/stop),
+ * and the help card pinned at the bottom.
  */
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -16,7 +14,6 @@ import {
   PlayIcon,
   StopIcon,
   SupportIcon,
-  WrenchIcon,
 } from "./icons";
 import { formatBytes, formatCountFull } from "../lib/format";
 import { scanActive, useScanStore } from "../state/scan";
@@ -24,13 +21,21 @@ import { useViewStore } from "../state/view";
 import type { PageId } from "../types";
 import { BrandLockup } from "../brand/BrandMark";
 
-/** The four reference nav rows (Cloud Recovery is removed by design). */
 const NAV: { id: PageId; label: string; icon: typeof HardDriveIcon }[] = [
   { id: "recover", label: "Recover Data", icon: HardDriveIcon },
   { id: "results", label: "Scan Results", icon: ListIcon },
-  { id: "tools", label: "Disk Tools", icon: WrenchIcon },
+  { id: "tools", label: "Disk Tools", icon: SupportIcon },
   { id: "settings", label: "Settings", icon: HelpCircleIcon },
+  { id: "help", label: "Help Center", icon: HelpCircleIcon },
 ];
+
+const NAV_ICONS: Record<PageId, typeof HardDriveIcon> = {
+  recover: HardDriveIcon,
+  results: ListIcon,
+  tools: SupportIcon,
+  settings: HelpCircleIcon,
+  help: HelpCircleIcon,
+};
 
 export function Sidebar() {
   const page = useViewStore((s) => s.page);
@@ -50,7 +55,7 @@ export function Sidebar() {
 
       <ul className="dw-nav-list">
         {NAV.map((item) => {
-          const Icon = item.icon;
+          const Icon = NAV_ICONS[item.id];
           const selected = page === item.id;
           return (
             <li key={item.id}>
@@ -78,42 +83,29 @@ export function Sidebar() {
             exit={{ opacity: 0, y: 10, scale: 0.97 }}
             transition={{ duration: 0.28, ease: [0.2, 0.8, 0.3, 1] }}
           >
-            <div className="dw-scan-widget-top">
-              <ScanRing percent={progress.percent} paused={paused} />
-              <div className="dw-scan-widget-body">
-                <div className="dw-scan-widget-title">
-                  <span className="dw-truncate">
-                    {paused
-                      ? "Scan Paused"
-                      : progress.phase === "organizing"
-                        ? "Organizing files"
-                        : progress.phase === "preparing"
-                          ? "Preparing scan"
-                          : progress.phase === "quick"
-                            ? "Quick scanning"
-                            : "Deep scanning…"}
-                  </span>
-                  <span className="dw-num dw-scan-widget-pct">{Math.round(progress.percent)}%</span>
-                </div>
-                <div className="dw-scan-widget-stats dw-num" title={`${formatCountFull(progress.stats.filesFound)} files · ${formatBytes(progress.stats.bytesFound)}`}>
-                  Found {formatCountFull(progress.stats.filesFound)} files ({formatBytes(progress.stats.bytesFound)})
-                </div>
+            <ScanRing percent={progress.percent} paused={paused} />
+            <div className="dw-scan-widget-body">
+              <div className="dw-scan-widget-title">
+                {paused ? "Scan Paused" : progress.phase === "organizing" ? "Organizing files" : progress.phase === "preparing" ? "Preparing scan" : "Deep scanning"}
+                <span className="dw-num dw-scan-widget-pct">{Math.round(progress.percent)}%</span>
               </div>
-            </div>
-            <div className="dw-scan-widget-actions">
-              <button
-                type="button"
-                className="dw-scan-widget-pause"
-                onClick={() => (paused ? void resume() : void pause())}
-                aria-label={paused ? "Resume scan" : "Pause scan"}
-                title={paused ? "Resume scan" : "Pause scan"}
-              >
-                {paused ? <PlayIcon size={12} /> : <PauseIcon size={12} />}
-              </button>
-              <button type="button" className="dw-scan-widget-stop" onClick={() => void stop()}>
-                <StopIcon size={11} />
-                Stop
-              </button>
+              <div className="dw-scan-widget-stats dw-num">
+                {formatCountFull(progress.stats.filesFound)} files found ({formatBytes(progress.stats.bytesFound)})
+              </div>
+              <div className="dw-scan-widget-actions">
+                <button
+                  type="button"
+                  className="dw-ghost-button"
+                  onClick={() => (paused ? void resume() : void pause())}
+                >
+                  {paused ? <PlayIcon size={12} /> : <PauseIcon size={12} />}
+                  {paused ? "Resume" : "Pause"}
+                </button>
+                <button type="button" className="dw-ghost-button dw-stop" onClick={() => void stop()}>
+                  <StopIcon size={11} />
+                  Stop
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
@@ -121,14 +113,12 @@ export function Sidebar() {
 
       <div className="dw-sidebar-foot">
         <div className="dw-help-card">
-          <div className="dw-help-card-row">
-            <div className="dw-help-card-art" aria-hidden="true">
-              <SupportIcon size={19} strokeWidth={1.7} />
-            </div>
-            <div className="dw-help-card-copy">
-              <div className="dw-help-card-title">Need help?</div>
-              <div className="dw-help-card-sub">Guides, FAQs and support.</div>
-            </div>
+          <div className="dw-help-card-art" aria-hidden="true">
+            <SupportIcon size={20} strokeWidth={1.7} />
+          </div>
+          <div className="dw-help-card-copy">
+            <div className="dw-help-card-title">Need help?</div>
+            <div className="dw-help-card-sub">Guides, FAQs and support.</div>
           </div>
           <button
             type="button"
@@ -144,29 +134,29 @@ export function Sidebar() {
   );
 }
 
-/** The 52px progress ring (the sidebar widget's gauge). */
-export function ScanRing({ percent, paused, size = 52 }: { percent: number; paused?: boolean; size?: number }) {
-  const r = (size - 6) / 2;
+/** The 44px progress ring (the sidebar widget's gauge). */
+export function ScanRing({ percent, paused, size = 44 }: { percent: number; paused?: boolean; size?: number }) {
+  const r = (size - 5) / 2;
   const c = 2 * Math.PI * r;
   const p = Math.min(100, Math.max(0, percent));
   return (
     <div className={`dw-scan-ring ${paused ? "is-paused" : ""}`} style={{ width: size, height: size }}>
       <svg width={size} height={size} aria-hidden="true">
-        <circle className="dw-scan-ring-track" cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth="4.5" />
+        <circle className="dw-scan-ring-track" cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth="4" />
         <circle
           className="dw-scan-ring-fill"
           cx={size / 2}
           cy={size / 2}
           r={r}
           fill="none"
-          strokeWidth="4.5"
+          strokeWidth="4"
           strokeLinecap="round"
           strokeDasharray={c}
           strokeDashoffset={c * (1 - p / 100)}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
         />
       </svg>
-      <span className="dw-scan-ring-num dw-num">{Math.round(p)}%</span>
+      <span className="dw-scan-ring-num dw-num">{Math.round(p)}</span>
     </div>
   );
 }

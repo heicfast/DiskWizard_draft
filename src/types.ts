@@ -170,27 +170,6 @@ export interface FileNode {
   /** Days-deleted bucket for the date filter. */
   deletedAgo?: number;
   ext: string;
-  /** The partition this node was recovered from (whole-disk scans
-   * carry several; the Reconstruction view groups on it). */
-  partition?: string;
-}
-
-/** A partition surfaced by the scan — the Reconstruction tab's rows.
- * Existing volumes AND lost partitions found by the deep scan (the
- * "Smart Partition Scanning" flow, research artifact 08 §2). */
-export interface PartitionInfo {
-  id: string;
-  /** Short display label ("Basic Data Partition"). */
-  label: string;
-  fileSystem: string;
-  sizeBytes: number;
-  /** True when the deep scan carved this partition back from lost
-   * space (lost-partition rescue — shown with the warn treatment). */
-  isLost: boolean;
-  /** Files recovered from this partition (simulated scale). */
-  fileCount: number;
-  /** Bytes recovered from this partition (simulated scale). */
-  bytesFound: number;
 }
 
 export interface CategoryCount {
@@ -213,10 +192,6 @@ export interface ScanResultsSnapshot {
   nodes: FileNode[];
   /** Wall-clock scan duration (seconds) once done. */
   durationSec: number;
-  /** Partitions recovered during this scan (existing + lost) — the
-   * Reconstruction tab's data source; grows as the deep scan finds
-   * lost partitions. */
-  partitions?: PartitionInfo[];
 }
 
 /* ── Recovery (the export funnel) ────────────────────────────────────── */

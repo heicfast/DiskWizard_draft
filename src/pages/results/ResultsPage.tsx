@@ -1,21 +1,20 @@
 /**
  * Scan Results — the screen users live on ("Recovery results"):
- * the COMPACT header (breadcrumb → title+tools row → slim scan strip
- * → tabs+mode row — four rows, never seven), the folders /
- * reconstruction tree, the virtualized file table with recoverability
- * indicators, the preview panel and the recovery CTA — with the scan
- * running INSIDE this page (the CDetailPage architecture: progressive
- * fill while scanning, pause/stop from here, then browse + recover).
+ * breadcrumb, category tabs, the folders/types tree, the virtualized
+ * file table with recoverability indicators, the preview panel and
+ * the recovery CTA — with the scan running INSIDE this page (the
+ * CDetailPage architecture: progressive fill while scanning, pause/
+ * stop from here, then browse + recover).
  */
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { FilterIcon, SearchIcon, XIcon, ChevronRightIcon } from "lucide-react";
-import { formatBytes, formatCountFull, formatDuration, formatRemaining, formatScanSpeed, formatSectors } from "../../lib/format";
+import { formatBytes, formatCountFull, formatDuration } from "../../lib/format";
 import { scanActive, useScanStore } from "../../state/scan";
 import { filterIsActive, useResultsStore, isVisible } from "../../state/results";
 import { useViewStore } from "../../state/view";
 import { CATEGORY_LABELS, CATEGORY_ORDER, type FileCategory, type FileNode } from "../../types";
-import { CategoryIcon } from "./categoryIcon";
+import { CategoryIcon, categoryTone } from "./categoryIcon";
 import { TreePanel } from "./TreePanel";
 import { FileTable } from "./FileTable";
 import { PreviewPanel } from "./PreviewPanel";
@@ -40,8 +39,6 @@ export function ResultsPage() {
   const filter = useResultsStore((s) => s.filter);
   const resultsMode = useResultsStore((s) => s.resultsMode);
   const setResultsMode = useResultsStore((s) => s.setResultsMode);
-  const activePartition = useResultsStore((s) => s.activePartition);
-  const setPartition = useResultsStore((s) => s.setPartition);
   const selectedIds = useResultsStore((s) => s.selectedIds);
   const openDestination = useResultsStore((s) => s.openDestination);
   const setPage = useViewStore((s) => s.setPage);
@@ -66,9 +63,7 @@ export function ResultsPage() {
     return () => window.clearInterval(t);
   }, [live, generation, load]);
 
-  /* Derived: visible rows under the active tab + partition scope +
-   * search + filter (every dimension composes — the filterbar family
-   * contract from the research). */
+  /* Derived: visible rows under the active tab + search + filter. */
   const visibleFiles = useMemo(() => {
     if (!snapshot) return [] as FileNode[];
     const q = search.trim().toLowerCase();
@@ -76,11 +71,10 @@ export function ResultsPage() {
       (n) =>
         !n.isDir &&
         (activeCategory === "all" || n.category === activeCategory) &&
-        (activePartition === null || n.partition === activePartition) &&
         isVisible(n, resultsMode, filter) &&
         (q === "" || n.name.toLowerCase().includes(q)),
     );
-  }, [snapshot, activeCategory, activePartition, search, filter, resultsMode]);
+  }, [snapshot, activeCategory, search, filter, resultsMode]);
 
   const selectedBytes = useMemo(() => {
     if (!snapshot) return 0;
@@ -110,10 +104,6 @@ export function ResultsPage() {
 
   const targetName = snapshot?.targetName ?? progress?.targetName ?? "Scan";
   const doneInfo = done && !live ? done : null;
-  const activePartitionInfo = useMemo(
-    () => snapshot?.partitions?.find((p) => p.id === activePartition) ?? null,
-    [snapshot, activePartition],
-  );
 
   /* Empty states. */
   if (!snapshot && !scanning && !doneInfo) {
@@ -138,19 +128,15 @@ export function ResultsPage() {
 
   return (
     <div className="dw-page dw-page-results">
-      {/* Row 1 — breadcrumb */}
+      {/* Header: breadcrumb + title + stats */}
       <header className="dw-results-head">
         <div className="dw-breadcrumb" aria-label="Breadcrumb">
           <button type="button" className="dw-crumb" onClick={() => setPage("recover")}>Scan Results</button>
           <ChevronRightIcon size={13} className="dw-crumb-sep" />
           <span className="dw-crumb is-here">{targetName}</span>
           <ChevronRightIcon size={13} className="dw-crumb-sep" />
-          <span className="dw-crumb is-here">
-            {activePartitionInfo ? activePartitionInfo.label : activeCategory === "all" ? "All Files" : CATEGORY_LABELS[activeCategory]}
-          </span>
+          <span className="dw-crumb is-here">{activeCategory === "all" ? "All Files" : CATEGORY_LABELS[activeCategory]}</span>
         </div>
-
-        {/* Row 2 — title + subtitle ⟷ search + filter + stop */}
         <div className="dw-results-titlebar">
           <div>
             <h1 className="dw-page-title dw-display">
@@ -176,6 +162,56 @@ export function ResultsPage() {
             </p>
           </div>
           <div className="dw-results-head-actions">
+            {scanning && (
+              <button type="button" className="dw-outline-button dw-danger-outline" onClick={() => setStopConfirm(true)}>
+                Stop Scan
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* The searching strip (live ticker) */}
+        <AnimatePresence>
+          {scanning && progress && (
+            <motion.div
+              className="dw-scan-strip"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.28, ease: [0.2, 0.8, 0.3, 1] }}
+            >
+              <div className="dw-scan-strip-bar" style={{ width: `${progress.percent}%` }} />
+              <div className="dw-scan-strip-row">
+                <span className="dw-scan-strip-label">
+                  <span className="dw-scan-strip-ticker" aria-hidden="true" />
+                  {progress.searchingLabel}
+                </span>
+                <span className="dw-scan-strip-meta dw-num">
+                  {formatBytes(progress.stats.bytesFound)} found · {Math.max(1, Math.round(progress.remainingSec))}s remaining
+                </span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Category tabs + filter + search */}
+        <div className="dw-results-toolbar">
+          <div className="dw-cat-tabs" role="tablist" aria-label="File categories">
+            {chips.map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === chip.id}
+                className={`dw-cat-tab ${activeCategory === chip.id ? "is-active" : ""}`}
+                onClick={() => setCategory(chip.id)}
+              >
+                <CategoryIcon category={chip.id === "all" ? "other" : chip.id} size={14} />
+                {chip.label}
+              </button>
+            ))}
+          </div>
+          <div className="dw-results-tools">
             <div className="dw-search-box">
               <SearchIcon size={14} className="dw-search-icon" />
               <input
@@ -200,98 +236,6 @@ export function ResultsPage() {
               Filter
               {filterIsActive(filter) && <span className="dw-filter-dot" aria-label="Filter active" />}
             </button>
-            {scanning && (
-              <button type="button" className="dw-outline-button dw-danger-outline" onClick={() => setStopConfirm(true)}>
-                Stop Scan
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Row 3 — the searching strip (live ticker, slim) */}
-        <AnimatePresence>
-          {scanning && progress && (
-            <motion.div
-              className="dw-scan-strip"
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.28, ease: [0.2, 0.8, 0.3, 1] }}
-            >
-              <div className="dw-scan-strip-bar" style={{ width: `${progress.percent}%` }} />
-              <div className="dw-scan-strip-row">
-                <span className="dw-scan-strip-label">
-                  <span className="dw-scan-strip-ticker" aria-hidden="true" />
-                  {progress.searchingLabel}
-                </span>
-                <span className="dw-scan-strip-meta dw-num">
-                  {progress.stats.sectorsTotal > 0 && (
-                    <>
-                      <span className="dw-strip-stat" title="Sectors read">
-                        Sector {formatSectors(progress.stats.sectorsRead)} / {formatSectors(progress.stats.sectorsTotal)}
-                      </span>
-                      <span className="dw-strip-sep" aria-hidden="true">·</span>
-                    </>
-                  )}
-                  <span className="dw-strip-stat" title="Read throughput">
-                    {formatScanSpeed(progress.stats.sectorsRead, progress.elapsedSec)}
-                  </span>
-                  <span className="dw-strip-sep" aria-hidden="true">·</span>
-                  <span className="dw-strip-stat" title="Data found so far">
-                    {formatBytes(progress.stats.bytesFound)} found
-                  </span>
-                  <span className="dw-strip-sep" aria-hidden="true">·</span>
-                  <span className="dw-strip-stat" title="Estimated time to finish">
-                    {formatRemaining(progress.remainingSec)} remaining
-                  </span>
-                </span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Row 4 — category tabs ⟷ essential/complete + partition scope */}
-        <div className="dw-results-toolbar">
-          <div className="dw-cat-tabs" role="tablist" aria-label="File categories">
-            {chips.map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                role="tab"
-                aria-selected={activeCategory === chip.id}
-                className={`dw-cat-tab ${activeCategory === chip.id ? "is-active" : ""}`}
-                onClick={() => setCategory(chip.id)}
-              >
-                <CategoryIcon category={chip.id === "all" ? "other" : chip.id} size={14} />
-                {chip.label}
-              </button>
-            ))}
-          </div>
-          <div className="dw-results-tools">
-            {activePartitionInfo && (
-              <button
-                type="button"
-                className="dw-chip dw-chip-soft dw-partition-scope"
-                onClick={() => setPartition(null)}
-                title="Clear the partition scope"
-              >
-                {activePartitionInfo.label}
-                <XIcon size={11} />
-              </button>
-            )}
-            <div className="dw-mode-switch" role="group" aria-label="Results detail">
-              {(["essential", "complete"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  className={resultsMode === mode ? "is-on" : ""}
-                  onClick={() => setResultsMode(mode)}
-                  title={mode === "essential" ? "Filtered view — duplicates and nonessential results hidden" : "Every found file, unfiltered"}
-                >
-                  {mode === "essential" ? "Essential results" : "Complete results"}
-                </button>
-              ))}
-            </div>
           </div>
         </div>
 
@@ -299,6 +243,21 @@ export function ResultsPage() {
         <AnimatePresence>
           {filterOpen && <FilterBar key="filterbar" />}
         </AnimatePresence>
+
+        {/* Essential / complete mode switch (the ~65% noise reduction) */}
+        <div className="dw-mode-switch" role="group" aria-label="Results detail">
+          {(["essential", "complete"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={resultsMode === mode ? "is-on" : ""}
+              onClick={() => setResultsMode(mode)}
+              title={mode === "essential" ? "Filtered view — duplicates and nonessential results hidden" : "Every found file, unfiltered"}
+            >
+              {mode === "essential" ? "Essential results" : "Complete results"}
+            </button>
+          ))}
+        </div>
       </header>
 
       {/* 3-pane body */}
@@ -416,3 +375,5 @@ function FilterBar() {
     </motion.div>
   );
 }
+
+export { categoryTone };

@@ -17,7 +17,6 @@ import type {
   CategoryCount,
   FileCategory,
   FileNode,
-  PartitionInfo,
   Recoverability,
   ScanResultsSnapshot,
   StorageDevice,
@@ -80,21 +79,7 @@ interface TargetProfile {
   /** Root path label. */
   root: string;
   durationSec: number;
-  /** Partition layout surfaced by the scan (existing first, then the
-   * lost ones the deep pass carves back — the Reconstruction view).
-   * When absent the target itself is the single partition. */
-  partitions?: Array<Omit<PartitionInfo, "fileCount" | "bytesFound">>;
-  /** Share of rows that belong to the LAST (lost) partition once the
-   * deep scan has reached it (fraction >= LOST_AT). */
-  lostShare?: number;
 }
-
-/** Deep-scan progress beyond which the lost partition is found
- * (mirrors the mock's lostPartitionDiscovered flip at frac 0.45). */
-const LOST_AT = 0.45;
-
-const PART_MAIN = { id: "p0", label: "Primary Partition", fileSystem: "NTFS", sizeBytes: 0, isLost: false };
-const PART_LOST = { id: "p-lost", label: "Lost Partition", fileSystem: "NTFS", sizeBytes: 0, isLost: true };
 
 const PROFILES: Record<string, TargetProfile> = {
   "usb-F": {
@@ -104,11 +89,6 @@ const PROFILES: Record<string, TargetProfile> = {
     mix: { images: 34, videos: 16, documents: 22, audio: 9, archives: 5, other: 14 },
     root: "USB Drive (F:)",
     durationSec: 756, // 12m 36s — the reference capture
-    partitions: [
-      { ...PART_MAIN, label: "Basic Data Partition", fileSystem: "NTFS", sizeBytes: 32.0 * GB },
-      { ...PART_LOST, label: "Lost Partition", fileSystem: "exFAT", sizeBytes: 4.7 * GB },
-    ],
-    lostShare: 0.06,
   },
   "disk0-part2": {
     statFiles: 1_139_275,
@@ -169,7 +149,6 @@ interface GenRow {
   origin: FileNode["origin"];
   recoverability: Recoverability;
   dims?: [number, number];
-  partition?: string;
 }
 
 function pick<T>(rng: () => number, arr: T[]): T {
@@ -304,12 +283,6 @@ export function generateResults(
   const rng = makeRng(hashString(device.id) + generation * 7919 + seedOffset);
   const totalRows = Math.max(64, Math.round(profile.rows * fraction));
 
-  // Partition scheme: the profile's layout when present, else the
-  // target itself as a single partition. The lost partition only
-  // materializes once the deep scan passes LOST_AT.
-  const hasLost = !!profile.partitions && profile.partitions.length > 1 && fraction >= LOST_AT;
-  const lostShare = hasLost ? (profile.lostShare ?? 0.05) : 0;
-
   // Category weights → normalized.
   const weights = CATEGORY_ORDER.map((c) => profile.mix[c] ?? 4);
   const wSum = weights.reduce((a, b) => a + b, 0);
@@ -334,9 +307,6 @@ export function generateResults(
     } else if (origin === "version") {
       name = `${name} (v2)`;
     }
-    // Partition assignment: rows land on the lost partition with
-    // `lostShare` probability (only once it has been discovered).
-    const partition = lostShare > 0 && rng() < lostShare ? "p-lost" : "p0";
     rows.push({
       name,
       ext,
@@ -347,7 +317,6 @@ export function generateResults(
       origin,
       recoverability: gradeFor(rng, origin),
       dims: dimsFor(cat, rng),
-      partition,
     });
   }
 
@@ -380,11 +349,8 @@ export function generateResults(
     return id;
   };
   dirNode(profile.root);
-  // The carve branches pre-exist so the tree shows them even before
-  // carved files arrive — SAME path strings folderFor() emits (no root
-  // prefix), so they never duplicate.
-  dirNode("File Path Lost");
-  dirNode("Tags Extracted");
+  dirNode(`${profile.root}\\File Path Lost`);
+  dirNode(`${profile.root}\\Tags Extracted`);
 
   for (const r of rows) {
     const dirId = dirNode(r.folder);
@@ -401,7 +367,6 @@ export function generateResults(
       path: `${r.folder}\\${r.name}.${r.ext}`,
       width: r.dims?.[0],
       height: r.dims?.[1],
-      partition: r.partition,
       deletedAgo:
         r.origin === "deleted"
           ? Math.max(0, Math.round((now - r.modified) / 86_400_000))
@@ -436,42 +401,6 @@ export function generateResults(
     };
   });
 
-  // Partition summaries (the Reconstruction tab): per-partition real
-  // roll-ups scaled to the same simulated headline as the categories.
-  const partitions: PartitionInfo[] = [];
-  if (profile.partitions) {
-    for (const p of profile.partitions) {
-      if (p.isLost && !hasLost) continue; // not discovered yet
-      let count = 0;
-      let bytes = 0;
-      for (const n of nodes) {
-        if (n.isDir || n.partition !== p.id) continue;
-        count += 1;
-        bytes += n.size;
-      }
-      partitions.push({
-        ...p,
-        fileCount: Math.max(count, count > 0 ? Math.round(count * scale) : 0),
-        bytesFound: bytes,
-      });
-    }
-  } else {
-    // Single-volume target: the volume itself is the one partition.
-    let bytes = 0;
-    for (const n of nodes) {
-      if (!n.isDir) bytes += n.size;
-    }
-    partitions.push({
-      id: "p0",
-      label: "Primary Partition",
-      fileSystem: device.fileSystem,
-      sizeBytes: device.total,
-      isLost: false,
-      fileCount: Math.round(profile.statFiles * fraction),
-      bytesFound: bytes,
-    });
-  }
-
   return {
     generation,
     targetName: profile.root,
@@ -480,7 +409,6 @@ export function generateResults(
     deviceId: device.id,
     categories,
     nodes,
-    partitions,
     durationSec: Math.round(profile.durationSec * fraction),
   };
 }

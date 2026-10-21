@@ -64,8 +64,6 @@
   --used: #ff3b30;
   --used-soft: rgba(255, 59, 48, 0.1);
   --used-tint: rgba(255, 59, 48, 0.055);
-  /* Accessible small-chip text on used-soft fills (AA). */
-  --used-text: #b32318;
   --free: #34c759;
   --free-soft: rgba(52, 199, 89, 0.12);
   --focus-ring: rgba(255, 107, 74, 0.8);
@@ -98,11 +96,6 @@
   --grade-good-soft: rgba(59, 130, 246, 0.1);
   --grade-poor: #f59e0b;
   --grade-poor-soft: rgba(245, 158, 11, 0.12);
-  /* Accessible chip text (AA 4.5:1 on the soft fills; the vivid
-   * tones stay on the dots/rings). */
-  --grade-excellent-text: #15803d;
-  --grade-good-text: #1d4ed8;
-  --grade-poor-text: #92610a;
 
   /* ── By-folder tone families (8 pastels; shades vary by depth+index) */
   --pastel-blue: #cfe0f7;
@@ -230,10 +223,6 @@
   --grade-excellent: #30d158;
   --grade-good: #60a5fa;
   --grade-poor: #f5a623;
-  /* Dark-family chip text: brightened for AA on dark soft fills. */
-  --grade-excellent-text: #4ade80;
-  --grade-good-text: #93c5fd;
-  --grade-poor-text: #fbbf24;
 
   /* ── Elevation (deeper in the dark family) ──────────────────── */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -348,7 +337,6 @@
   --used: #ff453a;
   --used-soft: rgba(255, 69, 58, 0.14);
   --used-tint: rgba(255, 69, 58, 0.08);
-  --used-text: #ff6961;
   --free: #30d158;
   --free-soft: rgba(48, 209, 88, 0.14);
   --focus-ring: rgba(255, 122, 92, 0.6);
@@ -383,7 +371,6 @@
   --used: #ff453a;
   --used-soft: rgba(255, 69, 58, 0.14);
   --used-tint: rgba(255, 69, 58, 0.08);
-  --used-text: #ff6961;
   --free: #30d158;
   --free-soft: rgba(48, 209, 88, 0.14);
   --focus-ring: rgba(242, 176, 78, 0.65);
@@ -391,18 +378,18 @@
 
 /* ── Tide (deep marine + lagoon cyan) ───────────────────────────────── */
 [data-theme="tide"] {
-  --background: #0e1520;
+  --background: #101722;
   --panel: #18202e;
-  --card: #1d2839;
-  --border: #3f4f68;
-  --divider: #273348;
+  --card: #1c2534;
+  --border: #3c4a61;
+  --divider: #263040;
   --chip: #223046;
   --track: #263149;
   --overlay: rgba(2, 6, 14, 0.55);
 
   --text: #eef4fb;
-  --text-secondary: #b7c4d8;
-  --text-tertiary: #93a3bc;
+  --text-secondary: #a5b3c8;
+  --text-tertiary: #8393ab;
 
   --skeleton: #1f2837;
   --shimmer: rgba(224, 242, 254, 0.06);
@@ -418,7 +405,6 @@
   --used: #ff453a;
   --used-soft: rgba(255, 69, 58, 0.14);
   --used-tint: rgba(255, 69, 58, 0.08);
-  --used-text: #ff6961;
   --free: #30d158;
   --free-soft: rgba(48, 209, 88, 0.14);
   --focus-ring: rgba(63, 197, 242, 0.6);

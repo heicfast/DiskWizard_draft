@@ -16,7 +16,7 @@ import type {
 } from "../types";
 import { EV_RECOVER_DONE, EV_RECOVER_PROGRESS } from "../types";
 
-export type TreeMode = "folders" | "recon";
+export type TreeMode = "folders" | "types";
 
 export interface FilterCondition {
   /** Selected categories (empty = all). */
@@ -84,8 +84,6 @@ interface ResultsState {
   filter: FilterCondition;
   filterOpen: boolean;
   resultsMode: "essential" | "complete";
-  /* The Reconstruction tab's partition scope (null = all). */
-  activePartition: string | null;
   /* Selection + preview */
   selectedIds: Set<number>;
   lastSelectedId: number | null;
@@ -107,7 +105,6 @@ interface ResultsState {
   resetFilter: () => void;
   setFilterOpen: (open: boolean) => void;
   setResultsMode: (mode: "essential" | "complete") => void;
-  setPartition: (id: string | null) => void;
   toggleSelected: (id: number) => void;
   selectRange: (ids: number[]) => void;
   selectAll: (ids: number[]) => void;
@@ -131,7 +128,6 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   filter: { ...EMPTY_FILTER },
   filterOpen: false,
   resultsMode: "essential",
-  activePartition: null,
   selectedIds: new Set<number>(),
   lastSelectedId: null,
   previewId: null,
@@ -187,7 +183,6 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   resetFilter: () => set({ filter: { ...EMPTY_FILTER } }),
   setFilterOpen: (open) => set({ filterOpen: open }),
   setResultsMode: (mode) => set({ resultsMode: mode }),
-  setPartition: (id) => set({ activePartition: id }),
 
   toggleSelected: (id) => {
     const sel = new Set(get().selectedIds);

@@ -1,0 +1,37 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Dialogs & overlays — the license dialog's remaining states, plus
+ * responsive density rules shared across pages.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/* Density ladder: compact paddings on narrower windows (the Tauri
+ * minimum is 1180px; the ladder below that tightens gracefully). */
+@media (max-width: 1420px) {
+  .dw-page {
+    padding: 24px var(--space-7) 28px;
+  }
+  .dw-page-title {
+    font-size: 26px;
+  }
+}
+
+@media (max-width: 1280px) {
+  .dw-page {
+    padding: 20px var(--space-6) 24px;
+  }
+  .dw-page-title {
+    font-size: 24px;
+  }
+  .dw-content-pad {
+    padding: var(--space-6);
+  }
+  .dw-search-box input {
+    width: 210px;
+  }
+}
+
+/* Reveal-on-focus for keyboard users in scrollable lists. */
+.dw-ft-body:focus-visible,
+.dw-tree-panel:focus-visible {
+  outline: var(--focus-w) solid var(--focus-ring);
+  outline-offset: calc(var(--focus-offset) * -1);
+}
