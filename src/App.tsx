@@ -4,7 +4,7 @@
  * license dialog + gate coordination, and the CI tour driver
  * (DISKWIZARD_TOUR=1 / ?tour=1 — the agent screenshot channel).
  */
-import { useEffect, useRef, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { TitleBar } from "./shell/TitleBar";
 import { Sidebar } from "./shell/Sidebar";
@@ -14,11 +14,6 @@ import { TourDriver } from "./shell/TourDriver";
 import { AppErrorBoundary } from "./shell/AppErrorBoundary";
 import { LicenseDialog } from "./components/LicenseDialog";
 import { Toast } from "./components/Toast";
-import { RecoverPage } from "./pages/recover/RecoverPage";
-import { ResultsPage } from "./pages/results/ResultsPage";
-import { ToolsPage } from "./pages/tools/ToolsPage";
-import { SettingsPage } from "./pages/settings/SettingsPage";
-import { HelpPage } from "./pages/help/HelpPage";
 import { useViewStore } from "./state/view";
 import { attachLicenseEvents, useLicenseStore } from "./state/license";
 import { attachScanEvents } from "./state/scan";
@@ -35,12 +30,33 @@ import "./styles/pages.css";
 import "./styles/results.css";
 import "./styles/dialogs.css";
 
+/* Page-level chunks keep the first frame focused on application chrome and
+ * the current route. Heavy preview/SMART/result dependencies load only when
+ * the user opens that screen; this matters when launching against a failing
+ * disk where perceived start time is part of trust. */
+const RecoverPage = lazy(async () => ({ default: (await import("./pages/recover/RecoverPage")).RecoverPage }));
+const ResultsPage = lazy(async () => ({ default: (await import("./pages/results/ResultsPage")).ResultsPage }));
+const ToolsPage = lazy(async () => ({ default: (await import("./pages/tools/ToolsPage")).ToolsPage }));
+const SettingsPage = lazy(async () => ({ default: (await import("./pages/settings/SettingsPage")).SettingsPage }));
+const HelpPage = lazy(async () => ({ default: (await import("./pages/help/HelpPage")).HelpPage }));
+
 /** Page-swap wrapper (CSS-driven settle-in): the entering view fades
  * 0→1 over the solid page background; the old view unmounts instantly
  * (conditional render — no exit tween, no lingering layer, so two
  * content layers are never on screen at once). */
 function PageSwap({ children }: { children: ReactNode }) {
   return <div className="dw-page-swap">{children}</div>;
+}
+
+function PageLoading() {
+  return (
+    <div className="dw-page" aria-busy="true" aria-label="Loading page">
+      <div className="dw-page-loading dw-settle-in">
+        <span className="dw-scan-strip-ticker" aria-hidden="true" />
+        Loading workspace…
+      </div>
+    </div>
+  );
 }
 
 function AppShell() {
@@ -95,13 +111,15 @@ function AppShell() {
       <div className="dw-body">
         <Sidebar />
         <main className="dw-main" id="dw-main">
-          <PageSwap>
-            {page === "recover" && <RecoverPage />}
-            {page === "results" && <ResultsPage />}
-            {page === "tools" && <ToolsPage />}
-            {page === "settings" && <SettingsPage />}
-            {page === "help" && <HelpPage />}
-          </PageSwap>
+          <Suspense fallback={<PageLoading />}>
+            <PageSwap>
+              {page === "recover" && <RecoverPage />}
+              {page === "results" && <ResultsPage />}
+              {page === "tools" && <ToolsPage />}
+              {page === "settings" && <SettingsPage />}
+              {page === "help" && <HelpPage />}
+            </PageSwap>
+          </Suspense>
         </main>
       </div>
 

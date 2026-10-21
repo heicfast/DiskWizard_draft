@@ -1386,3 +1386,24 @@ both translated partition-unit extents in the drain — every extent
 shifted by 2× the partition start. Recovery read shifted bytes; the
 lab's byte-truth verified 0/20 on perfect-grade files. One block, one
 place.
+
+### Session 13 — UI shell / results-density correction
+
+- Replaced the generic **File Types** lens with **File reconstruction**.
+  It preserves the engine's `lost-path` and `lost-name` wire meanings as
+  File Path Lost and Reconstructed respectively, rather than guessing from
+  file categories. The selected scan target remains the partition root and
+  the view explicitly reserves lost-partition rows for core-validated finds.
+- Made live phase copy a single typed mapping shared by the sidebar, results
+  title and results footer. Quick scan, deep scan, organizing, paused and
+  terminal states can no longer contradict one another; unknown ETA is now
+  rendered as an estimate instead of a false `1s` value.
+- Replaced fixed three-pane flex sizing with a grid that gives the file table
+  the flexible column, with a documented 1200px density rule. At the window
+  floor, nonessential columns move to Preview rather than overflowing.
+- Restored a compact three-up recovery-source grid on ordinary desktop
+  widths; the old 320px auto-fill rule prematurely created stretched,
+  two-column drive cards.
+- Added route-level chunks so initial startup loads the shell and current
+  screen first. Frontend verification: `npm run typecheck`, `npm test`
+  (84 tests), `npm run build`, and `git diff --check` all pass.

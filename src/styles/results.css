@@ -305,7 +305,10 @@
 .dw-results-body {
   flex: 1;
   min-height: 0;
-  display: flex;
+  display: grid;
+  /* The file list owns the flexible width. Fixed flex panes could squeeze it
+   * beneath its column minimum and clip metadata at desktop sizes. */
+  grid-template-columns: minmax(196px, 220px) minmax(0, 1fr) minmax(288px, 332px);
   gap: var(--space-3);
   margin-top: 14px;
   padding-bottom: var(--space-3);
@@ -313,8 +316,7 @@
 
 /* Tree panel */
 .dw-tree-panel {
-  width: 232px;
-  flex-shrink: 0;
+  width: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -395,6 +397,73 @@
   color: var(--text-tertiary);
   border-radius: var(--radius-s);
   background: var(--panel);
+}
+
+/* Partition-aware reconstruction lens. Special-branch counters remain
+ * separate from extension categories so a user can distinguish a normal
+ * directory result from a recovered-path/RAW result before export. */
+.dw-reconstruction-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dw-reconstruction-note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  color: var(--text-secondary);
+  background: var(--panel);
+  font-size: 10.5px;
+}
+
+.dw-reconstruction-note strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dw-reconstruction-branches {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--divider);
+}
+
+.dw-reconstruction-branch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.dw-reconstruction-branch.is-lost {
+  background: color-mix(in srgb, var(--warn-soft) 64%, transparent);
+}
+
+.dw-reconstruction-branch.is-reconstructed {
+  background: var(--ink-soft);
+}
+
+.dw-reconstruction-branch-icon {
+  display: inline-flex;
+  color: var(--warn);
+  flex-shrink: 0;
+}
+
+.dw-reconstruction-branch.is-reconstructed .dw-reconstruction-branch-icon {
+  color: var(--ink);
 }
 
 .dw-folder-tree {
@@ -716,8 +785,7 @@
 /* ── Preview panel ───────────────────────────────────────────────────── */
 
 .dw-preview-panel {
-  width: var(--preview-w);
-  flex-shrink: 0;
+  width: auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -726,12 +794,6 @@
   background: var(--card);
   border: 1px solid var(--divider);
   overflow-y: auto;
-}
-
-@media (max-width: 1420px) {
-  .dw-preview-panel {
-    width: var(--preview-w-compact);
-  }
 }
 
 .dw-preview-empty {
@@ -1032,14 +1094,23 @@
  * tree and preview panes slim a step — the Name column keeps its
  * breathing room instead of collapsing into a corridor. */
 @media (max-width: 1280px) {
+  .dw-results-body {
+    grid-template-columns: 190px minmax(0, 1fr) 276px;
+  }
   .dw-ft-modified {
     display: none;
   }
   .dw-tree-panel {
-    width: 204px;
+    width: auto;
   }
-  .dw-preview-panel {
-    width: 300px;
+}
+
+/* At the supported minimum window width condition lives in Preview, keeping
+ * the Name column readable instead of allowing a horizontal spill. */
+@media (max-width: 1200px) {
+  .dw-ft-grade,
+  .dw-ft-grade-h {
+    display: none;
   }
 }
 

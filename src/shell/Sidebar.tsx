@@ -16,7 +16,7 @@ import {
   SupportIcon,
 } from "./icons";
 import { formatBytes, formatCountFull } from "../lib/format";
-import { scanActive, useScanStore } from "../state/scan";
+import { scanActive, scanPhaseLabel, useScanStore } from "../state/scan";
 import { useViewStore } from "../state/view";
 import type { PageId } from "../types";
 import { BrandLockup } from "../brand/BrandMark";
@@ -86,7 +86,7 @@ export function Sidebar() {
             <ScanRing percent={progress.percent} paused={paused} />
             <div className="dw-scan-widget-body">
               <div className="dw-scan-widget-title">
-                {paused ? "Scan Paused" : progress.phase === "organizing" ? "Organizing files" : progress.phase === "preparing" ? "Preparing scan" : "Deep scanning"}
+                {scanPhaseLabel(progress.phase)}
                 <span className="dw-num dw-scan-widget-pct">{Math.round(progress.percent)}%</span>
               </div>
               <div className="dw-scan-widget-stats dw-num">

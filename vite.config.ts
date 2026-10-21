@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import packageJson from "./package.json";
+import packageJson from "./package.json" with { type: "json" };
 
 // Vite options tailored for Tauri development and only applied in
 // `tauri dev` or `tauri build` (mirrors the DiskGenie base — same
