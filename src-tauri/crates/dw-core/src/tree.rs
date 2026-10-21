@@ -75,6 +75,10 @@ pub struct TreeNode {
     pub dimensions: Option<(u32, u32)>,
     #[serde(skip)]
     pub source: FsKind,
+    /// The partition this node was recovered from (whole-disk scans:
+    /// the TreeBuilder's partition label; single-volume scans → None).
+    /// The UI's Reconstruction view groups on it.
+    pub partition: Option<String>,
 }
 
 /// The tree builder.
@@ -159,6 +163,7 @@ impl TreeBuilder {
             confidence: 100,
             dimensions: None,
             source: FsKind::Unknown,
+            partition: None,
         });
         id
     }
@@ -237,6 +242,7 @@ impl TreeBuilder {
             confidence: e.confidence,
             dimensions: e.dimensions,
             source: e.source,
+            partition: e.partition.clone(),
         });
         if first_off != u64::MAX {
             self.by_first_extent.insert(first_off, id);
@@ -365,6 +371,9 @@ impl TreeBuilder {
             return id;
         }
         let id = self.push_dir(Some(0), p.to_string(), NodeOrigin::Existing);
+        // The partition root carries its own label (the UI's
+        // Reconstruction view groups on node.partition).
+        self.nodes[id as usize].partition = Some(p.to_string());
         self.partitions.insert(p.to_string(), id);
         id
     }
@@ -497,6 +506,7 @@ impl TreeBuilder {
             confidence: e.confidence,
             dimensions: e.dimensions,
             source: e.source,
+            partition: e.partition.clone(),
         });
         if first_off != u64::MAX {
             self.by_first_extent.insert(first_off, id);

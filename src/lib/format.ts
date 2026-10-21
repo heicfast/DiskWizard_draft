@@ -58,6 +58,26 @@ export function formatRemaining(seconds: number): string {
   return `${String(m).padStart(2, "0")}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/** "1,245,632" — sector addresses, comma-grouped (the deep scan's
+ * live sector ticker). */
+export function formatSectors(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  return Math.round(n).toLocaleString("en-US");
+}
+
+/** Scan speed in MB/s from sectors read over elapsed time (the
+ * sector size contract: 512 B — dw-core's SECTOR_SIZE). Falls back
+ * to "—" while no time has elapsed. */
+export function formatScanSpeed(sectorsRead: number, elapsedSec: number): string {
+  if (!Number.isFinite(sectorsRead) || !Number.isFinite(elapsedSec) || elapsedSec <= 0.5) {
+    return "—";
+  }
+  const mbps = (sectorsRead * 512) / (1024 * 1024) / elapsedSec;
+  if (mbps < 1) return `${(mbps * 1024).toFixed(0)} KB/s`;
+  if (mbps >= 1024) return `${(mbps / 1024).toFixed(1)} GB/s`;
+  return `${mbps.toFixed(0)} MB/s`;
+}
+
 /** "2023-10-24 14:32" (file table rows — reference design format).
  * Takes unix MILLISECONDS (session 9: the wire carries the og's
  * sub-second FILETIME precision; licenses/sessions stay seconds on

@@ -186,6 +186,7 @@ pub fn save(
                 "confidence": n.confidence,
                 "dimensions": n.dimensions,
                 "source": n.source,
+                "partition": n.partition,
             })
             .to_string(),
         };
@@ -353,6 +354,7 @@ fn row_to_node(row: NodeRow) -> TreeNode {
                     .unwrap_or_default() as u32,
             )
         }),
+        partition: ext["partition"].as_str().map(str::to_string),
         source: serde_json::from_value(ext["source"].clone()).unwrap_or_default(),
     }
 }

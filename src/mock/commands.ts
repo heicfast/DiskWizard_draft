@@ -157,10 +157,10 @@ function searchingLabelFor(r: ScanRun): string {
   if (r.phase === "organizing") return "Organizing found files…";
   if (r.phase === "preparing") return `Reading ${r.device.name} — boot sector, partition table…`;
   if (r.device.health === "raw" && !r.sdrDone) return "SD Card Rescue — restoring access to the card…";
-  const total = r.stats.sectorsTotal || 1;
-  const read = Math.min(total, Math.round((r.percent / 100) * total));
+  // The live path ticker (the structured sector/speed/ETA telemetry
+  // lives in the strip's stat cluster, not the label).
   const folder = FOLDER_TOUR[Math.floor(r.stats.filesFound / 900) % FOLDER_TOUR.length];
-  return `Searching: ${folder} · sector ${read.toLocaleString("en-US")} / ${total.toLocaleString("en-US")}`;
+  return `Searching: ${folder}`;
 }
 
 const FOLDER_TOUR = [

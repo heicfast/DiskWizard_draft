@@ -772,6 +772,7 @@ fn wire_node(n: &TreeNode, now_ms: i64) -> Value {
             .deleted
             .map(|t| (now_ms - t) / 86_400_000),
         "ext": n.name.rsplit('.').next().unwrap_or("").to_string(),
+        "partition": n.partition,
     })
 }
 
@@ -830,6 +831,10 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u
         })
         .collect();
     let report = s.scan.report.lock().clone();
+    // The Reconstruction tab's partition roll-ups: group the tree's
+    // file nodes by their partition label (whole-disk scans carry
+    // them; single-volume scans fold into one "Primary Partition").
+    let partitions = partition_summaries(&s.scan);
     json!({
         "generation": generation,
         "targetName": *s.scan.target_name.lock(),
@@ -844,8 +849,59 @@ pub fn get_scan_results(s: State<'_, AppState>, generation: u64, since: Option<u
         "nodeCount": node_count,
         "categories": categories,
         "nodes": wire_nodes,
+        "partitions": partitions,
         "durationSec": report.map(|r| r.duration_sec).unwrap_or_default(),
     })
+}
+
+/// Per-partition file/byte roll-ups from the current tree (base +
+/// appended, read under both locks). Nodes without a partition label
+/// (single-volume scans) fold into one primary row.
+fn partition_summaries(scan: &ScanSession) -> Vec<Value> {
+    let mut map: std::collections::BTreeMap<String, (u64, u64)> = std::collections::BTreeMap::new();
+    let mut unassigned = (0u64, 0u64);
+    {
+        let base = scan.tree.lock();
+        let appended = scan.appended.lock();
+        let mut visit = |nodes: &[TreeNode]| {
+            for n in nodes.iter() {
+                if n.is_dir {
+                    continue;
+                }
+                match &n.partition {
+                    Some(p) => {
+                        let e = map.entry(p.clone()).or_insert((0, 0));
+                        e.0 += 1;
+                        e.1 += n.size;
+                    }
+                    None => {
+                        unassigned.0 += 1;
+                        unassigned.1 += n.size;
+                    }
+                }
+            }
+        };
+        if let Some(b) = base.as_ref() {
+            visit(b);
+        }
+        visit(&appended);
+    }
+    let mut out: Vec<Value> = Vec::with_capacity(map.len() + 1);
+    for (label, (count, bytes)) in map {
+        out.push(json!({
+            "id": label, "label": label, "fileSystem": "",
+            "sizeBytes": 0, "isLost": false,
+            "fileCount": count, "bytesFound": bytes,
+        }));
+    }
+    if out.is_empty() && unassigned.0 > 0 {
+        out.push(json!({
+            "id": "p0", "label": "Primary Partition", "fileSystem": "",
+            "sizeBytes": 0, "isLost": false,
+            "fileCount": unassigned.0, "bytesFound": unassigned.1,
+        }));
+    }
+    out
 }
 
 #[cfg(test)]

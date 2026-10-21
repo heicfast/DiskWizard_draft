@@ -127,7 +127,47 @@ struct Profile {
     mix: [f64; 7], // images, videos, audio, documents, archives, email, other
     root: &'static str,
     duration: u64,
+    /// Partition layout surfaced by the scan (existing first, then
+    /// the lost one the deep pass carves back). Empty = the target
+    /// itself is the single partition (the Reconstruction tab's data).
+    partitions: &'static [PartitionSpec],
+    /// Share of rows landing on the lost partition once discovered.
+    lost_share: f64,
 }
+
+/// One partition of the mock's Reconstruction view.
+struct PartitionSpec {
+    id: &'static str,
+    label: &'static str,
+    file_system: &'static str,
+    size_bytes: u64,
+    is_lost: bool,
+}
+
+const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+const USB_PARTITIONS: &[PartitionSpec] = &[
+    PartitionSpec {
+        id: "p0",
+        label: "Basic Data Partition",
+        file_system: "NTFS",
+        size_bytes: (32.0 * GB) as u64,
+        is_lost: false,
+    },
+    PartitionSpec {
+        id: "p-lost",
+        label: "Lost Partition",
+        file_system: "exFAT",
+        size_bytes: (4.7 * GB) as u64,
+        is_lost: true,
+    },
+];
+
+const SINGLE_PARTITION: &[PartitionSpec] = &[];
+
+/// Deep-scan progress beyond which the lost partition is found
+/// (mirrors the TS mock's LOST_AT).
+const LOST_AT: f64 = 0.45;
 
 fn profile(device_id: &str) -> Profile {
     match device_id {
@@ -136,36 +176,48 @@ fn profile(device_id: &str) -> Profile {
             mix: [34.0, 16.0, 9.0, 22.0, 5.0, 1.0, 13.0],
             root: "USB Drive (F:)",
             duration: 756,
+            partitions: USB_PARTITIONS,
+            lost_share: 0.06,
         },
         "disk0-part2" => Profile {
             rows: 3_200,
             mix: [18.0, 12.0, 8.0, 26.0, 7.0, 2.0, 27.0],
             root: "Windows (C:)",
             duration: 2_340,
+            partitions: SINGLE_PARTITION,
+            lost_share: 0.0,
         },
         "disk1-part1" => Profile {
             rows: 2_880,
             mix: [22.0, 24.0, 10.0, 20.0, 8.0, 1.0, 15.0],
             root: "Data (D:)",
             duration: 1_580,
+            partitions: SINGLE_PARTITION,
+            lost_share: 0.0,
         },
         "disk1-part2" => Profile {
             rows: 2_200,
             mix: [10.0, 6.0, 4.0, 44.0, 12.0, 1.0, 23.0],
             root: "Projects (E:)",
             duration: 720,
+            partitions: SINGLE_PARTITION,
+            lost_share: 0.0,
         },
         "ssd-G" => Profile {
             rows: 2_400,
             mix: [24.0, 28.0, 8.0, 18.0, 10.0, 1.0, 11.0],
             root: "Portable SSD (G:)",
             duration: 1_920,
+            partitions: SINGLE_PARTITION,
+            lost_share: 0.0,
         },
         _ => Profile {
             rows: 1_800,
             mix: [26.0, 14.0, 8.0, 24.0, 8.0, 1.0, 19.0],
             root: "Scan",
             duration: 640,
+            partitions: SINGLE_PARTITION,
+            lost_share: 0.0,
         },
     }
 }
@@ -266,9 +318,17 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
     let tags = format!("{root}\\Tags Extracted");
     dir_node(&tags, &root, &mut dirs, &mut nodes, now);
 
+    // The lost partition materializes once the deep scan passes
+    // LOST_AT (mirrors the TS mock's lostPartitionDiscovered flip).
+    let has_lost = prof.partitions.len() > 1 && fraction >= LOST_AT;
+    let lost_share = if has_lost { prof.lost_share } else { 0.0 };
+
     // Per-category real counts (for the simulated-scale roll-up).
     let mut real_counts = [0u64; 7];
     let mut real_sizes = [0u64; 7];
+    // Per-partition real roll-ups (the Reconstruction tab).
+    let mut part_counts: std::collections::HashMap<&str, (u64, u64)> =
+        std::collections::HashMap::new();
 
     for i in 0..total_rows.max(1) {
         // Weighted category dice.
@@ -412,6 +472,19 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
         let dir_id = dir_node(&folder, &root, &mut dirs, &mut nodes, now) as i64;
         let path = format!("{folder}\\{name}.{ext}");
 
+        // Partition assignment: rows land on the lost partition with
+        // `lost_share` probability (only once it has been discovered).
+        let partition = if lost_share > 0.0 && rng.next() < lost_share {
+            "p-lost"
+        } else {
+            "p0"
+        };
+        {
+            let e = part_counts.entry(partition).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += size;
+        }
+
         let dims = if cat == 0 && rng.next() > 0.72 {
             let sets = [
                 (4032, 3024),
@@ -435,6 +508,7 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
             "name": format!("{name}.{ext}"), "isDir": false,
             "category": CATS[cat], "size": size, "modified": modified,
             "origin": origin, "recoverability": grade, "path": path, "ext": ext,
+            "partition": partition,
         });
         if let Some((w, h)) = dims {
             node["width"] = json!(w);
@@ -484,6 +558,39 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
         })
         .collect();
 
+    // Partition summaries (the Reconstruction tab): per-partition real
+    // roll-ups scaled to the same simulated headline. Single-volume
+    // targets report the volume itself as the one partition.
+    let partitions: Vec<Value> = if !prof.partitions.is_empty() {
+        prof.partitions
+            .iter()
+            .filter(|p| !p.is_lost || has_lost)
+            .map(|p| {
+                let (count, bytes) = part_counts.get(p.id).copied().unwrap_or((0, 0));
+                json!({
+                    "id": p.id, "label": p.label, "fileSystem": p.file_system,
+                    "sizeBytes": p.size_bytes, "isLost": p.is_lost,
+                    "fileCount": (count as f64 * scale).round().max(count as f64) as u64,
+                    "bytesFound": bytes,
+                })
+            })
+            .collect()
+    } else {
+        let (files, _) = super::data::totals(device_id);
+        let mut bytes = 0u64;
+        for n in &nodes {
+            if n["isDir"].as_bool() == Some(false) {
+                bytes += n["size"].as_u64().unwrap_or(0);
+            }
+        }
+        vec![json!({
+            "id": "p0", "label": "Primary Partition",
+            "fileSystem": "NTFS", "sizeBytes": 0, "isLost": false,
+            "fileCount": (files as f64 * fraction).round() as u64,
+            "bytesFound": bytes,
+        })]
+    };
+
     json!({
         "generation": generation,
         "targetName": prof.root,
@@ -491,6 +598,7 @@ pub fn generate(device_id: &str, generation: u64, fraction: f64) -> Value {
         "deviceId": device_id,
         "categories": categories,
         "nodes": nodes,
+        "partitions": partitions,
         "durationSec": (prof.duration as f64 * fraction).round() as u64,
     })
 }

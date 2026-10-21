@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { FilterIcon, SearchIcon, XIcon, ChevronRightIcon } from "lucide-react";
-import { formatBytes, formatCountFull, formatDuration } from "../../lib/format";
+import { formatBytes, formatCountFull, formatDuration, formatRemaining, formatScanSpeed, formatSectors } from "../../lib/format";
 import { scanActive, useScanStore } from "../../state/scan";
 import { filterIsActive, useResultsStore, isVisible } from "../../state/results";
 import { useViewStore } from "../../state/view";
@@ -225,7 +225,25 @@ export function ResultsPage() {
                   {progress.searchingLabel}
                 </span>
                 <span className="dw-scan-strip-meta dw-num">
-                  {formatBytes(progress.stats.bytesFound)} found · {Math.max(1, Math.round(progress.remainingSec))}s remaining
+                  {progress.stats.sectorsTotal > 0 && (
+                    <>
+                      <span className="dw-strip-stat" title="Sectors read">
+                        Sector {formatSectors(progress.stats.sectorsRead)} / {formatSectors(progress.stats.sectorsTotal)}
+                      </span>
+                      <span className="dw-strip-sep" aria-hidden="true">·</span>
+                    </>
+                  )}
+                  <span className="dw-strip-stat" title="Read throughput">
+                    {formatScanSpeed(progress.stats.sectorsRead, progress.elapsedSec)}
+                  </span>
+                  <span className="dw-strip-sep" aria-hidden="true">·</span>
+                  <span className="dw-strip-stat" title="Data found so far">
+                    {formatBytes(progress.stats.bytesFound)} found
+                  </span>
+                  <span className="dw-strip-sep" aria-hidden="true">·</span>
+                  <span className="dw-strip-stat" title="Estimated time to finish">
+                    {formatRemaining(progress.remainingSec)} remaining
+                  </span>
                 </span>
               </div>
             </motion.div>

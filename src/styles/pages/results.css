@@ -329,3 +329,18 @@
   cursor: pointer;
   gap: 6px;
 }
+
+/* Scan-strip telemetry stats (sector / speed / found / ETA). */
+.dw-scan-strip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.dw-strip-stat {
+  white-space: nowrap;
+}
+
+.dw-strip-sep {
+  opacity: 0.45;
+}
