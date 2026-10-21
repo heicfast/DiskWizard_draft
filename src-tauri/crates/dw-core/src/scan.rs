@@ -478,21 +478,43 @@ impl ScanController {
                         // (never string-munged into `@mft:` refs — the
                         // session-8 rule); the unit tag routes the
                         // right partition's label.
-                        if let Some(&(_, u)) = structured.iter().find(|(j, _)| *j == unit)
-                            && let Some(prefix) = u.prefix.as_deref()
-                        {
-                            match entry.parent_hint.as_deref() {
-                                Some(h) if h.starts_with('@') => {
-                                    entry.partition = Some(prefix.to_string());
+                        if let Some(&(_, u)) = structured.iter().find(|(j, _)| *j == unit) {
+                            // Session 12 — DEVICE-ABSOLUTE extents: the
+                            // engines emit volume-RELATIVE offsets (they
+                            // read through the partition slice); every
+                            // downstream consumer — the by_first_extent
+                            // merge, the carve↔structured dedup (the
+                            // carver emits absolute), the readability
+                            // probes and the recovery stream — reads
+                            // through the WHOLE-TARGET device. Translate
+                            // once, here, at the unit boundary: two
+                            // partitions' relative offsets must never
+                            // collide in the merge maps (the lab run's
+                            // cross-partition absorption), and carved
+                            // duplicates of structured files must
+                            // actually match.
+                            let base = u.start_byte;
+                            if base != 0 {
+                                for ext in &mut entry.extents {
+                                    if ext.offset != crate::types::HOLE_EXTENT_OFFSET {
+                                        ext.offset += base;
+                                    }
                                 }
-                                Some(h) if !h.is_empty() => {
-                                    entry.parent_hint = Some(format!("{prefix}/{h}"));
+                            }
+                            if let Some(prefix) = u.prefix.as_deref() {
+                                match entry.parent_hint.as_deref() {
+                                    Some(h) if h.starts_with('@') => {
+                                        entry.partition = Some(prefix.to_string());
+                                    }
+                                    Some(h) if !h.is_empty() => {
+                                        entry.parent_hint = Some(format!("{prefix}/{h}"));
+                                    }
+                                    Some(_) => {
+                                        // Volume-root entry on a partition unit.
+                                        entry.parent_hint = Some(prefix.to_string());
+                                    }
+                                    None => {}
                                 }
-                                Some(_) => {
-                                    // Volume-root entry on a partition unit.
-                                    entry.parent_hint = Some(prefix.to_string());
-                                }
-                                None => {}
                             }
                         }
                         self.ingest_entry(obs, tree, entry);
@@ -1017,7 +1039,7 @@ pub fn read_partition_layout(dev: &dyn BlockDevice) -> CoreResult<PartitionLayou
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::testutil::RamDevice;
 
@@ -1402,6 +1424,12 @@ mod tests {
 
     /// A minimal NTFS volume: boot + MFT (records 0-8: $MFT, root
     /// ".", Docs dir, present.txt at root, note.txt inside Docs).
+    /// Cross-module test access (the ntfs recycle fixture builds on
+    /// this volume).
+    pub(crate) fn ntfs_volume_public() -> RamDevice {
+        ntfs_volume()
+    }
+
     fn ntfs_volume() -> RamDevice {
         let mut ram = RamDevice::new(512 * 4096, 512);
         let mut boot = vec![0u8; 512];
@@ -1461,13 +1489,99 @@ mod tests {
         ram
     }
 
+    /// Session 12 — the multi-volume collision regression (the lab
+    /// run's three cross-partition defects in one fixture): two NTFS
+    /// volumes with IDENTICAL geometry (same record numbers, same
+    /// relative extents — the guaranteed-collision case) on one disk,
+    /// the second partition's table entry deleted. Without the fixes:
+    /// (1) `mft_dirs` was keyed by record number alone → volume B's
+    /// root (record 5) parented ALL of volume A's dirs under
+    /// "Lost Partition 1" (the empty "Partition 1" + everything under
+    /// the lost branch); (2) `by_first_extent` mapped
+    /// partition-RELATIVE offsets globally → A's file at relative
+    /// offset X absorbed B's file at the same X as "noise" (the 28
+    /// vanished victims); (3) carved entries are device-absolute while
+    /// structured were partition-relative → the carve↔structured dedup
+    /// never matched across partitions.
+    #[test]
+    fn two_volumes_never_collide_records_extents_or_branches() {
+        // 8 MiB disk, MBR: partition 1 = volume A at 1 MiB (2 MiB
+        // long); volume B at 4 MiB with its entry ZEROED (lost).
+        let mut ram = RamDevice::new(512 * 16_384, 512);
+        let vol_a = ntfs_volume();
+        let vol_b = ntfs_volume();
+        ram.data[2048 * 512..2048 * 512 + vol_a.data.len()].copy_from_slice(&vol_a.data);
+        ram.data[8192 * 512..8192 * 512 + vol_b.data.len()].copy_from_slice(&vol_b.data);
+        ram.data[0x1BE + 4] = 0x07; // NTFS
+        ram.data[0x1BE + 8..0x1BE + 12].copy_from_slice(&2048u32.to_le_bytes());
+        ram.data[0x1BE + 12..0x1BE + 16].copy_from_slice(&4096u32.to_le_bytes());
+        // Entry 2 (volume B) stays zeroed — the deleted partition.
+        ram.data[510..512].copy_from_slice(&[0x55, 0xAA]);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let (tree, report) = run_scan(dev, "Disk 9", &mut NoObserver).expect("scan");
+        let nodes = tree.nodes();
+        let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
+
+        // A's files under Partition 1 — NOT under the lost branch.
+        let a_present: Vec<&crate::tree::TreeNode> = nodes
+            .iter()
+            .filter(|n| n.name == "present.txt" && n.path.starts_with("Disk 9\\Partition 1"))
+            .collect();
+        assert_eq!(
+            a_present.len(),
+            1,
+            "volume A's present.txt under Partition 1: {:?}",
+            nodes.iter().map(show).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            a_present[0].path, "Disk 9\\Partition 1\\present.txt",
+            "got {}",
+            a_present[0].path
+        );
+        // B's files under Lost Partition 1 — BOTH files survive (the
+        // collision would absorb B's identical-relative-offset file).
+        let b_present: Vec<&crate::tree::TreeNode> = nodes
+            .iter()
+            .filter(|n| n.name == "present.txt" && n.path.starts_with("Disk 9\\Lost Partition"))
+            .collect();
+        assert_eq!(
+            b_present.len(),
+            1,
+            "volume B's present.txt survives under the lost branch: {:?}",
+            nodes.iter().map(show).collect::<Vec<_>>()
+        );
+        // The nested files on both volumes.
+        let note_nodes: Vec<&crate::tree::TreeNode> =
+            nodes.iter().filter(|n| n.name == "note.txt").collect();
+        assert_eq!(note_nodes.len(), 2, "both volumes' note.txt survive");
+        assert!(
+            note_nodes.iter().all(|n| n.path.contains("Docs")),
+            "nested paths"
+        );
+        // B's file was NOT absorbed as A's duplicate: distinct nodes
+        // with distinct ABSOLUTE extents (A ~1 MiB region, B ~4 MiB).
+        let a_off = a_present[0].extents.first().map_or(0, |e| e.offset);
+        let b_off = b_present[0].extents.first().map_or(0, |e| e.offset);
+        assert!(
+            b_off >= 8192 * 512,
+            "B's extent is device-absolute (got {b_off}, volume B starts at {})",
+            8192 * 512
+        );
+        assert!(
+            (2048 * 512..8192 * 512).contains(&a_off),
+            "A's extent {a_off}"
+        );
+        // The report's fs label is populated (multi-unit scans).
+        assert_eq!(report.fs, FsKind::Ntfs);
+    }
+
     #[test]
     fn ntfs_tree_resolves_structure_end_to_end() {
         let ram = ntfs_volume();
         let dev: Arc<dyn BlockDevice> = Arc::new(ram);
         let (tree, report) = run_scan(dev, "Test (V:)", &mut NoObserver).expect("scan");
         assert_eq!(report.fs, FsKind::Ntfs);
-
         let nodes = tree.nodes();
         let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
         // Root-level file: nested at the tree root, NEVER under a

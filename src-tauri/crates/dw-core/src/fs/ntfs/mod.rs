@@ -605,17 +605,28 @@ impl NtfsEngine {
             let rl = attr.runlist?;
             let extents =
                 decode_runlist(rl, self.boot.cluster_size(), total_clusters.max(1)).ok()?;
-            let mut bm = vec![0u8; expected];
-            let ss = u64::from(self.boot.bytes_per_sector);
+            let ss = u64::from(self.boot.bytes_per_sector).max(1);
+            // Session 12 — the sector-multiple contract: the bitmap's
+            // byte length (total_clusters/8) is USUALLY NOT a sector
+            // multiple (e.g. 130800 clusters → 16350 B on a 512-B
+            // volume), and the trait's `check_buf` rejects unaligned
+            // reads — the old code silently failed EVERY such volume
+            // (free_cluster_ranges → None → full-extent carve fallback
+            // + NO $Bitmap viability grading; only round-geometry
+            // volumes like an exactly-10-GiB lab disk worked). Pad the
+            // buffer up to the sector boundary; the consumers bound
+            // every bit access by total_clusters, so the pad is inert.
+            let padded = expected.div_ceil(ss as usize) * ss as usize;
+            let mut bm = vec![0u8; padded];
             let mut pos = 0usize;
             'outer: for e in extents {
                 let mut off = e.offset;
                 let end = e.offset + e.len;
                 while off < end {
-                    // Extent bounds are cluster multiples → sector
-                    // multiples; chunk at 256 KiB to bound each read.
-                    let take = ((end - off).min(256 * 1024)) as usize;
-                    let take = take.min(expected - pos);
+                    // Sector-multiple read chunk (the trait contract),
+                    // bounded by the extent and the padded buffer.
+                    let want = (end - off).min(256 * 1024).min((padded - pos) as u64);
+                    let take = (want as usize).div_ceil(ss as usize) * ss as usize;
                     if take == 0 {
                         break 'outer;
                     }
@@ -626,6 +637,7 @@ impl NtfsEngine {
                     off += take as u64;
                 }
             }
+            bm.truncate(expected);
             return Some(bm);
         }
         None
@@ -804,6 +816,7 @@ impl NtfsEngine {
         // THIS thread only (the single sink owner).
         let mut ext_stash: HashMap<u64, Vec<ExtFragments>> = HashMap::new();
         let mut deferred: Vec<ParsedRecord> = Vec::new();
+        let mut recycle_stash: Vec<ParsedRecord> = Vec::new();
         let mut drain_err: Option<CoreError> = None;
         std::thread::scope(|scope| {
             for _ in 0..workers {
@@ -883,7 +896,14 @@ impl NtfsEngine {
                                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                                 break 'drain;
                             }
-                            consume_parsed(p, &mut ext_stash, &mut deferred, sink, &mut stats);
+                            consume_parsed(
+                                p,
+                                &mut ext_stash,
+                                &mut deferred,
+                                &mut recycle_stash,
+                                sink,
+                                &mut stats,
+                            );
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -968,8 +988,25 @@ impl NtfsEngine {
             // fork targets were consumed; re-deferring would drop
             // it: the old code emitted here directly).
             p.attr_list_exts.clear();
-            consume_parsed(p, &mut ext_stash, &mut deferred, sink, &mut stats);
+            consume_parsed(
+                p,
+                &mut ext_stash,
+                &mut deferred,
+                &mut recycle_stash,
+                sink,
+                &mut stats,
+            );
         }
+        // ── The recycle-bin pairing pass (session 12) ──
+        // The og's original-path reconstruction: every $R content twin
+        // with a same-directory $I index twin re-emits under the
+        // ORIGINAL leaf name and directory path (parsed from the $I's
+        // resident index); unmatched $R pass through raw (the honest
+        // fallback); the $I index records never surface — pure
+        // metadata, like $AttrDef. A recycled file therefore appears
+        // where the user deleted it FROM, not as $R6X9F2K1.jpg under
+        // $RECYCLE.BIN\<SID>.
+        emit_recycle_pairs(std::mem::take(&mut recycle_stash), sink, &mut stats, ctrl)?;
         sink.on_progress(total, total);
         Ok(stats)
     }
@@ -1004,6 +1041,7 @@ fn consume_parsed(
     p: ParsedRecord,
     ext_stash: &mut HashMap<u64, Vec<ExtFragments>>,
     deferred: &mut Vec<ParsedRecord>,
+    recycle_stash: &mut Vec<ParsedRecord>,
     sink: &mut dyn ScanSink,
     stats: &mut ScanStats,
 ) {
@@ -1033,6 +1071,20 @@ fn consume_parsed(
         }
         return;
     }
+    // The recycle-bin twins (session 12 — the og's $I reconstruction):
+    // $R (content) and $I (index) FILE records stash until the
+    // post-walk pairing; a matched $R re-emits under its ORIGINAL
+    // name + path. Dirs never stash — `$RECYCLE.BIN` itself is
+    // shape-identical to a twin name (see `recycle_twin_base`).
+    if !p.is_dir
+        && p.names.iter().any(|(_, n)| {
+            recycle_twin_base(n, b'R').is_some() || recycle_twin_base(n, b'I').is_some()
+        })
+        && recycle_stash.len() < 65_536
+    {
+        recycle_stash.push(p);
+        return;
+    }
     let origin = if p.in_use {
         NodeOrigin::Existing
     } else {
@@ -1060,6 +1112,141 @@ fn consume_parsed(
         return; // fully re-used since deletion
     }
     emit_parsed(&p, origin, sink, stats);
+}
+
+/// The recycle twin-name base: `$R`/`$I` + exactly 6 alphanumeric
+/// chars, then either end-of-name or `.`+extension — Windows'
+/// `$RECYCLE.BIN` naming (`$R6X9F2K.jpg`). NOTE: the literal
+/// `$RECYCLE.BIN` directory name is shape-identical
+/// (`$R` + `ECYCLE` + `.BIN`); the callers' `!is_dir` guard is what
+/// disambiguates — twins are always FILES inside the bin's SID dirs.
+fn recycle_twin_base(name: &str, kind: u8) -> Option<String> {
+    let b = name.as_bytes();
+    if b.len() >= 8
+        && b[0] == b'$'
+        && b[1] == kind
+        && b[2..8].iter().all(u8::is_ascii_alphanumeric)
+        && (b.len() == 8 || b[8] == b'.')
+    {
+        return Some(name[2..8].to_string());
+    }
+    None
+}
+
+/// The parsed `$I` recycle index (v2: Vista+; v1: 2000/XP best-effort).
+struct RecycleInfo {
+    /// Original directory path, volume-relative (`dir45` or
+    /// `dir05\level1\...`), `\`-separated.
+    dir: String,
+    /// Original leaf name.
+    leaf: String,
+}
+
+/// Parse one `$I` resident index: v2 layout `u64 version, u64 size,
+/// u64 filetime, u32 name_units, UTF-16 path`; v1 drops the length
+/// (path runs to the record end). The path is the ABSOLUTE original
+/// (`C:\dir\file.ext`) — the drive prefix is stripped.
+fn parse_recycle_index(b: &[u8]) -> Option<RecycleInfo> {
+    if b.len() < 0x18 {
+        return None;
+    }
+    let version = u64::from_le_bytes(b[0..8].try_into().ok()?);
+    let (path_off, path_units) = match version {
+        2 => {
+            let n = u32::from_le_bytes(b.get(0x18..0x1C)?.try_into().ok()?) as usize;
+            (0x1Cusize, n)
+        }
+        1 => (0x18usize, (b.len() - 0x18) / 2),
+        _ => return None,
+    };
+    if path_units == 0 || path_units > 1024 {
+        return None;
+    }
+    let end = path_off.checked_add(path_units * 2)?;
+    if end > b.len() {
+        return None;
+    }
+    let mut units = Vec::with_capacity(path_units);
+    let mut i = path_off;
+    while i + 1 < end {
+        units.push(u16::from_le_bytes([b[i], b[i + 1]]));
+        i += 2;
+    }
+    let full = String::from_utf16(&units).ok()?;
+    // Strip the drive prefix (`L:\`) — the volume-relative remainder
+    // is the pairing's parent path. No drive (UNC/odd): take it all.
+    let rel = if full.len() > 3 && full.as_bytes().get(1) == Some(&b':') {
+        &full[3..]
+    } else {
+        full.trim_start_matches('\\')
+    };
+    let (dir, leaf) = rel.rsplit_once(['\\', '/'])?;
+    if leaf.is_empty() {
+        return None;
+    }
+    Some(RecycleInfo {
+        dir: dir.replace('/', "\\"),
+        leaf: leaf.to_string(),
+    })
+}
+
+/// The post-walk pairing: index every stashed `$I` by (parent dir
+/// record, twin base), then emit each `$R` — under its ORIGINAL name
+/// and path when the index twin parsed, RAW otherwise. `$I` records
+/// never surface. The QA-4 destroy rule applies to the emitted `$R`
+/// exactly as it would have inline (fully-reused content stays
+/// destroyed — the original-name reconstruction never resurrects
+/// physically-overwritten data).
+fn emit_recycle_pairs(
+    stash: Vec<ParsedRecord>,
+    sink: &mut dyn ScanSink,
+    stats: &mut ScanStats,
+    ctrl: &ScanControl,
+) -> CoreResult<()> {
+    // The $I index: (parent record, twin base) → parsed original.
+    let mut index: HashMap<(u64, String), RecycleInfo> = HashMap::new();
+    for p in &stash {
+        if let Some((parent, name)) = p.names.first()
+            && let Some(base) = recycle_twin_base(name, b'I')
+            && let Some(info) = p.recycle_index.as_deref().and_then(parse_recycle_index)
+        {
+            index.entry((parent & MFT_REF_MASK, base)).or_insert(info);
+        }
+    }
+    for mut p in stash {
+        ctrl.checkpoint()?;
+        let Some((parent, rname)) = p.names.first().cloned() else {
+            continue;
+        };
+        let Some(base) = recycle_twin_base(&rname, b'R') else {
+            continue; // an $I index record: metadata, never surfaces
+        };
+        if let Some(info) = index.get(&(parent & MFT_REF_MASK, base.clone())) {
+            p.recycle_rename = Some((info.dir.clone(), info.leaf.clone()));
+        }
+        let origin = if p.in_use {
+            NodeOrigin::Existing
+        } else {
+            NodeOrigin::Deleted
+        };
+        // QA-4 on the content twin (same rule as the inline path).
+        if let Some(score) = p.recovery.as_ref()
+            && !score.unverifiable
+            && score.total_clusters > 0
+            && score.intact_clusters == 0
+            && !p.is_dir
+            && let Some(stream) = p
+                .data_streams
+                .iter()
+                .find(|s| s.name.is_none() && s.resident_len.is_none())
+            && stream.size >= 0x3FF
+            && !stream.extents.is_empty()
+        {
+            continue; // fully re-used since deletion
+        }
+        emit_parsed(&p, origin, sink, stats);
+    }
+    Ok(())
 }
 
 /// The stashed fragments of one extension record (the forking merge
@@ -1192,6 +1379,14 @@ struct ParsedRecord {
     /// The inline $Bitmap viability score (worker-side; see
     /// [`score_deleted`]).
     recovery: Option<RecoveryScore>,
+    /// The $I recycle-index content (session 12 — the og's original-
+    /// path reconstruction): resident, tiny, captured ONLY for $I-named
+    /// records so the pairing pass can read it without device IO.
+    recycle_index: Option<Vec<u8>>,
+    /// The pairing pass's rename verdict: (original dir path, original
+    /// leaf name) from the matched $I twin — emit_parsed re-parents and
+    /// re-names the $R entry to the ORIGINAL identity.
+    recycle_rename: Option<(String, String)>,
 }
 
 /// Parse + fixup one MFT record from an in-memory slice. `None` =
@@ -1226,6 +1421,10 @@ fn parse_record(
     let mut dos_attrs = 0u32;
     let mut data_streams: Vec<ParsedStream> = Vec::new();
     let mut attr_list_exts: Vec<u64> = Vec::new();
+    // The $I recycle-index capture (session 12): only $I-named
+    // records, only tiny resident unnamed streams — the pairing pass
+    // reads the ORIGINAL path/size from it.
+    let mut recycle_index: Option<Vec<u8>> = None;
     let extension_of = if base_ref != 0 {
         // Extension record (ATTRIBUTE_LIST child): its attributes
         // merge into the base record's entry — the walk stashes it
@@ -1358,6 +1557,20 @@ fn parse_record(
                 } else {
                     (attr.real_size, None)
                 };
+                // The $I index capture: unnamed, resident, ≤ 1 KiB,
+                // on a record whose $FILE_NAME matches the $I twin
+                // pattern (bounded — never on ordinary small files).
+                if attr.name.is_none()
+                    && recycle_index.is_none()
+                    && attr
+                        .resident
+                        .is_some_and(|r| !r.is_empty() && r.len() <= 1024)
+                    && names
+                        .iter()
+                        .any(|(_, n)| recycle_twin_base(n, b'I').is_some())
+                {
+                    recycle_index = attr.resident.map(<[u8]>::to_vec);
+                }
                 let extents = attr
                     .runlist
                     .and_then(|rl| decode_runlist(rl, cluster, max_clusters).ok())
@@ -1389,6 +1602,8 @@ fn parse_record(
         attr_list_exts,
         extension_of,
         recovery: None,
+        recycle_index,
+        recycle_rename: None,
     })
 }
 
@@ -1402,12 +1617,23 @@ fn emit_parsed(
     stats: &mut ScanStats,
 ) {
     for (parent, name) in &p.names {
-        let mut entry = FoundEntry::structured(name.clone(), p.is_dir, FsKind::Ntfs);
+        // The recycle reconstruction (session 12): a paired $R emits
+        // under its ORIGINAL leaf name and directory path (the tree's
+        // path-hint arm + the merger's partition prefix carry it); the
+        // RAW $R name only surfaces when no $I twin survived.
+        let display_name = p
+            .recycle_rename
+            .as_ref()
+            .map_or_else(|| name.clone(), |(_, leaf)| leaf.clone());
+        let mut entry = FoundEntry::structured(display_name.clone(), p.is_dir, FsKind::Ntfs);
         // $FILE_NAME parent refs are FULL file references — sequence
         // in the high 16 bits, segment (record) in the low 48. The
         // tree keys on the RECORD (the VHD run proved it — every user
         // file's ref carried a nonzero sequence and missed the map).
-        entry.parent_hint = Some(format!("@mft:{}", parent & MFT_REF_MASK));
+        entry.parent_hint = Some(match p.recycle_rename.as_ref() {
+            Some((dir, _)) if !dir.is_empty() => dir.clone(),
+            _ => format!("@mft:{}", parent & MFT_REF_MASK),
+        });
         entry.record_id = Some(p.record_no);
         entry.attrs = FileAttrs(p.dos_attrs);
         entry.timestamps = p.times;
@@ -1417,12 +1643,16 @@ fn emit_parsed(
             sink.on_entry(entry);
         } else {
             for stream in &p.data_streams {
+                let stream_display = display_name.clone();
                 let mut e = FoundEntry {
                     name: match &stream.name {
-                        Some(sn) => format!("{name}:{sn}"),
-                        None => name.clone(),
+                        Some(sn) => format!("{stream_display}:{sn}"),
+                        None => stream_display,
                     },
-                    parent_hint: Some(format!("@mft:{}", parent & MFT_REF_MASK)),
+                    parent_hint: Some(match p.recycle_rename.as_ref() {
+                        Some((dir, _)) if !dir.is_empty() => dir.clone(),
+                        _ => format!("@mft:{}", parent & MFT_REF_MASK),
+                    }),
                     record_id: Some(p.record_no),
                     partition: None,
                     is_dir: false,
@@ -1497,10 +1727,142 @@ mod tests {
     use super::*;
     use crate::testutil::RamDevice;
 
-    /// The carve coverage plan's source: `free_cluster_ranges` reads
-    /// $Bitmap record 6 and returns the FREE spans in device bytes —
-    /// mixed/allocated words, tail bits, and the run-merging all
-    /// verified (the RE-Match spec §7 gate).
+    /// Session 12 — the sector-alignment regression: the $Bitmap's
+    /// byte length (total_clusters/8) is NOT a sector multiple on
+    /// most real volumes (130800 clusters → 16350 B on the benchmark
+    /// 511-MiB VHD; this fixture's 1308 clusters → 164 B). The old
+    /// read path handed `check_buf` an unaligned slice, the read
+    /// failed, and the volume silently lost BOTH the free-cluster
+    /// carve guidance AND the $Bitmap deleted-viability grading
+    /// (only round-geometry volumes — an exactly-10-GiB lab disk —
+    /// worked). 4-KiB clusters, 512-B sectors: the exact class.
+    #[test]
+    fn free_cluster_ranges_survives_non_sector_multiple_bitmaps() {
+        // 1308 clusters × 4096 B = 10464 sectors × 512 B ≈ 5 MiB.
+        let total_clusters: u64 = 1308;
+        let total_sectors: u32 = (total_clusters * 8) as u32;
+        let mut ram = RamDevice::new(512 * total_sectors as usize, 512);
+        let mut boot = boot_sector_template();
+        boot[0x0D] = 8; // 8 sectors/cluster → 4 KiB clusters
+        boot[0x28..0x2C].copy_from_slice(&total_sectors.to_le_bytes());
+        ram.data[..512].copy_from_slice(&boot);
+        let rs = 4096usize; // 1 cluster per record
+        let mft_base = 16 * 4096usize;
+        // $MFT (record 0): 7 records × 4 KiB at cluster 16.
+        let rec0 = mft_record0(16, 7);
+        ram.data[mft_base..mft_base + rec0.len()].copy_from_slice(&rec0);
+        // Record 5: the root.
+        let root = mft_record(0x0003, 5, ".", None);
+        let r5 = mft_base + 5 * rs;
+        ram.data[r5..r5 + root.len()].copy_from_slice(&root);
+        // Record 6: $Bitmap — one cluster at LCN 100.
+        let bm_rec = mft_record0(100, 1);
+        let r6 = mft_base + 6 * rs;
+        ram.data[r6..r6 + bm_rec.len()].copy_from_slice(&bm_rec);
+        // The bitmap content: 164 bytes for 1308 clusters.
+        // Allocated: [0..24) (boot+MFT), [100..101) (the bitmap),
+        // [1300..1308) (the tail); free everywhere else.
+        let mut bitmap = vec![0u8; 164];
+        for c in 0u64..24 {
+            bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
+        }
+        bitmap[(100 / 8) as usize] |= 1u8 << (100 % 8);
+        for c in 1300u64..1308 {
+            bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
+        }
+        ram.data[100 * 4096..100 * 4096 + 164].copy_from_slice(&bitmap);
+
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let engine = NtfsEngine::new(dev).expect("engine");
+        let free = engine.free_cluster_ranges().expect("ranges");
+        let expect: Vec<(u64, u64)> = vec![
+            (24 * 4096, 76 * 4096),    // [24..100)
+            (101 * 4096, 1199 * 4096), // [101..1300)
+        ];
+        assert_eq!(free, expect);
+    }
+
+    /// Session 12 — the recycle-bin reconstruction: the og's $I model.
+    /// A $RECYCLE.BIN\<SID> pair ($I index + $R content, same twin
+    /// base) must surface as the ORIGINAL file at its ORIGINAL path;
+    /// the raw $R/$I names never appear.
+    #[test]
+    fn recycle_bin_twins_reconstruct_original_paths() {
+        let ram = ntfs_volume_fixture_for_recycle();
+        let dev: Arc<dyn BlockDevice> = Arc::new(ram);
+        let (tree, _report) =
+            crate::scan::run_scan(dev, "Test (V:)", &mut crate::scan::NoObserver).expect("scan");
+        let nodes = tree.nodes();
+        let show = |n: &crate::tree::TreeNode| format!("{} → {}", n.name, n.path);
+
+        // The reconstructed original: under Docs, original name.
+        let recycled = nodes
+            .iter()
+            .find(|n| n.name == "recycled.txt")
+            .unwrap_or_else(|| {
+                panic!(
+                    "recycled.txt reconstructed: {:?}",
+                    nodes.iter().map(show).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            recycled.path, "Test (V:)\\Docs\\recycled.txt",
+            "the original path (got {})",
+            recycled.path
+        );
+        assert_eq!(recycled.size, 16, "the $I-recorded original size");
+        assert!(
+            matches!(recycled.origin, crate::types::NodeOrigin::Existing),
+            "the bin still holds it (in-use $R): origin {:?}",
+            recycled.origin
+        );
+        // The raw twins NEVER surface ($RECYCLE.BIN itself is a real
+        // dir and stays; twins are files).
+        assert!(
+            !nodes.iter().any(|n| {
+                !n.is_dir
+                    && (recycle_twin_base(&n.name, b'R').is_some()
+                        || recycle_twin_base(&n.name, b'I').is_some())
+            }),
+            "no raw twin names: {:?}",
+            nodes.iter().map(show).collect::<Vec<_>>()
+        );
+        // The ordinary files still present.
+        assert!(nodes.iter().any(|n| n.name == "present.txt"));
+        assert!(nodes.iter().any(|n| n.name == "note.txt"));
+    }
+
+    /// The fixture: ntfs_volume() + $RECYCLE.BIN\<SID> + the twin pair
+    /// ($I carries "L:\Docs\recycled.txt", $R carries 16 B content).
+    fn ntfs_volume_fixture_for_recycle() -> RamDevice {
+        let mut ram = crate::scan::tests::ntfs_volume_public();
+        let mft_off = 16 * 512;
+        // Record 9: $RECYCLE.BIN (dir, parent 5 = root).
+        let bin = mft_record(0x0003, 5, "$RECYCLE.BIN", None);
+        ram.data[mft_off + 9 * 512..mft_off + 9 * 512 + bin.len()].copy_from_slice(&bin);
+        // Record 10: the SID dir (parent 9).
+        let sid = mft_record(0x0003, 9, "S-1-5-21-999", None);
+        ram.data[mft_off + 10 * 512..mft_off + 10 * 512 + sid.len()].copy_from_slice(&sid);
+        // Record 11: $I6X9F2K.txt — the v2 index (resident).
+        let orig = "L:\\Docs\\recycled.txt";
+        let mut idx = Vec::new();
+        idx.extend_from_slice(&2u64.to_le_bytes()); // version 2
+        idx.extend_from_slice(&16u64.to_le_bytes()); // original size
+        idx.extend_from_slice(&130_000_000_000_000_000u64.to_le_bytes()); // deletion time
+        let units: Vec<u16> = orig.encode_utf16().collect();
+        idx.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        for u in &units {
+            idx.extend_from_slice(&u.to_le_bytes());
+        }
+        let i_rec = mft_record_resident(0x0001, 10, "$I6X9F2K.txt", &idx);
+        ram.data[mft_off + 11 * 512..mft_off + 11 * 512 + i_rec.len()].copy_from_slice(&i_rec);
+        // Record 12: $R6X9F2K.txt — the content twin (resident, 16 B).
+        let content = [7u8; 16];
+        let r_rec = mft_record_resident(0x0001, 10, "$R6X9F2K.txt", &content);
+        ram.data[mft_off + 12 * 512..mft_off + 12 * 512 + r_rec.len()].copy_from_slice(&r_rec);
+        ram
+    }
+
     #[test]
     fn free_cluster_ranges_matches_bitmap_runs() {
         let mut ram = RamDevice::new(512 * 4096, 512);

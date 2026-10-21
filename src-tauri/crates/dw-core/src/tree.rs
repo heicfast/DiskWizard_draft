@@ -39,8 +39,9 @@ use crate::types::{
 /// The NTFS root-directory MFT record (self-parented).
 const MFT_ROOT_RECORD: u64 = 5;
 
-/// The per-volume record-namespace key ("" for target-root volumes —
-/// the partition label for whole-disk units; the session-11 fix).
+/// The partition scope of an MFT record number (session 12): record
+/// ids are only unique WITHIN a volume, so every record→dir map key
+/// carries the partition label ("" for single-volume scans).
 fn partition_key(partition: Option<&str>) -> String {
     partition.unwrap_or("").to_string()
 }
@@ -89,14 +90,14 @@ pub struct TreeBuilder {
     /// Per-category live counters.
     counts: HashMap<Category, (u64, u64)>,
     root_name: String,
-    /// Session 8 + the session-11 whole-disk fix: MFT record → dir node
-    /// id, keyed by (partition label, record) — the record namespace
-    /// is PER-VOLUME, and a whole-disk scan walks several volumes'
-    /// MFTs concurrently (the L:/W: collision dropped one volume's
-    /// whole tree into the other's branch).
-    mft_dirs: HashMap<(String, u64), u64>,
     /// Session 8: partition label → dir node id (whole-disk scans).
     partitions: HashMap<String, u64>,
+    /// MFT record → dir node, scoped by PARTITION (session 12): two
+    /// NTFS volumes on one disk (a live partition + a lost one) walk
+    /// concurrently and their record numbers collide — record 5 of
+    /// volume A must never parent volume B's directories. The empty
+    /// label is the single-volume / no-prefix namespace.
+    mft_dirs: HashMap<(String, u64), u64>,
     /// Session 8: entries whose `@mft:` parent hasn't materialized
     /// yet — resolved by the fixpoint at phase boundaries / finish.
     pending_files: Vec<FoundEntry>,
@@ -553,8 +554,28 @@ impl TreeBuilder {
 
     /// Materialize a directory path ("a\\b\\c") → node id.
     fn ensure_dir_path(&mut self, hint: &str) -> u64 {
-        let mut parent = 0u64;
-        for part in hint.split(['\\', '/']).filter(|s| !s.is_empty()) {
+        let mut parts = hint.split(['\\', '/']).filter(|s| !s.is_empty());
+        let Some(first) = parts.next() else {
+            return 0;
+        };
+        // Session 12: a leading partition label (the merger's
+        // "Partition N/…" / "Lost Partition N/…" prefixes) anchors at
+        // that partition's base node — never a DUPLICATE partition dir,
+        // and the path-joined chain then shares `dirs` keys with the
+        // mft-materialized ones (same parent ids → same keys).
+        let mut parent = if let Some(&id) = self.partitions.get(first) {
+            id
+        } else {
+            let key = format!("0\\{first}");
+            if let Some(&id) = self.dirs.get(&key) {
+                id
+            } else {
+                let id = self.push_dir(Some(0), first.to_string(), NodeOrigin::Existing);
+                self.dirs.insert(key, id);
+                id
+            }
+        };
+        for part in parts {
             let key = format!("{parent}\\{part}");
             if let Some(&id) = self.dirs.get(&key) {
                 parent = id;

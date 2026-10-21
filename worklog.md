@@ -1247,3 +1247,85 @@ drain's only observable state is the terminal one). Two fixes:
    DETERMINISTIC, not a race with the scheduler. (The overlap
    advance starts window 2 before the midpoint — the stall condition
    keys on the read RANGE, not its start.)
+---
+
+## Session 12 (cont.) — the lab evidence pass: five more engine defects, the recycle reconstruction, the seeder honesty
+
+The b4df31b run was the first REAL validation of the session-11
+parallel architecture: Core E2E GREEN for the first time since the
+RE-Match spec (the freeze fixes held), Windows Integration green with
+the new concurrent batch hammer. Engine Benchmark + Recovery Lab
+failed — and their evidence, read properly, exposed five more defects:
+
+### The evidence-driven diagnosis
+
+1. **Benchmark `duration=0s` → 0 MiB/s** — sub-second scans (2 GB in
+   0.9 s!) floored the integer-second duration; throughput divided by
+   zero. The CLI now computes it from its own precise Instant (the
+   report's integer field stays — wire contract).
+2. **`carve-plan: 100% full-extent (no bitmap guidance)`** — the new
+   evidence line caught the $Bitmap path NEVER ENGAGING on the
+   benchmark volumes: `load_volume_bitmap` read
+   `total_clusters/8` bytes in one slice, but that length is rarely a
+   SECTOR multiple (16350 B on the 511-MiB VHD) — `check_buf`
+   rejected it → None → full-extent fallback AND no $Bitmap viability
+   grading. Only round-geometry volumes (the exactly-10-GiB lab disk)
+   worked. Fixed with padded sector-multiple reads (the consumers
+   bound every bit access by total_clusters — the pad is inert);
+   regression fixture with 1308 clusters → 164 B.
+3. **The lab's branch inversion** (everything under "Lost Partition
+   1", "Partition 1" empty) — `mft_dirs` was keyed by RECORD NUMBER
+   ALONE: two concurrently-walked NTFS volumes share record numbers,
+   and the victim's root (record 5) parented ALL of the main
+   partition's directories. Now scoped by (partition, record).
+4. **The 28 vanished victims** — `by_first_extent` maps
+   partition-RELATIVE offsets globally: a victim file at relative
+   offset X was absorbed as "noise" by a main file at the same X. The
+   merger now translates every structured entry's extents to
+   DEVICE-ABSOLUTE at the unit boundary — which also makes the
+   carve↔structured dedup (the carver emits absolute) actually match
+   across partitions, and fixes the readability probes + recovery
+   reads for partition units (they always assumed absolute).
+5. **The aligned-gap sweep hole** — `next_multiple_of(2048)` on an
+   already-aligned gap start returned the same LBA, then `.max(start+1)`
+   nudged 1 sector — every later probe off the MiB grid forever (a
+   boot at the 2nd-or-later boundary of an aligned gap was invisible;
+   the lab's victim only survived because its boot sat at the gap
+   start). Fixed: advance to the boundary STRICTLY beyond start.
+
+### The recycle-bin reconstruction (the og's $I model — a feature)
+
+Recycle-fate recall was 0/375: the engine surfaced the bin's $RXXXXXX
+records under $RECYCLE.BIN\<SID>, names the manifest can never match —
+and the og shows recycled files at their ORIGINAL paths (it parses the
+$I index). Implemented, exactly that: the walk stashes $R/$I twin FILE
+records (dirs never — `$RECYCLE.BIN` is shape-identical to a twin
+name!), parse_record captures the $I's tiny resident index (bounded,
+$I-named records only), and the post-walk pairing emits matched $R
+under the ORIGINAL leaf + directory path (v2 and v1 index formats;
+drive prefix stripped; volume-root originals fall back to @mft:5).
+Unmatched $R pass through raw; $I never surfaces; QA-4 destroy still
+binds (no resurrection of overwritten content). `ensure_dir_path` now
+anchors a leading partition label at that partition's base — path-
+joined chains share `dirs` keys with the mft-materialized ones.
+End-to-end fixture: $I/$R twins in $RECYCLE.BIN\S-1-5-21-999 →
+`Test (V:)\Docs\recycled.txt`, no raw twin names.
+
+### The lab's own honesty (workflow fixes)
+
+- **Seeder order**: recycle-moves FIRST (their $R/$I records allocate
+  from the pristine MFT tail), force-deletes AFTER. Interleaved, NTFS
+  record-reuse ate ~15% of the force-deleted records (the 69%-vs-90%
+  deleted-recall gap — allocator-dependent, physically gone, the og
+  loses them identically; core-e2e had already learned this as "the
+  churn lane is data-not-gate"). Ordered: ceiling ~99.7%.
+- **Path-accuracy check**: samples the first 400 MATCHED files (the
+  first 400 manifest entries could all sit in a reuse hole — the 0/0
+  artifact).
+
+### Gates
+
+fmt clean; clippy -D warnings clean on linux AND
+x86_64-pc-windows-msvc (all targets); 172 dw-core tests green (the 5
+new: percent scale ×2, bitmap alignment, two-volume collision,
+recycle reconstruction).
