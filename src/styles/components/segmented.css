@@ -1,0 +1,102 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Segmented control — the two-tab switch (tree mode, mode switches).
+ * Reference: underline style for the tree tabs (Folders | File
+ * Reconstruction); pill style for toolbars.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Underline variant (the tree panel header). */
+.dw-segmented {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.dw-segmented__tab {
+  position: relative;
+  flex: 1;
+  height: 38px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  border-radius: 9px 9px 0 0;
+  transition: color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.dw-segmented__tab:hover {
+  color: var(--text-secondary);
+  background: var(--control-hover);
+}
+
+.dw-segmented__tab.is-on {
+  color: var(--text);
+}
+
+/* The rose underline. */
+.dw-segmented__tab.is-on::after {
+  content: "";
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  bottom: -1px;
+  height: 2.5px;
+  border-radius: 999px;
+  background: var(--ink);
+}
+
+/* Pill variant (compact toggles in toolbars). */
+.dw-segmented--pill {
+  background: var(--chip);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.dw-segmented--pill .dw-segmented__tab {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.dw-segmented--pill .dw-segmented__tab.is-on {
+  background: var(--card);
+  color: var(--ink-deep);
+  box-shadow: var(--shadow-1);
+}
+
+.dw-segmented--pill .dw-segmented__tab.is-on::after {
+  display: none;
+}
+
+/* The essential/complete mode switch (results toolbar). */
+.dw-mode-switch {
+  display: inline-flex;
+  background: var(--chip);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.dw-mode-switch button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.dw-mode-switch button:hover {
+  color: var(--text-secondary);
+}
+
+.dw-mode-switch button.is-on {
+  background: var(--card);
+  color: var(--ink-deep);
+  box-shadow: var(--shadow-1);
+}

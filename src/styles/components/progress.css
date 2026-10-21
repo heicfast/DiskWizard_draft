@@ -1,0 +1,103 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Progress — linear bars (drive capacity, scan strip) and the shared
+ * pieces of the circular ring (the ring lives in sidebar.css; overlays
+ * reuse .dw-scan-ring).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Drive capacity bar (reference: 6px, rounded, rose fill on pink track). */
+.dw-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.dw-progress__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ink-grad);
+  transition: width 0.5s var(--ease-out);
+  min-width: 6px;
+}
+
+.dw-progress--warn .dw-progress__fill {
+  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+}
+
+/* Scan strip (the live searching ticker inside the results header). */
+.dw-scan-strip {
+  position: relative;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.dw-scan-strip-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--ink-soft);
+  transition: width 0.6s var(--ease-out);
+}
+
+.dw-scan-strip-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 10px 14px;
+}
+
+.dw-scan-strip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dw-scan-strip-meta {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* The animated searching dot (indeterminate). */
+.dw-scan-strip-ticker {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--ink-grad);
+  animation: dw-ticker 1.05s var(--ease-in-out) infinite;
+}
+
+@keyframes dw-ticker {
+  0%,
+  100% {
+    transform: scale(0.75);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+
+/* The streaming loading row under the table. */
+.dw-ft-loading-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--divider);
+}

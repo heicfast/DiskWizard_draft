@@ -1,0 +1,16 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Misc — small shared pieces that have no better home: the results
+ * view toggle is in results.css; this file carries the page head
+ * action cluster alignment and anything future.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Page head on secondary pages (tools/settings/help): actions align
+ * with the title block baseline. */
+.dw-page-head .dw-page-head-actions {
+  padding-top: 24px;
+}
+
+/* Section head helper — title + right-side action on one line. */
+.dw-section-head .dw-btn--sm {
+  flex-shrink: 0;
+}

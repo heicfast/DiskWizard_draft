@@ -1,0 +1,49 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * DiskWizard stylesheet entry — the ONLY import surface (main.tsx and
+ * App.tsx import this one file). Ordered by layer:
+ *
+ *   1. tokens     the design-token blocks (theme/tokens.css)
+ *   2. fonts      self-hosted Inter
+ *   3. base       reset, utilities, focus, scrollbars, motion
+ *   4. layout     app grid + page containers
+ *   5. shell      titlebar, sidebar (nav, scan widget, help card)
+ *   6. components the UI primitives (button, card, chip, …)
+ *   7. dialogs    the shared modal layer
+ *   8. pages      one file per page feature
+ *
+ * Every file is single-domain: debugging a visual issue means opening
+ * exactly one file. Class contract: `dw-` prefix, block__element
+ * modifiers with `is-*` state classes (kept stable across refactors —
+ * the TourDriver and tests key on some of them).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+@import "../theme/tokens.css";
+@import "./fonts.css";
+@import "./base.css";
+@import "./layout.css";
+@import "./titlebar.css";
+@import "./sidebar.css";
+
+@import "./components/buttons.css";
+@import "./components/cards.css";
+@import "./components/chips.css";
+@import "./components/checkbox.css";
+@import "./components/progress.css";
+@import "./components/segmented.css";
+@import "./components/menu.css";
+@import "./components/forms.css";
+@import "./components/toast.css";
+@import "./components/empty.css";
+@import "./components/misc.css";
+
+@import "./dialogs.css";
+@import "./overlays.css";
+
+@import "./pages/recover.css";
+@import "./pages/results.css";
+@import "./pages/tree.css";
+@import "./pages/table.css";
+@import "./pages/preview.css";
+@import "./pages/tools.css";
+@import "./pages/settings.css";
+@import "./pages/help.css";

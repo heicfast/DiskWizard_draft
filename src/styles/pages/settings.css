@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Settings — license panel, theme picker, product preference rows.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-license-panel {
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dw-license-panel-copy {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.dw-license-panel-copy strong {
+  color: var(--text);
+}
+
+.dw-license-panel-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.dw-license-panel-id span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.dw-license-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.dw-license-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+
+.dw-license-row + .dw-license-row {
+  border-top: 1px solid var(--divider);
+}
+
+.dw-license-row dt {
+  color: var(--text-secondary);
+  font-weight: 570;
+}
+
+.dw-license-row dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* ── Theme picker ────────────────────────────────────────────────────── */
+
+.dw-theme-picker {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.dw-theme-swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1.5px solid var(--divider);
+  border-radius: 12px;
+  background: var(--card);
+  transition: border-color var(--dur-micro) ease, box-shadow var(--dur-micro) ease,
+    transform var(--dur-micro) ease;
+}
+
+.dw-theme-swatch:hover {
+  border-color: rgba(234, 102, 134, 0.46);
+  box-shadow: 0 0 0 3px var(--ink-soft);
+  transform: translateY(-1px);
+}
+
+.dw-theme-swatch.is-active {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px var(--ink-soft);
+}
+
+.dw-theme-prev {
+  position: relative;
+  width: 84px;
+  height: 56px;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid var(--divider);
+  display: flex;
+  flex-direction: column;
+}
+
+.dw-theme-prev span:first-child {
+  flex: 1;
+}
+
+.dw-theme-prev span:last-child {
+  height: 16px;
+}
+
+.dw-theme-swatch-label {
+  font-size: 11.5px;
+  font-weight: 620;
+  color: var(--text-secondary);
+}
+
+.dw-theme-swatch.is-active .dw-theme-swatch-label {
+  color: var(--ink-deep);
+}
+
+.dw-theme-swatch-check {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--ink);
+}
+
+.dw-setting-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Preference rows ─────────────────────────────────────────────────── */
+
+.dw-settings-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: var(--card);
+  overflow: hidden;
+}
+
+.dw-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 18px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.dw-setting-row + .dw-setting-row {
+  border-top: 1px solid var(--divider);
+}
+
+.dw-setting-row:hover {
+  background: var(--control-hover);
+}
+
+.dw-setting-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dw-setting-label {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.dw-setting-hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}

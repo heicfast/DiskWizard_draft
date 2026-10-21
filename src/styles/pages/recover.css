@@ -1,0 +1,375 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Recover Data — the landing page ("Select recovery source"), the
+ * cherry-blossom reference layout: 3-col drive cards, dashed connect
+ * card, 4 quick actions, 3-col session cards.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Drive grid (reference: 3 equal columns) ─────────────────────────── */
+
+.dw-drive-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+@media (max-width: 1560px) {
+  .dw-drive-grid {
+    gap: var(--space-3);
+  }
+}
+
+/* ── Drive card ────────────────────────────────────────────────────────
+ * Reference anatomy: icon tile top-left, "…" top-right, name, capacity
+ * bar, "used / total" line, tag row. Everything below the icon row —
+ * no horizontal squeeze, text never collides. */
+
+.dw-drive-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dw-drive-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* The device glyph tile (illustrated drive icon on a soft wash). */
+.dw-device-art {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--chip);
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.dw-drive-card:hover .dw-device-art {
+  background: var(--ink-wash);
+}
+
+/* The Windows system-volume badge (C: card, reference). */
+.dw-device-art-win {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: var(--card);
+  border: 2px solid var(--card);
+  box-shadow: var(--shadow-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dw-device-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--chip);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.dw-device-glyph.usb,
+.dw-device-glyph.sdcard {
+  color: var(--text-secondary);
+}
+
+.dw-drive-card:hover .dw-device-glyph {
+  background: var(--ink-wash);
+  color: var(--ink);
+}
+
+.dw-device-glyph-badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--warn);
+  color: #ffffff;
+  border: 2px solid var(--card);
+}
+
+.dw-device-glyph-badge.is-warn {
+  background: var(--warn);
+}
+
+/* The card menu ("…") — its trigger and dropdown live in menu.css. */
+
+.dw-drive-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+.dw-drive-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.dw-drive-cap-text {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.dw-drive-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-height: 22px;
+}
+
+/* State borders (lost / raw / locked keep it honest). */
+.dw-drive-card.is-lost {
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.dw-drive-card.is-raw {
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.dw-drive-card.is-locked {
+  border-color: rgba(234, 102, 134, 0.35);
+}
+
+/* ── Connect-a-device card (dashed, reference) ───────────────────────── */
+
+.dw-connect-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+  padding: 18px 16px;
+  cursor: pointer;
+  min-height: 128px;
+}
+
+.dw-connect-plus {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink-grad);
+  color: var(--on-ink);
+  box-shadow: var(--ink-glow);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.dw-connect-card:hover .dw-connect-plus {
+  transform: scale(1.06);
+}
+
+.dw-connect-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 230px;
+}
+
+.dw-connect-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dw-connect-sub {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+/* ── Quick actions (reference: 4 columns, icon left, title+sub) ──────── */
+
+.dw-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+@media (max-width: 1420px) {
+  .dw-quick-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.dw-quick-card {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 16px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dw-quick-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  color: var(--ink);
+  background: var(--ink-wash);
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.dw-quick-card:hover .dw-quick-icon {
+  background: var(--ink-pill);
+}
+
+.dw-quick-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dw-quick-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dw-quick-sub {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── Recent sessions (reference: 3-col cards, status circle) ─────────── */
+
+.dw-session-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+/* The cards are <button>s inside motion wrappers — stretch them. */
+.dw-session-grid > div,
+.dw-drive-grid > div {
+  display: flex;
+  min-width: 0;
+}
+
+.dw-session-grid .dw-session-card,
+.dw-drive-grid .dw-drive-card,
+.dw-drive-grid .dw-connect-card {
+  flex: 1;
+  width: 100%;
+}
+
+@media (max-width: 1420px) {
+  .dw-session-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.dw-session-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dw-session-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  color: var(--ink);
+  background: var(--ink-wash);
+}
+
+.dw-session-status.is-paused {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.dw-session-status.is-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.dw-session-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dw-session-name {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dw-session-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-session-meta .is-status {
+  font-weight: 650;
+}
+
+.dw-session-meta .is-status--completed {
+  color: var(--ink-deep);
+}
+
+.dw-session-meta .is-status--paused {
+  color: var(--warn);
+}
+
+.dw-session-meta .is-status--failed {
+  color: var(--danger);
+}
+
+.dw-session-chevron {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* License note (unlicensed posture hint under the page). */
+.dw-recover-licensenote {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+}

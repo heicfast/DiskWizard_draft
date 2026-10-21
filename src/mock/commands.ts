@@ -34,6 +34,7 @@ import type {
 } from "../types";
 import { EV_LICENSE_CHANGED, EV_SCAN_DONE, EV_SCAN_PROGRESS, EV_DEVICES_CHANGED, EV_RECOVER_PROGRESS, EV_RECOVER_DONE } from "../types";
 import {
+  BITLOCKER_DEVICE,
   DEVICES,
   LOST_PARTITION,
   RECENT_SESSIONS,
@@ -92,6 +93,8 @@ let lostPartitionDiscovered = false;
 const bitlockerUnlocked = new Set<string>();
 /** The demo SD card joins after "Connect a device". */
 let sdCardConnected = false;
+/** The second connect brings the BitLocker demo volume. */
+let bitlockerDriveConnected = false;
 
 let sessions: RecoverySession[] = [...RECENT_SESSIONS];
 
@@ -126,7 +129,13 @@ const SDR_MS = 3_600;
 const TICK_MS = 220;
 
 function deviceById(id: string): StorageDevice | undefined {
-  const all = [...inventory.localDisks, ...inventory.externalDevices, ...(sdCardConnected ? [SDR_DEVICE] : []), ...(lostPartitionDiscovered ? [LOST_PARTITION] : [])];
+  const all = [
+    ...inventory.localDisks,
+    ...inventory.externalDevices,
+    ...(sdCardConnected ? [SDR_DEVICE] : []),
+    ...(bitlockerDriveConnected ? [BITLOCKER_DEVICE] : []),
+    ...(lostPartitionDiscovered ? [LOST_PARTITION] : []),
+  ];
   const found = all.find((d) => d.id === id);
   // Apply the session's unlock state over the stored row.
   return found && bitlockerUnlocked.has(found.id)
@@ -465,7 +474,11 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
           : d;
       const out: DeviceInventory = {
         localDisks: [...inventory.localDisks, ...(lostPartitionDiscovered ? [LOST_PARTITION] : [])].map(applyUnlock),
-        externalDevices: [...inventory.externalDevices, ...(sdCardConnected ? [SDR_DEVICE] : [])].map(applyUnlock),
+        externalDevices: [
+          ...inventory.externalDevices,
+          ...(sdCardConnected ? [SDR_DEVICE] : []),
+          ...(bitlockerDriveConnected ? [BITLOCKER_DEVICE] : []),
+        ].map(applyUnlock),
         diskImages: [...inventory.diskImages],
       };
       return out;
@@ -474,12 +487,19 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       await delay(1_400);
       return { ok: true };
     case "connect_demo_device":
-      // "Connect a device" — the demo SD card (RAW, prompts to format)
-      // joins the inventory; SDR flow becomes available.
+      // "Connect a device" alternates the two demo peripherals: first
+      // the SD card (RAW — the SDR rescue flow), then the BitLocker
+      // demo volume (the unlock flow). The initial inventory stays
+      // reference-exact (3 local + 2 external).
       await delay(900);
-      sdCardConnected = true;
+      if (!sdCardConnected) {
+        sdCardConnected = true;
+        emitMockEvent(EV_DEVICES_CHANGED, null);
+        return { ok: true, deviceId: SDR_DEVICE.id };
+      }
+      bitlockerDriveConnected = true;
       emitMockEvent(EV_DEVICES_CHANGED, null);
-      return { ok: true, deviceId: SDR_DEVICE.id };
+      return { ok: true, deviceId: BITLOCKER_DEVICE.id };
     case "smart_report": {
       const id = String(args?.deviceId ?? "");
       const dev = deviceById(id);

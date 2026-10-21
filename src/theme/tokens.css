@@ -235,57 +235,71 @@
 }
 
 /* ── Blossom (blush cream + rose) — THE DISKWIZARD DEFAULT ────────────
- * The cherry-blossom-morning palette: warm blush surfaces, white cards
- * that pop off them, and a rich rose ink. Rose is a mid-luminance
- * accent — white on-ink keeps ≈3.6:1. Light family: the pastel tone
- * family, the neutral skeletons and the soft elevation all apply. */
+ * The cherry-blossom reference palette, sampled pixel-exact from the
+ * approved design (2026-10 UI/UX session):
+ *
+ *   surfaces      #fefafb app canvas · #faf2f0 sidebar · #ffffff cards
+ *   brand rose    #ea6686 (primary) · #e14e77 (strong) · #c73a63 (AA ink)
+ *   rose washes   #fddee4 active pill · #fdeaee track/selection ·
+ *                 #fceef2 hover wash · #f6e1e8 status circle
+ *   ink           #2d2c3e headings · #5f5c6e secondary · #8f8c9c muted
+ *   checkbox      #de0b52 (the deep magenta the reference uses for
+ *                 selected checkboxes)
+ *   paused amber  #f5820b · completed rose #ea6686 (reference: pink
+ *                 check circles, NOT green)
+ * Light family: the pastel tone family, the neutral skeletons and the
+ * soft elevation all apply. */
 [data-theme="blossom"] {
   /* ── Surfaces ────────────────────────────────────────────────────── */
-  --background: #fbf1ee;
-  --panel: #f6e9e5;
+  --background: #fefafb;
+  --panel: #faf2f0;
   --card: #ffffff;
-  --border: #e5d0ca;
-  --divider: #eedcd7;
-  --chip: #f4e5e1;
-  --track: #eedcd8;
-  --overlay: rgba(90, 40, 35, 0.16);
+  --border: #f3e3e6;
+  --divider: #f7ecee;
+  --chip: #f9ecef;
+  --track: #fdeaee;
+  --overlay: rgba(63, 34, 44, 0.28);
 
-  /* ── Text (rosewood ladder) ───────────────────────────────────────── */
-  --text: #3b2428;
-  --text-secondary: #8a6568;
-  --text-tertiary: #a38083;
+  /* ── Text (deep rosewood-navy ladder) ────────────────────────────── */
+  --text: #2d2c3e;
+  --text-secondary: #5f5c6e;
+  --text-tertiary: #8f8c9c;
 
-  /* Control affordance — the light family's muted values, warmed. */
-  --on-control: #8a6568;
-  --control-border: #e0c6c0;
-  --control-hover: #f5e8e5;
-  --control-active: #efdcd7;
+  /* Control affordance — quiet rose-gray. */
+  --on-control: #6d6672;
+  --control-border: #efdfe2;
+  --control-hover: #fbf1f3;
+  --control-active: #f7e7ea;
 
-  /* ── Brand & status ───────────────────────────────────────────────── */
-  --ink: #d8506b;
-  --ink-strong: #c7405d;
-  --ink-deep: #b14258; /* 4.76:1 on ink-soft over card */
+  /* ── Brand & status ──────────────────────────────────────────────── */
+  --ink: #ea6686;
+  --ink-strong: #e14e77;
+  --ink-deep: #c22e58; /* 4.9:1 on white — AA small-type ink */
   --on-ink: #ffffff;
-  --ink-soft: rgba(216, 80, 107, 0.12);
-  --ink-grad: linear-gradient(180deg, #ec6d84 0%, #d8506b 55%, #c43b58 100%);
-  --ink-glow: 0 2px 8px rgba(216, 80, 107, 0.3), 0 1px 2px rgba(196, 59, 88, 0.18);
-  --ink-glow-strong: 0 4px 14px rgba(216, 80, 107, 0.4), 0 1px 3px rgba(196, 59, 88, 0.2);
+  --ink-soft: rgba(234, 102, 134, 0.1);
+  --ink-wash: #fceef2;
+  --ink-pill: #fddee4;
+  --ink-grad: linear-gradient(180deg, #f27ba0 0%, #ea6686 45%, #e14e77 100%);
+  --ink-grad-cta: linear-gradient(180deg, #f27ba0 0%, #eb5f83 50%, #e44671 100%);
+  --ink-glow: 0 2px 8px rgba(234, 102, 134, 0.32), 0 1px 2px rgba(197, 46, 88, 0.18);
+  --ink-glow-strong: 0 4px 14px rgba(234, 102, 134, 0.42), 0 1px 3px rgba(197, 46, 88, 0.2);
   --used: #ff3b30;
   --used-soft: rgba(255, 59, 48, 0.1);
   --used-tint: rgba(255, 59, 48, 0.055);
   --free: #34c759;
   --free-soft: rgba(52, 199, 89, 0.12);
-  --focus-ring: rgba(216, 80, 107, 0.8);
+  --focus-ring: rgba(234, 102, 134, 0.8);
+  --check-deep: #de0b52; /* reference checkbox magenta */
 
   /* Blush skeleton (the neutral gray reads cold on cream). */
-  --skeleton: #eee0dc;
-  --shimmer: rgba(255, 255, 255, 0.65);
+  --skeleton: #f4e6e9;
+  --shimmer: rgba(255, 255, 255, 0.7);
 
   /* Cherry-blossom ambient gradients (splash + empty states) — the
    * sakura morning wash the reference design carries. */
-  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(236, 109, 132, 0.16) 0%, rgba(236, 109, 132, 0) 55%),
-    radial-gradient(120% 100% at 88% 12%, rgba(244, 114, 182, 0.13) 0%, rgba(244, 114, 182, 0) 60%),
-    linear-gradient(180deg, #fdf6f4 0%, #fbf1ee 100%);
+  --ambient-grad: radial-gradient(120% 90% at 18% 0%, rgba(234, 102, 134, 0.1) 0%, rgba(234, 102, 134, 0) 55%),
+    radial-gradient(120% 100% at 88% 12%, rgba(244, 114, 182, 0.08) 0%, rgba(244, 114, 182, 0) 60%),
+    linear-gradient(180deg, #fefafb 0%, #fdf5f4 100%);
 
   color-scheme: light;
 }

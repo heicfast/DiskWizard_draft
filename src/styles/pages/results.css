@@ -1,0 +1,319 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Scan Results — the page chrome: breadcrumb, title row (search + view
+ * toggle), category tab row (with the Filter button), scan strip,
+ * filter bar, and the fixed-height 3-pane body.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-results {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--page-pad-top) var(--content-pad) 0;
+  gap: 0;
+}
+
+/* ── Breadcrumb row ──────────────────────────────────────────────────── */
+
+.dw-crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.dw-crumb-back {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--control-border);
+  background: var(--card);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.dw-crumb-back:hover {
+  border-color: rgba(234, 102, 134, 0.45);
+  color: var(--ink-deep);
+}
+
+.dw-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dw-crumb {
+  color: var(--text-secondary);
+  font-weight: 550;
+}
+
+.dw-crumb.is-link {
+  cursor: pointer;
+  transition: color var(--dur-micro) var(--ease-out);
+}
+.dw-crumb.is-link:hover {
+  color: var(--ink-deep);
+}
+
+.dw-crumb.is-active {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.dw-crumb.is-here {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.dw-crumb-sep {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* ── Title row: title+stats | search + view toggle ───────────────────── */
+
+.dw-results-titlebar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+
+.dw-results-title {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-results-stats {
+  margin-top: 7px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dw-results-stats .is-strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.dw-results-stats .is-dot {
+  color: var(--text-tertiary);
+}
+
+.dw-results-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.dw-search {
+  width: 320px;
+}
+
+/* The list/grid view toggle (reference: two joined icon buttons). */
+.dw-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 11px;
+  background: var(--card);
+  border: 1px solid var(--control-border);
+  flex-shrink: 0;
+}
+
+.dw-view-toggle button {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  transition: background-color var(--dur-micro) var(--ease-out),
+    color var(--dur-micro) var(--ease-out);
+}
+
+.dw-view-toggle button:hover {
+  color: var(--text-secondary);
+}
+
+.dw-view-toggle button.is-on {
+  background: var(--ink-wash);
+  color: var(--ink-deep);
+}
+
+/* ── Category tab row ────────────────────────────────────────────────── */
+
+.dw-tab-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  flex-shrink: 0;
+}
+
+.dw-cat-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 1px;
+}
+
+.dw-cat-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.dw-cat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--control-border);
+  background: var(--card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.dw-cat-tab:hover {
+  border-color: rgba(234, 102, 134, 0.42);
+  color: var(--ink-deep);
+}
+
+.dw-cat-tab.is-active {
+  background: var(--ink-grad);
+  border-color: transparent;
+  color: var(--on-ink);
+  box-shadow: var(--ink-glow);
+}
+
+.dw-cat-tab .dw-cat-count {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-tertiary);
+}
+
+.dw-cat-tab.is-active .dw-cat-count {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.dw-tab-row .dw-tab-spacer {
+  flex: 1;
+}
+
+/* ── Advanced filter bar ─────────────────────────────────────────────── */
+
+.dw-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.dw-filter-bar .dw-mode-switch {
+  margin-left: auto;
+}
+
+/* The searching strip under the title row. */
+.dw-results-strip {
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+
+/* Others dropdown count. */
+.dw-others-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* The scanning phase emphasis in the results subtitle. */
+.dw-results-stats .is-phase {
+  color: var(--ink-deep);
+  font-weight: 650;
+}
+
+/* ── Mode switch row ─────────────────────────────────────────────────── */
+
+.dw-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 12px;
+  flex-shrink: 0;
+}
+
+/* ── The fixed 3-pane body ───────────────────────────────────────────── */
+
+.dw-results-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--space-4);
+  margin-top: 14px;
+  padding-bottom: var(--space-4);
+}
+
+/* ── Empty state (no snapshot) ───────────────────────────────────────── */
+
+.dw-results-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Density ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 1500px) {
+  .dw-search {
+    width: 260px;
+  }
+}
+
+@media (max-width: 1320px) {
+  .dw-search {
+    width: 220px;
+  }
+  .dw-results-title {
+    font-size: 25px;
+  }
+}

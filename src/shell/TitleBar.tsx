@@ -1,9 +1,8 @@
 /**
- * The custom frameless titlebar: drag region, brand, license chip,
- * quick theme toggle, and the platform caption controls (Windows
- * caption buttons on the right; macOS keeps the traffic-light
- * reserve). Mirrors the DiskGenie TitleBar contract on the Tauri 2
- * window (decorations: false).
+ * The custom frameless titlebar: drag region, quiet right cluster
+ * (activate CTA, license chip, theme toggle) and the platform caption
+ * controls (Windows caption buttons on the right). Deliberately
+ * brandless — the sidebar carries the lockup (reference layout).
  */
 import { useEffect, useState } from "react";
 import { MoonIcon, SunIcon } from "lucide-react";
@@ -11,7 +10,6 @@ import { useTheme } from "../theme/useTheme";
 import { useLicenseStore } from "../state/license";
 import { useViewStore } from "../state/view";
 import { IS_MACOS, IS_WINDOWS } from "../lib/platform";
-import { BrandTile } from "../brand/BrandMark";
 import { SparkleIcon } from "./icons";
 
 export function TitleBar() {
@@ -59,10 +57,6 @@ export function TitleBar() {
     <header className="dw-titlebar" data-platform={IS_WINDOWS ? "windows" : IS_MACOS ? "macos" : "other"}>
       <div className="dw-titlebar-drag" data-tauri-drag-region />
       {IS_MACOS && <div className="dw-titlebar-traffic-reserve" aria-hidden="true" />}
-      <div className="dw-titlebar-brand">
-        <BrandTile size={22} radius={7} glyphScale={0.92} />
-        <span className="dw-titlebar-brand-name dw-display">DiskWizard</span>
-      </div>
       <div className="dw-titlebar-actions">
         {!isPro && (
           <button
@@ -77,7 +71,7 @@ export function TitleBar() {
         )}
         <button
           type="button"
-          className={`dw-chip dw-chip-license ${isPro ? "is-pro" : ""}`}
+          className={`dw-chip-license ${isPro ? "is-pro" : ""}`}
           onClick={openLicenseDialog}
           title={isPro ? "License status" : "Activate DiskWizard"}
         >
@@ -85,10 +79,11 @@ export function TitleBar() {
         </button>
         <button
           type="button"
-          className="dw-icon-button dw-titlebar-theme"
+          className="dw-btn--icon dw-btn"
           onClick={toggle}
           title={isDark ? "Switch to light theme" : "Switch to dark theme"}
           aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+          style={{ width: 30, height: 30 }}
         >
           {isDark ? <SunIcon size={15} /> : <MoonIcon size={15} />}
         </button>

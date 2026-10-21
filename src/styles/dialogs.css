@@ -1,37 +1,632 @@
-/* ═══════════════════════════════════════════════════════════════════════════
- * Dialogs & overlays — the license dialog's remaining states, plus
- * responsive density rules shared across pages.
- * ═════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Dialogs — the shared modal base + every product dialog's body:
+ * license, destination picker, stop-confirm, recovery progress/summary,
+ * BitLocker unlock, lost-partition guidance.
+ * ═══════════════════════════════════════════════════════════════════════ */
 
-/* Density ladder: compact paddings on narrower windows (the Tauri
- * minimum is 1180px; the ladder below that tightens gracefully). */
-@media (max-width: 1420px) {
-  .dw-page {
-    padding: 24px var(--space-7) 28px;
-  }
-  .dw-page-title {
-    font-size: 26px;
-  }
+/* ── Modal base ──────────────────────────────────────────────────────── */
+
+.dw-dialog-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+  backdrop-filter: blur(3px);
 }
 
-@media (max-width: 1280px) {
-  .dw-page {
-    padding: 20px var(--space-6) 24px;
-  }
-  .dw-page-title {
-    font-size: 24px;
-  }
-  .dw-content-pad {
-    padding: var(--space-6);
-  }
-  .dw-search-box input {
-    width: 210px;
-  }
+.dw-dialog {
+  position: relative;
+  width: min(520px, calc(100vw - 64px));
+  max-height: min(84vh, 720px);
+  overflow-y: auto;
+  padding: 26px 26px 22px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--divider);
+  box-shadow: var(--shadow-pop);
 }
+
+.dw-dialog-x {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  transition: background var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+
+.dw-dialog-x:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.dw-dialog-title {
+  margin: 0 0 6px;
+  font-size: 19px;
+  font-weight: 750;
+  letter-spacing: -0.015em;
+}
+
+.dw-dialog-sub {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.dw-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: 18px;
+}
+
+/* ── Destination picker ──────────────────────────────────────────────── */
+
+.dw-dest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 218px;
+  overflow-y: auto;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  padding: 8px;
+  background: var(--panel);
+}
+
+.dw-dest-loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.dw-dest-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--card);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-micro) ease, box-shadow var(--dur-micro) ease;
+}
+
+.dw-dest-row:hover {
+  border-color: rgba(234, 102, 134, 0.4);
+}
+
+.dw-dest-row.is-chosen {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px var(--ink-soft);
+}
+
+.dw-dest-row.is-source {
+  opacity: 0.62;
+}
+
+.dw-dest-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1.5px solid var(--control-border);
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.dw-dest-row.is-chosen .dw-dest-check {
+  background: var(--ink-grad);
+  border-color: transparent;
+}
+
+.dw-dest-icon {
+  display: inline-flex;
+  color: var(--ink);
+  flex-shrink: 0;
+}
+
+.dw-dest-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dw-dest-name {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.dw-dest-space {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.dw-dest-repair {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--divider);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.dw-dest-repair-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.dw-dest-repair-copy svg {
+  color: var(--ink);
+}
+
+.dw-dest-repair-sub {
+  font-size: 11.5px;
+  font-weight: 480;
+  color: var(--text-secondary);
+}
+
+.dw-dest-gate {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  color: var(--used);
+  background: var(--used-soft);
+  border: 1px solid rgba(255, 59, 48, 0.3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.dw-dest-gate svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.dw-dest-warn {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.dw-dest-warn strong {
+  color: var(--used);
+}
+
+/* ── Stop-confirm ────────────────────────────────────────────────────── */
+
+.dw-stop-dialog {
+  text-align: center;
+}
+
+.dw-stop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 12px;
+  border-radius: 14px;
+  color: var(--used);
+  background: var(--used-soft);
+}
+
+.dw-stop-icon.is-ink {
+  color: var(--ink);
+  background: var(--ink-soft);
+}
+
+.dw-stop-stats {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.dw-stop-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--divider);
+}
+
+.dw-stop-stat-num {
+  font-size: 16.5px;
+  font-weight: 720;
+  letter-spacing: -0.012em;
+}
+
+.dw-stop-stat-num.is-warn {
+  color: var(--used);
+}
+
+.dw-stop-stat-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ── Recovery progress + summary ─────────────────────────────────────── */
+
+.dw-recover-dialog {
+  text-align: center;
+}
+
+.dw-recover-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--track);
+  overflow: hidden;
+  margin-top: 14px;
+}
+
+.dw-recover-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--ink-grad);
+  transition: width 0.24s linear;
+}
+
+.dw-recover-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dw-recover-current {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dw-recover-repair {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--ink);
+}
+
+.dw-recover-summary {
+  text-align: center;
+}
+
+.dw-recover-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  margin-bottom: 12px;
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--ink-wash);
+}
+
+.dw-recover-summary-badge.is-error {
+  color: #b45309;
+  background: var(--warn-soft);
+}
+
+.dw-recover-summary-stats {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.dw-recover-summary-note {
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* ── BitLocker unlock ────────────────────────────────────────────────── */
+
+.dw-bitlocker-modes {
+  margin: 2px 0 14px;
+  width: 100%;
+  display: flex;
+}
+
+.dw-bitlocker-modes button {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ── Lost-partition guidance ─────────────────────────────────────────── */
+
+.dw-lost-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+
+.dw-lost-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1.5px solid var(--divider);
+  border-radius: 12px;
+  background: var(--card);
+  text-align: left;
+  transition: border-color var(--dur-micro) ease, box-shadow var(--dur-micro) ease,
+    background var(--dur-micro) ease;
+}
+
+.dw-lost-option:hover {
+  border-color: rgba(234, 102, 134, 0.42);
+  box-shadow: var(--shadow-1);
+}
+
+.dw-lost-option.is-primary {
+  border-color: rgba(234, 102, 134, 0.45);
+  background: linear-gradient(140deg, var(--ink-soft), transparent 70%), var(--card);
+}
+
+.dw-lost-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid rgba(234, 102, 134, 0.22);
+  flex-shrink: 0;
+}
+
+.dw-lost-option-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dw-lost-option-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 640;
+}
+
+.dw-lost-option-sub {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.dw-lost-option > svg {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.dw-repairing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: var(--panel);
+  border: 1px solid var(--divider);
+}
+
+/* ── License dialog ──────────────────────────────────────────────────── */
+
+.dw-license-dialog {
+  width: min(460px, calc(100vw - 48px));
+}
+
+.dw-license-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.dw-license-title {
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.016em;
+}
+
+.dw-license-sub {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.dw-license-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.dw-license-field-icon {
+  position: absolute;
+  left: 13px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.dw-license-field input {
+  width: 100%;
+  height: 42px;
+  padding: 0 38px;
+  border-radius: 12px;
+  border: 1.5px solid var(--control-border);
+  background: var(--card);
+  font: 600 13.5px var(--font-mono);
+  letter-spacing: 0.02em;
+  transition: border-color var(--dur-micro) ease, box-shadow var(--dur-micro) ease;
+}
+
+.dw-license-field input:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px var(--ink-soft);
+}
+
+.dw-license-field input::placeholder {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.dw-license-clear {
+  position: absolute;
+  right: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--chip);
+  color: var(--text-secondary);
+}
+
+.dw-license-error {
+  margin: 9px 0 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--used);
+  background: var(--used-soft);
+}
+
+.dw-license-note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.dw-license-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.dw-license-buy {
+  text-decoration: none;
+}
+
+.dw-license-foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.dw-license-foot a {
+  color: var(--ink);
+  font-weight: 620;
+}
+
+.dw-license-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 18px 6px 10px;
+}
+
+.dw-license-success-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 14px;
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--ink-wash);
+}
+
+.dw-license-success-title {
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.dw-license-success-sub {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ── Shared density rules ────────────────────────────────────────────── */
 
 /* Reveal-on-focus for keyboard users in scrollable lists. */
 .dw-ft-body:focus-visible,
 .dw-tree-panel:focus-visible {
   outline: var(--focus-w) solid var(--focus-ring);
   outline-offset: calc(var(--focus-offset) * -1);
+}
+
+/* Live-scan honesty note (results header). */
+.dw-live-scan-note {
+  opacity: 0.75;
+  font-weight: 400;
 }

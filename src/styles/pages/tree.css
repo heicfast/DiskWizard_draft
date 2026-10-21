@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Tree panel — the results left pane: mode tabs (Folders | File
+ * Reconstruction), the path tree, the category tree, and the
+ * partition-wise reconstruction tree (lost partitions included).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-tree-panel {
+  width: 264px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.dw-tree-modes {
+  border-bottom: 1px solid var(--divider);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.dw-tree-modes .dw-segmented__tab {
+  white-space: nowrap;
+  font-size: 12.5px;
+  flex: none;
+  padding: 0 10px;
+}
+
+/* Balance the two tabs across the header (reference rhythm). */
+.dw-tree-modes .dw-segmented {
+  gap: 8px;
+}
+
+.dw-tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* ── Rows (shared by both trees) ─────────────────────────────────────── */
+
+.dw-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background-color var(--dur-micro) var(--ease-out),
+    color var(--dur-micro) var(--ease-out);
+}
+
+.dw-tree-row:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.dw-tree-row.is-active {
+  background: var(--ink-wash);
+  color: var(--ink-deep);
+  font-weight: 650;
+}
+
+.dw-tree-chev {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.dw-tree-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.dw-tree-icon .dw-tone-images { background: rgba(244, 114, 182, 0.13); }
+.dw-tree-icon.is-images { color: var(--cat-images); background: rgba(244, 114, 182, 0.13); }
+.dw-tree-icon.is-videos { color: var(--cat-videos); background: rgba(129, 140, 248, 0.13); }
+.dw-tree-icon.is-audio { color: var(--cat-audio); background: rgba(52, 211, 153, 0.13); }
+.dw-tree-icon.is-documents { color: var(--cat-documents); background: rgba(96, 165, 250, 0.13); }
+.dw-tree-icon.is-archives { color: var(--cat-archives); background: rgba(251, 191, 36, 0.15); }
+.dw-tree-icon.is-email { color: var(--cat-email); background: rgba(34, 211, 238, 0.13); }
+.dw-tree-icon.is-other { color: var(--cat-other); background: rgba(148, 163, 184, 0.15); }
+.dw-tree-icon.is-root { color: var(--ink); background: var(--ink-wash); }
+.dw-tree-icon.is-partition { color: var(--ink); background: var(--ink-wash); }
+.dw-tree-icon.is-lost-branch { color: #b45309; background: var(--warn-soft); }
+
+.dw-tree-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dw-tree-count {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.dw-tree-row.is-active .dw-tree-count {
+  color: var(--ink-deep);
+}
+
+/* Lost-partition marker. */
+.dw-tree-badge {
+  flex-shrink: 0;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--warn-soft);
+  color: #b45309;
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Category children under a type node (reference: JPG 28.1K …). */
+.dw-tree-row.is-child {
+  font-size: 12.5px;
+  height: 32px;
+}
+
+/* Reconstruction meta line (under a partition row). */
+.dw-tree-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The empty/building state. */
+.dw-tree-empty {
+  padding: 22px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* The reconstruction explainer card (top of the tab). */
+.dw-recon-note {
+  margin: 4px 6px 10px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: var(--ink-wash);
+  border: 1px solid rgba(234, 102, 134, 0.16);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-deep);
+  flex-shrink: 0;
+}
+
+/* Section label inside the reconstruction tree. */
+.dw-recon-section {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 8px 4px;
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Density. */
+@media (max-width: 1500px) {
+  .dw-tree-panel {
+    width: 240px;
+  }
+}
+
+@media (max-width: 1320px) {
+  .dw-tree-panel {
+    width: 224px;
+  }
+}

@@ -1,0 +1,37 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Cards — the white-surface vocabulary (reference: white cards on the
+ * blush canvas, 1px rose-tinted border, soft elevation, 14px radius).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-1);
+}
+
+/* Interactive card (clickable rows/tiles). */
+.dw-card--hover {
+  transition: border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.dw-card--hover:hover {
+  border-color: rgba(234, 102, 134, 0.42);
+  box-shadow: var(--shadow-2);
+}
+.dw-card--hover:active {
+  transform: scale(0.99);
+}
+
+/* The dashed connect-a-device card (reference). */
+.dw-card--dashed {
+  background: transparent;
+  border: 1.5px dashed rgba(234, 102, 134, 0.4);
+  box-shadow: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+.dw-card--dashed:hover {
+  border-color: rgba(234, 102, 134, 0.62);
+  background: rgba(255, 255, 255, 0.6);
+}

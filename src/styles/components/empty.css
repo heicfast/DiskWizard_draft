@@ -1,0 +1,81 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Empty states — the centered guidance card (no results, no preview).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-8);
+}
+
+.dw-empty__art {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  background: var(--ink-wash);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: var(--space-5);
+  box-shadow: var(--ink-glow);
+}
+
+.dw-empty__title {
+  font-size: 19px;
+  font-weight: 750;
+  color: var(--text);
+}
+
+.dw-empty__sub {
+  margin-top: 8px;
+  max-width: 430px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.dw-empty__cta {
+  margin-top: var(--space-5);
+}
+
+/* The empty preview pane (results page right column). */
+.dw-preview-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+  padding: var(--space-6);
+}
+
+.dw-preview-empty-art {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--chip);
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dw-preview-empty-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.dw-preview-empty-sub {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  max-width: 260px;
+}

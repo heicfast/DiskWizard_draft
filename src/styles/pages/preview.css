@@ -1,0 +1,259 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Preview panel — the results right pane (reference): media stage,
+ * name + kind line, metadata rows, recovery-chances row, Recover CTA
+ * pinned at the bottom with the selection note.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-preview-panel {
+  width: var(--preview-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  overflow-y: auto;
+}
+
+/* ── Media stage ─────────────────────────────────────────────────────── */
+
+.dw-preview-stage {
+  border-radius: 11px;
+  overflow: hidden;
+  background: var(--chip);
+  flex-shrink: 0;
+}
+
+.dw-preview-photo {
+  aspect-ratio: 16 / 10.5;
+  display: block;
+}
+
+.dw-preview-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+}
+
+/* Procedural sakura placeholder (unmapped/unreadable images). */
+.dw-sakura-art {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Document/text stages. */
+.dw-preview-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.dw-preview-doc-card {
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--divider);
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dw-preview-doc-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.dw-preview-doc-ext {
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.dw-preview-doc-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dw-preview-doc-lines span {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--chip);
+}
+
+.dw-preview-doc-lines span.is-title {
+  width: 55%;
+  height: 11px;
+  background: var(--track);
+}
+
+.dw-preview-doc-lines span.is-short {
+  width: 38%;
+}
+
+.dw-preview-doc-cap {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.dw-preview-text {
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--divider);
+  font: 11.5px/1.6 var(--font-mono);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dw-preview-pdf {
+  width: 100%;
+  height: 240px;
+  border: none;
+  border-radius: 10px;
+  background: var(--card);
+}
+
+/* ── Meta block ──────────────────────────────────────────────────────── */
+
+.dw-preview-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dw-preview-name {
+  font-size: 16px;
+  font-weight: 750;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.dw-preview-kind {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.dw-preview-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.dw-preview-kind-icon.dw-tone-images { background: rgba(244, 114, 182, 0.13); }
+.dw-preview-kind-icon.dw-tone-videos { background: rgba(129, 140, 248, 0.13); }
+.dw-preview-kind-icon.dw-tone-audio { background: rgba(52, 211, 153, 0.13); }
+.dw-preview-kind-icon.dw-tone-documents { background: rgba(96, 165, 250, 0.13); }
+.dw-preview-kind-icon.dw-tone-archives { background: rgba(251, 191, 36, 0.15); }
+.dw-preview-kind-icon.dw-tone-email { background: rgba(34, 211, 238, 0.13); }
+.dw-preview-kind-icon.dw-tone-other { background: rgba(148, 163, 184, 0.15); }
+
+.dw-preview-rows {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--divider);
+}
+
+.dw-preview-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7.5px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.dw-preview-row dt {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.dw-preview-row dd {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.dw-preview-path {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: ltr;
+}
+
+/* The recovery-chances row (gauge + chip). */
+.dw-preview-grade {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dw-grade-ring {
+  display: inline-flex;
+}
+
+.dw-grade-ring-track {
+  stroke: var(--track);
+}
+
+.dw-grade-ring-fill.is-excellent { stroke: var(--grade-excellent); }
+.dw-grade-ring-fill.is-good { stroke: var(--grade-good); }
+.dw-grade-ring-fill.is-poor { stroke: var(--grade-poor); }
+
+/* ── CTA footer ──────────────────────────────────────────────────────── */
+
+.dw-preview-cta {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-top: 4px;
+  flex-shrink: 0;
+}
+
+.dw-preview-recover {
+  height: 44px;
+  font-size: 14px;
+  background: var(--ink-grad-cta);
+}
+
+.dw-preview-cta-note {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Density. */
+@media (max-width: 1500px) {
+  .dw-preview-panel {
+    width: var(--preview-w-compact, 320px);
+  }
+}

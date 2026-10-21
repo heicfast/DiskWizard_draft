@@ -1,6 +1,6 @@
-/* ═══════════════════════════════════════════════════════════════════════════
- * Base — reset, typography, focus, scrollbars, press states.
- * ═══════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Base — reset, typography, focus, scrollbars, utilities, motion.
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 html,
 body,
@@ -31,11 +31,9 @@ textarea {
 button {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-}
-
-button,
-input {
-  letter-spacing: 0;
+  background: none;
+  border: none;
+  padding: 0;
 }
 
 button:disabled {
@@ -48,6 +46,7 @@ button:disabled {
 button:focus-visible,
 input:focus-visible,
 a:focus-visible,
+select:focus-visible,
 [tabindex]:focus-visible {
   outline: var(--focus-w) solid var(--focus-ring);
   outline-offset: var(--focus-offset);
@@ -59,10 +58,31 @@ input:focus:not(:focus-visible) {
 }
 
 ::selection {
-  background: var(--ink-soft);
+  background: rgba(234, 102, 134, 0.22);
 }
 
-/* Scrollbars — native OVERLAY style (no reserved gutters). */
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+dl,
+dt,
+dd,
+figure {
+  margin: 0;
+}
+
+/* ── Scrollbars — native overlay style (no reserved gutters) ─────────── */
 .dw-scroll {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
@@ -76,40 +96,14 @@ input:focus:not(:focus-visible) {
   scrollbar-color: var(--text-tertiary) transparent;
 }
 
-/* Pressable — shared active feedback (scale 0.985 / opacity 0.75). */
-.dw-ink-button:active,
-.dw-outline-button:active,
-.dw-ghost-button:active,
-.dw-icon-button:active,
-.dw-card:active,
-.dw-folder-row:active,
-.dw-file-row:active,
-.dw-chip:active,
-.dw-nav-item:active,
-.dw-segmented button:active,
-.dw-quick-card:active,
-.dw-tool-card:active {
-  transform: scale(var(--press-scale));
-  opacity: var(--press-opacity);
-}
-
-kbd {
-  font: 9px/1 var(--font-mono);
-  white-space: nowrap;
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  padding: 2px 5px;
-  color: var(--text-secondary);
-  background: var(--card);
-}
+/* ── Utilities ───────────────────────────────────────────────────────── */
 
 /* Numeric columns everywhere — tabular so sizes/counts align. */
 .dw-num {
   font-variant-numeric: tabular-nums;
 }
 
-/* Truncation helper for one-line labels in flex rows. */
+/* One-line ellipsis in flex rows. */
 .dw-truncate {
   min-width: 0;
   overflow: hidden;
@@ -123,13 +117,36 @@ kbd {
   letter-spacing: -0.022em;
 }
 
-/* Eyebrow labels (section kickers). */
+/* Eyebrow labels (page kickers). */
 .dw-eyebrow {
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink);
+}
+
+/* Visually hidden (screen-reader only). */
+.dw-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Spinner (icon-level, inherits currentColor). */
+@keyframes dw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.dw-spin {
+  animation: dw-spin 0.92s linear infinite;
 }
 
 /* Skeleton shimmer (loading states speak the surface language). */
@@ -137,6 +154,7 @@ kbd {
   position: relative;
   overflow: hidden;
   background: var(--skeleton);
+  border-radius: var(--radius-s);
 }
 .dw-skeleton::after {
   content: "";
@@ -152,9 +170,8 @@ kbd {
   }
 }
 
-/* Page settle-in (DiskGenie CSS-driven swap: entering view fades
- * 0→1 over the solid page background; the old view unmounts
- * instantly — two content layers are never on screen at once). */
+/* Page settle-in (entering view fades over the solid page background;
+ * the old view unmounts instantly — no lingering layers). */
 @keyframes dw-settle-in {
   from {
     opacity: 0;
@@ -175,6 +192,11 @@ kbd {
   100% {
     background-position: 28px 0;
   }
+}
+
+/* Pressable feedback — shared across interactive primitives. */
+.dw-pressable:active {
+  transform: scale(var(--press-scale));
 }
 
 /* Reduced motion: honor the OS setting everywhere at once. */

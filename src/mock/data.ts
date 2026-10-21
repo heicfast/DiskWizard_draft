@@ -70,20 +70,6 @@ export const DEVICES: DeviceInventory = {
       isSystem: false,
       diskIndex: 1,
     },
-    {
-      id: "disk2-part1",
-      name: "Backup (H:)",
-      letter: "H:",
-      kind: "hdd",
-      fileSystem: "NTFS",
-      used: 1_402.0 * GB,
-      total: 2_000.0 * GB,
-      health: "bitlocker",
-      bitLocker: "locked",
-      trim: null,
-      isSystem: false,
-      diskIndex: 2,
-    },
   ],
   externalDevices: [
     {
@@ -134,6 +120,24 @@ export const SDR_DEVICE: StorageDevice = {
   trim: null,
   isSystem: false,
   diskIndex: 5,
+};
+
+/** The BitLocker demo volume joins the inventory on the SECOND
+ * "Connect a device" call (the first brings the SD-rescue card) —
+ * the initial inventory stays reference-exact (3 local + 2 external). */
+export const BITLOCKER_DEVICE: StorageDevice = {
+  id: "disk2-part1",
+  name: "Backup (H:)",
+  letter: "H:",
+  kind: "hdd",
+  fileSystem: "NTFS",
+  used: 1_402.0 * GB,
+  total: 2_000.0 * GB,
+  health: "bitlocker",
+  bitLocker: "locked",
+  trim: null,
+  isSystem: false,
+  diskIndex: 2,
 };
 
 /** Deep-scan discovery: a lost partition surfaced on Data (D:)'s disk

@@ -1,0 +1,89 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Checkbox — the reference's rounded-square check (deep magenta fill
+ * on selection, quiet border at rest). Used by the file table and the
+ * filter forms.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-check-square {
+  width: 19px;
+  height: 19px;
+  border-radius: 6px;
+  border: 1.5px solid var(--control-border);
+  background: var(--card);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  flex-shrink: 0;
+}
+
+.dw-check-square:hover {
+  border-color: rgba(234, 102, 134, 0.55);
+}
+
+.dw-check-square.is-on {
+  background: var(--check-deep);
+  border-color: var(--check-deep);
+  color: #ffffff;
+}
+
+.dw-check-square.is-mixed {
+  border-color: rgba(234, 102, 134, 0.6);
+  background: var(--ink-wash);
+  color: var(--ink-deep);
+}
+
+.dw-check-square.is-mixed::after {
+  content: "";
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+/* Form checkbox (filter bar, settings rows). */
+.dw-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dw-check input[type="checkbox"] {
+  appearance: none;
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  border-radius: 5px;
+  border: 1.5px solid var(--control-border);
+  background: var(--card);
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.dw-check input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  transform: scale(0);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  background: white;
+  transition: transform 0.12s var(--ease-out);
+}
+
+.dw-check input[type="checkbox"]:checked {
+  background: var(--check-deep);
+  border-color: var(--check-deep);
+}
+
+.dw-check input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}

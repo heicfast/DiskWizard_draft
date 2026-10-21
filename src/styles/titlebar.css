@@ -1,0 +1,115 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * TitleBar — the custom frameless caption: drag region, quiet right
+ * cluster (license chip, activate, theme) and the Windows caption
+ * buttons. Deliberately brandless: the sidebar carries the lockup.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-titlebar {
+  position: relative;
+  height: var(--title-bar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  z-index: 40;
+}
+
+.dw-titlebar-drag {
+  position: absolute;
+  inset: 0;
+  -webkit-app-region: drag;
+}
+
+/* Everything interactive re-enables dragging above the drag region. */
+.dw-titlebar button,
+.dw-titlebar .dw-titlebar-caption {
+  -webkit-app-region: no-drag;
+}
+
+.dw-titlebar-traffic-reserve {
+  width: 78px;
+  flex-shrink: 0;
+}
+
+.dw-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-right: var(--space-2);
+  position: relative;
+  z-index: 1;
+}
+
+/* The macOS reserve shifts the action cluster left of the traffic
+ * lights (reference layout). */
+.dw-titlebar[data-platform="macos"] .dw-titlebar-actions {
+  padding-right: 0;
+  margin-left: auto;
+}
+
+.dw-titlebar-caption {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.dw-caption-btn {
+  width: var(--caption-btn-w);
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: background-color var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out);
+}
+.dw-caption-btn:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+.dw-caption-btn.dw-caption-close:hover {
+  background: var(--close-hover);
+  color: var(--on-close);
+}
+
+/* The compact license chip (Free / Pro). */
+.dw-titlebar-buy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--ink-grad);
+  color: var(--on-ink);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: var(--ink-glow);
+  transition: filter var(--dur-micro) var(--ease-out), transform var(--dur-micro) var(--ease-out);
+}
+.dw-titlebar-buy:hover {
+  filter: brightness(1.05);
+}
+.dw-titlebar-buy:active {
+  transform: scale(0.97);
+}
+
+.dw-chip-license {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--control-border);
+  background: var(--card);
+  color: var(--on-control);
+  font-size: 12px;
+  font-weight: 600;
+  transition: border-color var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out);
+}
+.dw-chip-license:hover {
+  color: var(--text);
+}
+.dw-chip-license.is-pro {
+  color: var(--ink-deep);
+  border-color: rgba(234, 102, 134, 0.35);
+  background: var(--ink-soft);
+}

@@ -16,7 +16,7 @@ import type {
 } from "../types";
 import { EV_RECOVER_DONE, EV_RECOVER_PROGRESS } from "../types";
 
-export type TreeMode = "folders" | "types";
+export type TreeMode = "folders" | "reconstruction";
 
 export interface FilterCondition {
   /** Selected categories (empty = all). */
@@ -84,8 +84,14 @@ interface ResultsState {
   filter: FilterCondition;
   filterOpen: boolean;
   resultsMode: "essential" | "complete";
+  /** File Reconstruction scope: the active partition label (null =
+   * all partitions). Pure client-side view state — no wire impact. */
+  activePartition: string | null;
   /* Selection + preview */
   selectedIds: Set<number>;
+  /** Live byte total of the selection (kept in the store so every
+   * surface — preview CTA, toolbar, dialogs — reads one number). */
+  selectedBytes: number;
   lastSelectedId: number | null;
   previewId: number | null;
   /* Recovery funnel */
@@ -100,6 +106,7 @@ interface ResultsState {
   load: (generation: number, forceFull?: boolean) => Promise<void>;
   setCategory: (c: FileCategory | "all") => void;
   setTreeMode: (m: TreeMode) => void;
+  setPartition: (label: string | null) => void;
   setSearch: (s: string) => void;
   patchFilter: (p: Partial<FilterCondition>) => void;
   resetFilter: () => void;
@@ -124,11 +131,13 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
   loading: false,
   activeCategory: "all",
   treeMode: "folders",
+  activePartition: null,
   search: "",
   filter: { ...EMPTY_FILTER },
   filterOpen: false,
   resultsMode: "essential",
   selectedIds: new Set<number>(),
+  selectedBytes: 0,
   lastSelectedId: null,
   previewId: null,
   destinationOpen: false,
@@ -178,6 +187,7 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
 
   setCategory: (c) => set({ activeCategory: c }),
   setTreeMode: (m) => set({ treeMode: m }),
+  setPartition: (label) => set({ activePartition: label }),
   setSearch: (s) => set({ search: s }),
   patchFilter: (p) => set({ filter: { ...get().filter, ...p } }),
   resetFilter: () => set({ filter: { ...EMPTY_FILTER } }),
@@ -188,15 +198,18 @@ export const useResultsStore = create<ResultsState>((set, get) => ({
     const sel = new Set(get().selectedIds);
     if (sel.has(id)) sel.delete(id);
     else sel.add(id);
-    set({ selectedIds: sel, lastSelectedId: id });
+    set({ selectedIds: sel, lastSelectedId: id, selectedBytes: bytesOf(get().snapshot, sel) });
   },
   selectRange: (ids) => {
     const sel = new Set(get().selectedIds);
     for (const id of ids) sel.add(id);
-    set({ selectedIds: sel });
+    set({ selectedIds: sel, selectedBytes: bytesOf(get().snapshot, sel) });
   },
-  selectAll: (ids) => set({ selectedIds: new Set(ids) }),
-  clearSelection: () => set({ selectedIds: new Set() }),
+  selectAll: (ids) => {
+    const sel = new Set(ids);
+    set({ selectedIds: sel, selectedBytes: bytesOf(get().snapshot, sel) });
+  },
+  clearSelection: () => set({ selectedIds: new Set(), selectedBytes: 0 }),
   openPreview: (id) => set({ previewId: id }),
 
   openDestination: async () => {
@@ -279,13 +292,30 @@ export function attachRecoverEvents(): void {
     useResultsStore.setState({ recoverProgress: p });
   }).catch(() => undefined);
   void listen<RecoverProgressState>(EV_RECOVER_DONE, (p) => {
-    const s = useResultsStore.getState();
-    useResultsStore.setState({ recoverProgress: null, recoverSummary: p, selectedIds: new Set() });
-    void s;
+    useResultsStore.setState({
+      recoverProgress: null,
+      recoverSummary: p,
+      selectedIds: new Set(),
+      selectedBytes: 0,
+    });
   }).catch(() => undefined);
 }
 
 /* ── Derived selectors (pure helpers for the page) ───────────────────── */
+
+/** Byte total of a selection (dirs roll up through `size` already). */
+function bytesOf(
+  snapshot: ScanResultsSnapshot | null,
+  ids: Set<number>,
+): number {
+  if (!snapshot || ids.size === 0) return 0;
+  let b = 0;
+  for (const id of ids) {
+    const n = snapshot.nodes[id];
+    if (n) b += n.size;
+  }
+  return b;
+}
 
 /** Origins hidden by the essential-results mode (the ~65% noise
  * reduction; "Users can switch to complete scan results at any time"). */

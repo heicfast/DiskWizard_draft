@@ -1,0 +1,177 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layout — the app grid (titlebar / sidebar | main) and the shared page
+ * containers: page header pattern, section pattern, responsive density.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.dw-app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--ambient-grad, var(--background));
+  color: var(--text);
+  overflow: hidden;
+}
+
+.dw-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.dw-main {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The page-swap wrapper (App.tsx PageSwap): isolates the entering view
+ * so pages never paint on top of each other. */
+.dw-page-swap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Page containers ─────────────────────────────────────────────────── */
+
+.dw-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--page-pad-top) var(--content-pad) var(--content-pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+}
+
+/* Results (and any full-height 3-pane page) manage their own scroll
+ * regions inside — the page itself does not scroll. */
+.dw-page--fixed {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+/* ── Page header pattern ─────────────────────────────────────────────── */
+
+.dw-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  flex-shrink: 0;
+}
+
+.dw-page-head-copy {
+  min-width: 0;
+  max-width: 640px;
+}
+
+.dw-page-title {
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.18;
+  color: var(--text);
+  margin-top: 6px;
+}
+
+.dw-page-sub {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.dw-page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  padding-top: 22px;
+}
+
+/* ── Section pattern ─────────────────────────────────────────────────── */
+
+.dw-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex-shrink: 0;
+}
+
+.dw-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 24px;
+}
+
+.dw-section-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dw-section-sub {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.dw-link {
+  color: var(--ink-deep);
+  font-size: 13px;
+  font-weight: 600;
+  transition: color var(--dur-micro) var(--ease-out);
+}
+.dw-link:hover {
+  color: var(--ink-strong);
+}
+
+/* ── Density ladder ────────────────────────────────────────────────────
+ * Compensates the fixed chrome so the CONTENT stays proportional at
+ * every supported window size (floor 1180px). */
+
+:root {
+  --page-pad-top: 36px;
+}
+
+@media (max-width: 1560px) {
+  :root {
+    --content-pad: 36px;
+    --page-pad-top: 30px;
+  }
+  .dw-page-title {
+    font-size: 28px;
+  }
+}
+
+@media (max-width: 1360px) {
+  :root {
+    --content-pad: 30px;
+    --page-pad-top: 26px;
+    --sidebar-w: 236px;
+  }
+  .dw-page-title {
+    font-size: 26px;
+  }
+  .dw-page {
+    gap: var(--space-6);
+  }
+}
+
+@media (max-width: 1240px) {
+  :root {
+    --content-pad: 26px;
+    --page-pad-top: 22px;
+    --sidebar-w: 224px;
+    --preview-w: 320px;
+  }
+}
